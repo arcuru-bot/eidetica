@@ -1,0 +1,322 @@
+# Publish workflow — builds artifacts from source and publishes container images.
+#
+# Triggers:
+#   1. workflow_run: After CI passes on main. Pushes `dev`-tagged container
+#      images, warms the Nix binary cache, and tracks binary/container sizes
+#      via Bencher. This runs on every push to main, exercising the same build
+#      and publish pipeline that releases use.
+#
+#   2. workflow_dispatch: Triggered by the release-plz workflow after a release
+#      is created, or manually for retrying a failed release. Accepts a tag name
+#      input and publishes versioned container images for that tag.
+#
+#   3. release (published): Kept as a fallback trigger in case the release is
+#      created with a token that fires events (e.g. a PAT or GitHub App token).
+#
+# Note: release-plz uses GITHUB_TOKEN, so releases it creates do not fire the
+# release event (GitHub Actions limitation). The release-plz workflow explicitly
+# dispatches this workflow instead.
+
+name: Publish
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: ["main"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to retry (e.g. v1.2.3)"
+        required: true
+        type: string
+
+env:
+  REGISTRY_GHCR: ghcr.io
+  REGISTRY_DOCKER: docker.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: Publish (${{ matrix.system }})
+    environment: publish
+    runs-on: ${{ matrix.runner }}
+    if: |
+      github.repository_owner == 'arcuru' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    strategy:
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubicloud-standard-8
+            platform: amd64
+          - system: aarch64-linux
+            runner: ubicloud-standard-8-arm
+            platform: arm64
+      fail-fast: false
+    permissions:
+      contents: read
+      packages: write
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.NIX_CACHE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_CACHE_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Resolve ref
+        id: ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            echo "ref=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "ref=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$RUN_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+        id: nix
+        with:
+          signing-key: ${{ secrets.NIX_CACHE_SIGNING_KEY }}
+
+      # Build release artifacts from source, bypassing our own binary cache to
+      # prevent cache poisoning from affecting published artifacts. Results are
+      # pushed to the cache.
+      - name: Build and push release artifacts
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            ${{ steps.nix.outputs.push-args }} \
+            --option substituters 'https://cache.nixos.org' \
+            -f '.#legacyPackages.${{ matrix.system }}.eidetica.bin'
+          nix-fast-build --skip-cached --no-nom --no-link \
+            ${{ steps.nix.outputs.push-args }} \
+            --option substituters 'https://cache.nixos.org' \
+            -f '.#legacyPackages.${{ matrix.system }}.eidetica.image'
+
+      # Warm the cache with all remaining flake check outputs so subsequent CI
+      # runs are faster. Only needed on the dev path (every push to main) —
+      # release runs only build the release artifacts.
+      - name: Warm CI cache
+        if: github.event_name == 'workflow_run'
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            ${{ steps.nix.outputs.push-args }}
+
+      - name: Install Bencher CLI
+        if: github.event_name == 'workflow_run'
+        uses: bencherdev/bencher@8151077aa7b1bceaac11c4b308265417cae60e2b # v0.5.10
+
+      - name: Track artifact sizes
+        if: github.event_name == 'workflow_run'
+        run: |
+          BINARY_PATH=$(nix build .#eidetica.bin --no-link --print-out-paths)/bin/eidetica
+          bencher run \
+            --project eidetica \
+            --token '${{ secrets.BENCHER_API_TOKEN }}' \
+            --branch main \
+            --testbed '${{ matrix.system }}' \
+            --file-size "$BINARY_PATH" \
+            --adapter json \
+            "echo '{}'"
+
+          IMAGE_PATH=$(nix build .#eidetica.image --no-link --print-out-paths)
+          bencher run \
+            --project eidetica \
+            --token '${{ secrets.BENCHER_API_TOKEN }}' \
+            --branch main \
+            --testbed '${{ matrix.system }}' \
+            --file-size "$IMAGE_PATH" \
+            --adapter json \
+            "echo '{}'"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY_GHCR }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Load and push Nix base image
+        id: nix-image
+        run: |
+          IMAGE_PATH=$(nix build .#eidetica.image --no-link --print-out-paths)
+          # Load image and capture the name
+          LOADED=$(docker load < "$IMAGE_PATH")
+          # Extract image name from "Loaded image: name:tag"
+          NIX_IMAGE=$(echo "$LOADED" | grep -oP 'Loaded image: \K.*')
+          echo "Loaded Nix image: ${NIX_IMAGE}"
+
+          # Push base image to GHCR (buildx needs it accessible from registry)
+          BASE_TAG="nix-base-${{ matrix.platform }}"
+          docker tag "${NIX_IMAGE}" "${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${BASE_TAG}"
+          docker push "${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${BASE_TAG}"
+          echo "base_image=${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${BASE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Determine tags
+        id: tags
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag_name }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            TAGS="dev-${PLATFORM}"
+          else
+            # Release or workflow_dispatch — resolve version from tag
+            VERSION="${RELEASE_TAG#v}"
+            TAGS="${VERSION}-${PLATFORM}"
+            # Add major.minor tag
+            MINOR="${VERSION%.*}"
+            TAGS="${TAGS} ${MINOR}-${PLATFORM}"
+            # Add major tag (skip for v0.x)
+            MAJOR="${MINOR%.*}"
+            if [[ "$MAJOR" != "0" ]]; then
+              TAGS="${TAGS} ${MAJOR}-${PLATFORM}"
+            fi
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Create attestation wrapper Dockerfile
+        run: |
+          # Create a minimal Dockerfile that uses the pushed Nix base image
+          # This allows buildx to add SBOM and provenance attestations
+          echo "FROM ${{ steps.nix-image.outputs.base_image }}" > Dockerfile.attestation
+
+      - name: Build and push with attestations
+        run: |
+          for TAG in ${{ steps.tags.outputs.tags }}; do
+            # Build with buildx to add SBOM and provenance attestations
+            # Push to both registries with attestations embedded
+            docker buildx build \
+              --file Dockerfile.attestation \
+              --sbom=true \
+              --provenance=mode=max \
+              --tag "${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${TAG}" \
+              --tag "${{ env.IMAGE_NAME }}:${TAG}" \
+              --push \
+              .
+          done
+
+  manifest:
+    name: Manifest
+    environment: release
+    runs-on: ubicloud-standard-2
+    needs: build
+    if: github.repository_owner == 'arcuru'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY_GHCR }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine manifest tags
+        id: tags
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag_name }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            TAGS="dev"
+          else
+            VERSION="${RELEASE_TAG#v}"
+            TAGS="${VERSION}"
+            # Add major.minor tag
+            MINOR="${VERSION%.*}"
+            TAGS="${TAGS} ${MINOR}"
+            # Add major tag (skip for v0.x)
+            MAJOR="${MINOR%.*}"
+            if [[ "$MAJOR" != "0" ]]; then
+              TAGS="${TAGS} ${MAJOR}"
+            fi
+            # Only push 'latest' for non-prerelease releases that are the
+            # highest version. This avoids overwriting latest when patching an
+            # older release branch (e.g., releasing v1.2.5 after v1.3.0).
+            if [[ "$EVENT_NAME" == "release" && "$IS_PRERELEASE" != "true" ]]; then
+              LATEST_RELEASE=$(gh api "repos/${REPO}/releases/latest" --jq .tag_name 2>/dev/null | sed 's/^v//' || true)
+              if [[ -z "$LATEST_RELEASE" || "$VERSION" == "$LATEST_RELEASE" ]]; then
+                TAGS="${TAGS} latest"
+              fi
+            fi
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push manifests
+        run: |
+          for TAG in ${{ steps.tags.outputs.tags }}; do
+            # Create multi-arch manifest for GHCR using imagetools (handles manifest lists with attestations)
+            docker buildx imagetools create \
+              --tag "${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${TAG}" \
+              "${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${TAG}-amd64" \
+              "${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}:${TAG}-arm64"
+
+            # Create multi-arch manifest for Docker Hub
+            docker buildx imagetools create \
+              --tag "${{ env.IMAGE_NAME }}:${TAG}" \
+              "${{ env.IMAGE_NAME }}:${TAG}-amd64" \
+              "${{ env.IMAGE_NAME }}:${TAG}-arm64"
+          done
+
+      - name: Cleanup intermediate images
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete the nix-base-* intermediate images from GHCR
+          for PLATFORM in amd64 arm64; do
+            echo "Deleting nix-base-${PLATFORM}..."
+            gh api --method DELETE "/users/${{ github.repository_owner }}/packages/container/eidetica/versions/$(
+              gh api "/users/${{ github.repository_owner }}/packages/container/eidetica/versions" \
+                --jq ".[] | select(.metadata.container.tags[] == \"nix-base-${PLATFORM}\") | .id"
+            )" 2>/dev/null || echo "Could not delete nix-base-${PLATFORM} (may not exist or lack permissions)"
+          done
+
+      - name: Update Docker Hub description
+        if: github.event_name == 'release'
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: arcuru/eidetica
+          short-description: "Decentralized DB. Remember Everything. Everywhere. All At Once."
+          readme-filepath: ./README.md

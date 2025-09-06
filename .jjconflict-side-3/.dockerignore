@@ -1,0 +1,24 @@
+# Build artifacts
+**/target/
+**/*.rs.bk
+/result
+
+# Development tooling
+/.direnv
+/.vscode
+/.idea
+
+# Additional Docker-specific exclusions (files tracked in git but not needed in container)
+.git
+.jj
+.github/
+.forgejo/
+*.md
+!README.md
+*.nix
+flake.lock
+justfile
+.envrc
+docs/
+benches/
+tests/

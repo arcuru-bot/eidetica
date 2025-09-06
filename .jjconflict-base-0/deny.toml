@@ -1,0 +1,40 @@
+[advisories]
+# Check dependencies for security vulnerabilities using the RustSec Advisory Database
+ignore = [
+    # Ignore these unmaintained crates that come from iroh dependencies
+    "RUSTSEC-2023-0089", # atomic-polyfill unmaintained (via iroh)
+    "RUSTSEC-2024-0436", # paste unmaintained (via iroh)
+]
+
+[bans]
+# Allow duplicate versions caused by iroh dependency tree
+multiple-versions = "allow"
+
+[licenses]
+# List of explicitly allowed licenses
+# See https://spdx.org/licenses/ for list of possible licenses
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# The confidence threshold for detecting a license from license text.
+# The higher the value, the more closely the license text must be to the
+# canonical license text of a valid SPDX license file.
+# [possible values: any between 0.0 and 1.0].
+confidence-threshold = 0.95
+# List of exceptions to the license rules
+exceptions = [
+    # Eidetica's own libraries
+    { allow = ["AGPL-3.0-or-later"], crate = "eidetica" },
+    { allow = ["AGPL-3.0-or-later"], crate = "eidetica-bin" },
+    { allow = ["AGPL-3.0-or-later"], crate = "example-chat" },
+    { allow = ["AGPL-3.0-or-later"], crate = "example-todo" },
+]

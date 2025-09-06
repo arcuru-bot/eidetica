@@ -1,0 +1,289 @@
+{
+  description = "Eidetica: Remember Everything";
+
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+
+    crane.url = "github:ipetkov/crane";
+
+    # Needed because rust-overlay, normally used by crane, doesn't have llvm-tools for coverage
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.rust-analyzer-src.follows = "";
+    };
+
+    # Flake helper for better organization with modules
+    flake-parts = {
+      url = "github:hercules-ci/flake-parts";
+      inputs.nixpkgs-lib.follows = "nixpkgs";
+    };
+
+    # For creating a universal `nix fmt`
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  # Cachix binary cache configuration
+  nixConfig = {
+    extra-substituters = ["https://eidetica.cachix.org"];
+    extra-trusted-public-keys = ["eidetica.cachix.org-1:EDr+F/9jkD8aeThjJ4W3+4Yj3MH9fPx6slVLxF1HNSs="];
+  };
+
+  outputs = inputs @ {flake-parts, ...}:
+    flake-parts.lib.mkFlake {inherit inputs;} {
+      # Import flakes that have a flake-parts module
+      imports = [
+        inputs.flake-parts.flakeModules.easyOverlay
+        inputs.treefmt-nix.flakeModule
+      ];
+
+      # System-level outputs (not per-system)
+      flake = {
+        nixosModules = {
+          default = import ./nix/nixos-module.nix;
+          eidetica = import ./nix/nixos-module.nix;
+        };
+
+        homeManagerModules = {
+          default = import ./nix/home-manager.nix;
+          eidetica = import ./nix/home-manager.nix;
+        };
+      };
+
+      systems = [
+        "aarch64-linux"
+        "x86_64-linux"
+        "aarch64-darwin"
+        "x86_64-darwin"
+      ];
+
+      perSystem = {
+        config,
+        system,
+        pkgs,
+        lib,
+        ...
+      }: let
+        # Import toolchain setup
+        toolchain = import ./nix/toolchain.nix {inherit inputs system pkgs;};
+        inherit
+          (toolchain)
+          fenixNightly
+          rustSrc
+          craneLib
+          craneLibNightly
+          baseArgs
+          baseArgsNightly
+          releaseArgs
+          benchArgs
+          debugArgs
+          debugArgsNightly
+          asanArgs
+          lsanArgs
+          ;
+
+        # Import package groups
+        mainPkgs = import ./nix/packages/main.nix {inherit craneLib releaseArgs;};
+
+        testPkgs = import ./nix/packages/test.nix {inherit craneLib debugArgs baseArgs pkgs lib;};
+        coveragePkgs = import ./nix/packages/coverage.nix {inherit craneLibNightly baseArgsNightly fenixNightly pkgs lib;};
+        sanitizePkgs = import ./nix/packages/sanitize.nix {inherit craneLibNightly debugArgsNightly asanArgs lsanArgs fenixNightly pkgs lib;};
+        docPkgs = import ./nix/packages/doc.nix {inherit craneLib debugArgs pkgs lib;};
+        lintPkgs = import ./nix/packages/lint.nix {inherit craneLib craneLibNightly baseArgs debugArgs debugArgsNightly pkgs;};
+        standalonePkgs = import ./nix/packages/standalone.nix {inherit craneLib releaseArgs benchArgs baseArgs pkgs;};
+
+        # Import other modules
+        containerPkgs = import ./nix/container.nix {
+          inherit pkgs;
+          inherit (mainPkgs) eidetica-bin;
+        };
+
+        nixTests = import ./nix/tests.nix {
+          inherit pkgs lib;
+          inherit (mainPkgs) eidetica-bin;
+          eidetica-image = containerPkgs.image;
+          nixosModule = import ./nix/nixos-module.nix;
+          homeManagerModule = import ./nix/home-manager.nix;
+        };
+
+        # Helper to create aggregate packages
+        mkAggregate = name: packages:
+          pkgs.symlinkJoin {
+            inherit name;
+            paths = builtins.attrValues packages;
+          };
+        mkAll = name: mkAggregate "${name}-all";
+      in {
+        # Hierarchical package structure via legacyPackages
+        # Pattern: nix build .#<group>.<target> for specific targets
+        #          nix build .#<group>.default for sensible default
+        #          nix build .#<group>.all for all targets in group
+        #          nix run .#<group>.<target> for interactive runners (via apps)
+        legacyPackages = {
+          # Test packages - nested structure with .default and .all aggregates
+          # nix build .#test.default (sqlite), .#test.sqlite, .#test.all
+          test =
+            testPkgs.checks
+            // {
+              default = testPkgs.checks.sqlite;
+              all = mkAll "test" testPkgs.checks;
+              inherit (testPkgs) artifacts;
+            };
+
+          # Bench package - nix build .#bench runs hermetic benchmarks
+          # Use `cargo bench` for local development (no interactive runner available)
+          inherit (standalonePkgs) bench;
+
+          # Coverage group - nix build .#coverage.default (sqlite), .#coverage.sqlite, .#coverage.all
+          coverage =
+            coveragePkgs.packages
+            // {
+              default = coveragePkgs.packages.sqlite;
+              all = mkAll "coverage" coveragePkgs.packages;
+            };
+
+          # Sanitizer group - nix build .#sanitize.default (asan+lsan), .#sanitize.asan, .#sanitize.all
+          sanitize =
+            sanitizePkgs.packages
+            // lib.optionalAttrs (sanitizePkgs.packages != {}) {
+              default = mkAll "sanitize" sanitizePkgs.packagesFast;
+              all = mkAll "sanitize" sanitizePkgs.packages;
+            };
+
+          # Documentation group - nix build .#doc.default (fast), .#doc.api, .#doc.book, .#doc.book.test
+          doc =
+            docPkgs.packages
+            // {
+              default = mkAll "doc" docPkgs.packagesFast;
+              all = mkAll "doc" (removeAttrs docPkgs.packages ["book"]) // {inherit (docPkgs.packages) book;};
+            };
+
+          # Lint group - nix build .#lint.default (fast), .#lint.clippy, .#lint.all
+          lint =
+            lintPkgs.packages
+            // {
+              default = mkAll "lint" lintPkgs.packagesFast;
+              all = mkAll "lint" lintPkgs.packages;
+            };
+
+          # Main eidetica packages with nested structure
+          # nix build .#eidetica (binary), .#eidetica.lib, .#eidetica.image
+          eidetica =
+            mainPkgs.eidetica
+            // {
+              lib = mainPkgs.eidetica-lib;
+              inherit (containerPkgs) image;
+            };
+
+          # Default package (eidetica binary)
+          default = mainPkgs.eidetica;
+
+          # Build artifacts (cached)
+          inherit (standalonePkgs) min-versions;
+
+          # Integration tests (Linux only) - nix build .#integration.default (all), .#integration.nixos
+          integration = lib.optionalAttrs pkgs.stdenv.isLinux (
+            nixTests.integration
+            // {
+              default = mkAll "integration" nixTests.integration;
+              all = mkAll "integration" nixTests.integration;
+            }
+          );
+
+          # Eval tests - nix build .#eval.default (all), .#eval.nixos, .#eval.hm
+          eval =
+            nixTests.eval
+            // {
+              default = mkAll "eval" nixTests.eval;
+              all = mkAll "eval" nixTests.eval;
+            };
+        };
+
+        # CI checks - packages that run during `nix flake check`
+        # Each check builds the corresponding .default from legacyPackages
+        # Excluded for performance: coverage, bench, integration, sanitize
+        checks = {
+          inherit (mainPkgs) eidetica eidetica-lib;
+          test = testPkgs.checks.sqlite;
+          lint = mkAggregate "lint" lintPkgs.packagesFast;
+          doc = mkAggregate "doc" docPkgs.packagesFast;
+          eval = mkAggregate "eval" nixTests.eval;
+        };
+
+        # Formatting configuration via treefmt
+        treefmt = {
+          projectRootFile = "flake.nix";
+          programs = {
+            # Nix formatting
+            alejandra.enable = true;
+
+            # Markdown, JSON, YAML formatting
+            prettier = {
+              enable = true;
+              excludes = [
+                "docs/book/\\.html"
+              ];
+            };
+
+            # Rust formatting
+            rustfmt.enable = true;
+
+            # Shell script formatting
+            shfmt.enable = true;
+
+            # Spell checking
+            typos = {
+              enable = true;
+              configFile = ".config/typos.toml";
+            };
+          };
+        };
+
+        # Application definitions (for nix run)
+        # These provide interactive runners that accept arguments
+        # Note: apps must be flat - nested structures go through legacyPackages
+        apps = let
+          mkApp = program: description: {
+            type = "app";
+            inherit program;
+            meta = {inherit description;};
+          };
+        in
+          {
+            default = mkApp "${mainPkgs.eidetica}" "Run the Eidetica binary";
+            eidetica = mkApp "${mainPkgs.eidetica}" "Run the Eidetica database";
+
+            # Test runners - flat names (nested access via legacyPackages)
+            # nix run .#test (default: sqlite), nix run .#test-inmemory, etc.
+            test = mkApp "${testPkgs.runners.sqlite}/bin/test-runner-sqlite" "Run tests (sqlite backend)";
+            test-inmemory = mkApp "${testPkgs.runners.inmemory}/bin/test-runner-inmemory" "Run tests with inmemory backend";
+            test-sqlite = mkApp "${testPkgs.runners.sqlite}/bin/test-runner-sqlite" "Run tests with SQLite backend";
+            test-all = mkApp "${testPkgs.runners.all}/bin/test-runner-all" "Run tests with all backends";
+          }
+          // lib.optionalAttrs pkgs.stdenv.isLinux {
+            test-postgres = mkApp "${testPkgs.runners.postgres}/bin/test-runner-postgres" "Run tests with PostgreSQL backend";
+          };
+
+        # Overlay attributes for easy access to packages
+        overlayAttrs = {
+          inherit (config.legacyPackages) eidetica;
+        };
+
+        # Development shell configuration
+        devShells.default = import ./nix/dev-shell.nix {
+          inherit pkgs rustSrc fenixNightly;
+          # Pass the full list of packages so the devshell can pickup the dependencies
+          devPackages =
+            {inherit (mainPkgs) eidetica eidetica-lib;}
+            // testPkgs.checks
+            // lintPkgs.packages
+            // docPkgs.packages
+            // coveragePkgs.packages
+            // sanitizePkgs.packages;
+        };
+      };
+    };
+}
