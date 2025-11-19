@@ -1,0 +1,224 @@
+use std::{fs, io::Write, path::Path, sync::Arc};
+
+use tempfile::TempDir;
+
+use eidetica::{
+    Entry, Result,
+    backend::{BackendImpl, database::InMemory},
+};
+
+async fn save_backend(backend: &InMemory, path: &Path) -> Result<()> {
+    backend.save_to_file(path).await
+}
+
+async fn load_backend(path: &Path) -> Result<InMemory> {
+    InMemory::load_from_file(path).await
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // file I/O not available with Miri isolation enabled
+async fn test_in_memory_backend_save_and_load() {
+    // Create a temporary file path
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("test_backend_save.json");
+
+    // Setup: Create a backend with some data
+    {
+        let backend = Arc::new(InMemory::new());
+        let entry = Entry::root_builder()
+            .build()
+            .expect("Root entry should build successfully");
+        backend.put_verified(entry).await.unwrap();
+
+        // Save to file
+        let save_result = save_backend(&backend, &file_path).await;
+        assert!(save_result.is_ok());
+    }
+
+    // Verify file exists
+    assert!(file_path.exists());
+
+    // Load from file
+    let load_result = load_backend(&file_path).await;
+    assert!(load_result.is_ok());
+    let loaded_backend = load_result.unwrap();
+
+    // Verify data was loaded correctly
+    let roots = loaded_backend.all_roots().await.unwrap();
+    assert_eq!(roots.len(), 1);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // file I/O not available with Miri isolation enabled
+async fn test_load_non_existent_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("non_existent_file.json");
+    // File doesn't exist by default in a new temp dir
+
+    // Load
+    let backend = load_backend(&path).await;
+
+    // Verify it's empty
+    assert_eq!(backend.unwrap().all_roots().await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // file I/O not available with Miri isolation enabled
+async fn test_load_invalid_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("invalid_file.json");
+
+    // Create an invalid JSON file
+    {
+        let mut file = fs::File::create(&path).unwrap();
+        writeln!(file, "{{invalid json").unwrap();
+    }
+
+    // Attempt to load
+    let result = load_backend(&path).await;
+
+    // Verify it's an error
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // file I/O not available with Miri isolation enabled
+async fn test_save_load_with_various_entries() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("test_various_entries.json");
+
+    // Setup a tree with multiple entries
+    let backend = Arc::new(InMemory::new());
+
+    // Top-level root
+    let root_entry = Entry::root_builder()
+        .build()
+        .expect("Root entry should build successfully");
+    let root_id = root_entry.id();
+    backend.put_verified(root_entry).await.unwrap();
+
+    // Child 1
+    let child1 = Entry::builder(root_id.clone())
+        .add_parent(root_id.clone())
+        .set_subtree_data("child", "1")
+        .build()
+        .expect("Child entry should build successfully");
+    let child1_id = child1.id();
+    backend.put_verified(child1).await.unwrap();
+
+    // Child 2
+    let child2 = Entry::builder(root_id.clone())
+        .add_parent(root_id.clone())
+        .set_subtree_data("child", "2")
+        .build()
+        .expect("Child entry should build successfully");
+    let child2_id = child2.id();
+    backend.put_verified(child2).await.unwrap();
+
+    // Grandchild (child of child1)
+    let grandchild = Entry::builder(root_id.clone())
+        .add_parent(child1_id.clone())
+        .build()
+        .expect("Grandchild entry should build successfully");
+    let grandchild_id = grandchild.id();
+    backend.put_verified(grandchild).await.unwrap();
+
+    // Entry with subtree
+    let entry_with_subtree = Entry::builder(root_id.clone())
+        .add_parent(root_id.clone())
+        .set_subtree_data("subtree1", "subtree_data")
+        .build()
+        .expect("Entry with subtree should build successfully");
+    let entry_with_subtree_id = entry_with_subtree.id();
+    backend.put_verified(entry_with_subtree).await.unwrap();
+
+    // Save to file
+    save_backend(&backend, &file_path).await.unwrap();
+
+    // Load back into a new backend
+    let loaded_backend = load_backend(&file_path).await.unwrap();
+
+    // Verify loaded data
+
+    // Check we have the correct root
+    let loaded_roots = loaded_backend.all_roots().await.unwrap();
+    assert_eq!(loaded_roots.len(), 1);
+    assert_eq!(loaded_roots[0], root_id);
+
+    // Check we can retrieve all entries
+    let loaded_tree = loaded_backend.get_tree(&root_id).await.unwrap();
+    assert_eq!(loaded_tree.len(), 5); // root + 2 children + grandchild + entry_with_subtree
+
+    // Check specific entries can be retrieved
+    let _loaded_root = loaded_backend.get(&root_id).await.unwrap();
+    // Entry is a pure data structure - it shouldn't know about settings
+    // Settings logic is handled by Transaction
+
+    let _loaded_grandchild = loaded_backend.get(&grandchild_id).await.unwrap();
+    // Entry is a pure data structure - it shouldn't know about settings
+    // Settings logic is handled by Transaction
+
+    let loaded_entry_with_subtree = loaded_backend.get(&entry_with_subtree_id).await.unwrap();
+    assert_eq!(
+        loaded_entry_with_subtree.data("subtree1").unwrap(),
+        "subtree_data"
+    );
+
+    // Check tips match
+    let orig_tips = backend.get_tips(&root_id).await.unwrap();
+    let loaded_tips = loaded_backend.get_tips(&root_id).await.unwrap();
+    assert_eq!(orig_tips.len(), loaded_tips.len());
+
+    // Should have 3 tips (grandchild, entry_with_subtree, and child2)
+    assert_eq!(loaded_tips.len(), 3);
+    assert!(loaded_tips.contains(&grandchild_id));
+    assert!(loaded_tips.contains(&entry_with_subtree_id));
+    assert!(loaded_tips.contains(&child2_id));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // file I/O not available with Miri isolation enabled
+async fn test_load_wrong_version_fails() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("wrong_version.json");
+
+    // Write a valid JSON structure but with wrong version
+    {
+        let mut file = fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            r#"{{"_v":99,"entries":{{}},"verification_status":{{}},"tips":{{}}}}"#
+        )
+        .unwrap();
+    }
+
+    let result = load_backend(&path).await;
+    assert!(
+        result.is_err(),
+        "Should fail to load file with wrong version"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // file I/O not available with Miri isolation enabled
+async fn test_load_missing_version_defaults_to_v0() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("missing_version.json");
+
+    // Write JSON without version field - should default to v0
+    {
+        let mut file = fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            r#"{{"entries":{{}},"verification_status":{{}},"tips":{{}}}}"#
+        )
+        .unwrap();
+    }
+
+    let result = load_backend(&path).await;
+    assert!(
+        result.is_ok(),
+        "Should load file without version (defaults to v0): {:?}",
+        result.err()
+    );
+}
