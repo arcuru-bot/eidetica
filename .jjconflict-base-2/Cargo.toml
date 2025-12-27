@@ -1,0 +1,94 @@
+[workspace]
+members = ["crates/lib", "crates/bin", "examples/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+authors = ["Patrick Jackson <patrick@jackson.dev>"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/arcuru/eidetica"
+homepage = "https://eidetica.dev"
+readme = "README.md"
+description = "Decentralized DB. Remember Everything. Everywhere. All At Once."
+
+[workspace.metadata.crane]
+name = "eidetica"
+
+[workspace.dependencies]
+# Shared dependencies
+chrono = "0.4.35"  # from_timestamp_millis
+base64ct = { version = "1.8", features = ["std"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["rand_core", "serde", "zeroize"] }
+rand = "0.8"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+blake3 = "1.8"
+cid = { version = "0.11", features = ["serde", "std"] }
+multihash-codetable = { version = "0.1", features = ["sha2", "blake3"] }
+serde_ipld_dagcbor = "0.6"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4"] }
+yrs = "0.25"
+tempfile = "3"
+criterion = "0.8"
+ctor = "0.6"
+# User system cryptography
+argon2 = "0.5"
+aes-gcm = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+handle_trait = "1.1"
+# Networking dependencies
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "io-util",
+    "signal",
+] }
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+] }
+tower-cookies = "0.11"
+reqwest = { version = "0.12", features = [
+    "json",
+    "rustls-tls",
+], default-features = false }
+async-trait = "0.1"
+iroh = { version = "0.96", default-features = false }
+iroh-tickets = "0.3"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "any"] }
+# CLI dependencies
+clap = { version = "4.5", features = ["derive", "env"] }
+url = "2.5"
+# Example-only dependencies
+ratatui = "0.30"
+crossterm = "0.29"
+# Transitive dep version floors (upstream deps specify loose requirements)
+time = "0.3.37"  # Rust 1.80+ compat (0.3.35), Month::length (0.3.37)
+postcard = "1.1.2"  # Uses postcard-derive 0.2.x
+postcard-derive = "0.2.1"  # Uses syn 2.0 (0.2.0 uses syn 1.0)
+z32 = "1.1.1"  # StdError impl for Z32Error
+instability = "0.3.4"  # Impl block support
+
+# Keep the local package as debug build for fast iteration
+# But compile dependencies with optimizations for better performance
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,33 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    name: Benchmark
+    runs-on: ubicloud-standard-4
+    if: github.repository_owner == 'arcuru'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Install Bencher CLI
+        uses: bencherdev/bencher@8151077aa7b1bceaac11c4b308265417cae60e2b # v0.5.10
+
+      - name: Run Benchmarks
+        if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+        run: |
+          nix develop --command bencher run \
+            --project eidetica \
+            --token '${{ secrets.BENCHER_API_TOKEN }}' \
+            --branch main \
+            --testbed ubicloud-standard-4 \
+            --adapter rust_criterion \
+            --err \
+            "cargo bench --workspace"
