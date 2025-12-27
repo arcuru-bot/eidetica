@@ -43,7 +43,7 @@ use crate::{
     entry::{Entry, EntryBuilder, ID},
     height::HeightStrategy,
     instance::WriteSource,
-    store::{Registry, SettingsStore, StoreError},
+    store::{Registry, SettingsStore, StoreError, TableRowOp},
 };
 
 /// Creates a synthetic entry ID for multi-tip merged CRDT state caching.
@@ -159,6 +159,10 @@ pub struct Transaction {
     /// When an encryptor is registered, the transaction automatically encrypts writes
     /// and decrypts reads for that subtree
     encryptors: Arc<Mutex<HashMap<String, Box<dyn Encryptor>>>>,
+    /// Row operations staged for Table stores
+    /// Maps store name -> list of row operations performed in this transaction
+    /// This is used to serialize entries in row-ops format instead of full Doc
+    table_row_ops: Arc<Mutex<HashMap<String, Vec<TableRowOp>>>>,
 }
 
 impl Transaction {
@@ -215,6 +219,7 @@ impl Transaction {
             db: database.clone(),
             provided_signing_key: None,
             encryptors: Arc::new(Mutex::new(HashMap::new())),
+            table_row_ops: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -497,6 +502,46 @@ impl Transaction {
         }
 
         Ok(())
+    }
+
+    /// Stages a row operation for a Table store.
+    ///
+    /// This records the operation in the transaction's table_row_ops list AND updates
+    /// the subtree data with the serialized ops list. This allows both:
+    /// - In-transaction reads via get_table_ops()
+    /// - Proper entry serialization on commit
+    ///
+    /// # Arguments
+    /// * `store` - The name of the Table store
+    /// * `op` - The row operation to stage
+    pub(crate) async fn stage_table_op(&self, store: &str, op: TableRowOp) -> Result<()> {
+        // Add op to the ops list
+        {
+            let mut ops_ref = self.table_row_ops.lock().unwrap();
+            ops_ref.entry(store.to_string()).or_default().push(op);
+        }
+
+        // Get the full ops list and serialize to subtree data
+        let serialized = {
+            let ops_ref = self.table_row_ops.lock().unwrap();
+            let ops: &[TableRowOp] = ops_ref.get(store).map(|v| v.as_slice()).unwrap_or(&[]);
+            serde_json::to_string(ops).map_err(|e| StoreError::SerializationFailed {
+                store: store.to_string(),
+                reason: format!("Failed to serialize table row ops: {e}"),
+            })?
+        };
+
+        // Update subtree data with serialized ops
+        self.update_subtree(store, &serialized).await
+    }
+
+    /// Gets the row operations staged for a Table store in this transaction.
+    ///
+    /// Returns the list of operations in order they were performed.
+    /// Used by Table::get() for in-transaction reads.
+    pub(crate) fn get_table_ops(&self, store: &str) -> Vec<TableRowOp> {
+        let ops_ref = self.table_row_ops.lock().unwrap();
+        ops_ref.get(store).cloned().unwrap_or_default()
     }
 
     /// Gets a handle to a specific `Store` for modification within this transaction.
@@ -966,7 +1011,19 @@ impl Transaction {
     pub(crate) async fn get_full_state_cached(&self, subtree_name: &str) -> Result<Doc> {
         // Check if we're at current tips - cache only works at current tips
         if !self.is_at_current_tips().await? {
-            return self.get_full_state(subtree_name).await;
+            // For historical transactions, get subtree tips from entry builder
+            // and build state from row ops entries
+            let tips = {
+                let builder_ref = self.entry_builder.lock().unwrap();
+                let builder = builder_ref
+                    .as_ref()
+                    .ok_or(TransactionError::TransactionAlreadyCommitted)?;
+                builder.subtree_parents(subtree_name).unwrap_or_default()
+            };
+            if tips.is_empty() {
+                return Ok(Doc::default());
+            }
+            return self.build_state_from_row_ops(subtree_name, &tips).await;
         }
 
         let backend = self.db.backend()?;
@@ -1008,60 +1065,22 @@ impl Transaction {
             }
             Ok(doc)
         } else {
-            // Cache is invalid - compute full state and rebuild cache
-            let doc: Doc = self.get_full_state(subtree_name).await?;
-            self.rebuild_table_cache(subtree_name, &doc, &current_tips)
+            // Cache is invalid - build cache from row-ops entries
+            self.build_table_cache_from_entries(subtree_name, &current_tips)
                 .await?;
+
+            // Reconstruct Doc from cached rows
+            let cached_rows = backend.get_all_cached_rows(tree_id, subtree_name).await?;
+            let mut doc = Doc::new();
+            for (uuid, row) in cached_rows {
+                if row.is_tombstone {
+                    doc.remove(&uuid);
+                } else {
+                    doc.set(&uuid, row.data);
+                }
+            }
             Ok(doc)
         }
-    }
-
-    /// Rebuilds the table cache from a computed Doc state.
-    ///
-    /// This clears the existing cache and rebuilds it from the provided Doc,
-    /// then updates the cached tips to the provided tips.
-    pub(crate) async fn rebuild_table_cache(
-        &self,
-        subtree_name: &str,
-        doc: &Doc,
-        tips: &[ID],
-    ) -> Result<()> {
-        use crate::backend::CachedRow;
-
-        let backend = self.db.backend()?;
-        let tree_id = self.db.root_id();
-
-        // Clear existing cache
-        backend.clear_cached_rows(tree_id, subtree_name).await?;
-
-        // For now, use 0 as height - this is just for provenance metadata
-        // In the future, this could track per-row provenance more precisely
-        // by querying the actual height of the entry that last modified each row
-        let tip_height = 0usize;
-
-        // Rebuild cache from Doc
-        // Note: doc.iter() only returns non-tombstone entries
-        // We also need to handle tombstones from the children directly
-        for (uuid, value) in doc.iter() {
-            if let Some(text) = value.as_text() {
-                let cached_row = CachedRow {
-                    data: text.to_string(),
-                    is_tombstone: false,
-                    last_modified_entry_id: tips.first().cloned().unwrap_or_default(),
-                    last_modified_height: tip_height,
-                };
-                backend
-                    .upsert_cached_row(tree_id, subtree_name, uuid, &cached_row)
-                    .await?;
-            }
-        }
-
-        // Update cached tips
-        backend
-            .set_cached_tips(tree_id, subtree_name, tips.to_vec())
-            .await?;
-
-        Ok(())
     }
 
     /// Checks if the table cache is valid for a given store.
@@ -1162,12 +1181,168 @@ impl Transaction {
             return Ok(true);
         }
 
-        // Rebuild cache
-        let doc: Doc = self.get_full_state(subtree_name).await?;
-        self.rebuild_table_cache(subtree_name, &doc, &current_tips)
+        // Rebuild cache from entries (cold start)
+        self.build_table_cache_from_entries(subtree_name, &current_tips)
             .await?;
 
         Ok(true)
+    }
+
+    /// Builds the table cache by walking entries from tips.
+    ///
+    /// This is the "cold start" path - it walks all entries reachable from tips
+    /// in reverse order (highest height first) and applies row operations.
+    /// First occurrence per UUID wins (LWW with height/entry_id).
+    ///
+    /// This method does NOT require loading the full table into memory.
+    pub(crate) async fn build_table_cache_from_entries(
+        &self,
+        subtree_name: &str,
+        tips: &[ID],
+    ) -> Result<()> {
+        use crate::backend::CachedRow;
+        use crate::store::RowOpKind;
+        use std::collections::HashSet;
+
+        let backend = self.db.backend()?;
+        let tree_id = self.db.root_id();
+
+        // Clear existing cache
+        backend.clear_cached_rows(tree_id, subtree_name).await?;
+
+        // Get all entries reachable from tips
+        // Backend returns entries sorted by height ascending
+        let entries = backend
+            .get_store_from_tips(tree_id, subtree_name, tips)
+            .await?;
+
+        // Process in reverse order (highest height first) so first occurrence per UUID wins
+        // Track seen UUIDs - first occurrence (highest in sort order) wins
+        let mut seen: HashSet<String> = HashSet::new();
+
+        // Iterate in reverse - entries are sorted ascending, we want descending
+        for entry in entries.into_iter().rev() {
+            let entry_id = entry.id().clone();
+            // Use position in reversed list as proxy for height (higher = later)
+            let entry_height = 0usize; // Height is computed by backend, we use entry_id for LWW
+
+            // Get the subtree data for this store
+            let raw_data = match entry.data(subtree_name) {
+                Ok(d) => d,
+                Err(_) => continue, // Entry doesn't touch this store
+            };
+
+            // Decrypt if encrypted
+            let data_str = match self.decrypt_if_needed(subtree_name, raw_data) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Parse as row ops
+            let ops: Vec<TableRowOp> = match serde_json::from_str(&data_str) {
+                Ok(ops) => ops,
+                Err(_) => continue, // Skip entries with unparseable data
+            };
+
+            // Apply ops (but only if we haven't seen this UUID yet)
+            for op in ops {
+                if seen.contains(&op.uuid) {
+                    continue; // Already have the winning value
+                }
+                seen.insert(op.uuid.clone());
+
+                let cached_row = match &op.kind {
+                    RowOpKind::Set { data } => CachedRow {
+                        data: data.clone(),
+                        is_tombstone: false,
+                        last_modified_entry_id: entry_id.clone(),
+                        last_modified_height: entry_height,
+                    },
+                    RowOpKind::Delete => CachedRow {
+                        data: String::new(),
+                        is_tombstone: true,
+                        last_modified_entry_id: entry_id.clone(),
+                        last_modified_height: entry_height,
+                    },
+                };
+
+                backend
+                    .upsert_cached_row(tree_id, subtree_name, &op.uuid, &cached_row)
+                    .await?;
+            }
+        }
+
+        // Update cached tips
+        backend
+            .set_cached_tips(tree_id, subtree_name, tips.to_vec())
+            .await?;
+
+        Ok(())
+    }
+
+    /// Builds a Doc from row-ops entries without caching (for historical reads).
+    ///
+    /// This walks entries from the given tips and applies row operations to build
+    /// a Doc. Used when cache is not applicable (historical transactions).
+    pub(crate) async fn build_state_from_row_ops(
+        &self,
+        subtree_name: &str,
+        tips: &[ID],
+    ) -> Result<Doc> {
+        use crate::store::RowOpKind;
+        use std::collections::HashSet;
+
+        let backend = self.db.backend()?;
+        let tree_id = self.db.root_id();
+
+        // Get all entries reachable from tips
+        let entries = backend
+            .get_store_from_tips(tree_id, subtree_name, tips)
+            .await?;
+
+        // Build Doc from row ops
+        let mut doc = Doc::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        // Process in reverse order (highest height first)
+        for entry in entries.into_iter().rev() {
+            // Get the subtree data for this store
+            let raw_data = match entry.data(subtree_name) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Decrypt if encrypted
+            let data_str = match self.decrypt_if_needed(subtree_name, raw_data) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Parse as row ops
+            let ops: Vec<TableRowOp> = match serde_json::from_str(&data_str) {
+                Ok(ops) => ops,
+                Err(_) => continue,
+            };
+
+            // Apply ops
+            for op in ops {
+                if seen.contains(&op.uuid) {
+                    continue;
+                }
+                seen.insert(op.uuid.clone());
+
+                match &op.kind {
+                    RowOpKind::Set { data } => {
+                        doc.set(&op.uuid, data.clone());
+                    }
+                    RowOpKind::Delete => {
+                        doc.remove(&op.uuid);
+                    }
+                }
+            }
+        }
+
+        Ok(doc)
     }
 
     /// Commits the transaction, finalizing and persisting the entry to the backend.
