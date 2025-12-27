@@ -792,3 +792,39 @@ pub async fn set_cached_tips(
 
     Ok(())
 }
+
+// === Private Key Stub Implementations ===
+//
+// These are stub implementations that don't persist private keys.
+// Full implementation would require a private_keys table in the schema.
+
+/// Store a private key (stub - not implemented for SQL backend)
+pub async fn store_private_key(
+    _backend: &SqlxBackend,
+    _key_name: &str,
+    _private_key: ed25519_dalek::SigningKey,
+) -> Result<()> {
+    // Stub implementation - private keys should be stored via instance metadata
+    Ok(())
+}
+
+/// Get a private key (stub - not implemented for SQL backend)
+pub async fn get_private_key(
+    _backend: &SqlxBackend,
+    _key_name: &str,
+) -> Result<Option<ed25519_dalek::SigningKey>> {
+    // Stub implementation - private keys should be retrieved via instance metadata
+    Ok(None)
+}
+
+/// List all private keys (stub - not implemented for SQL backend)
+pub async fn list_private_keys(_backend: &SqlxBackend) -> Result<Vec<String>> {
+    // Stub implementation - private keys should be managed via instance metadata
+    Ok(Vec::new())
+}
+
+/// Remove a private key (stub - not implemented for SQL backend)
+pub async fn remove_private_key(_backend: &SqlxBackend, _key_name: &str) -> Result<()> {
+    // Stub implementation - private keys should be managed via instance metadata
+    Ok(())
+}

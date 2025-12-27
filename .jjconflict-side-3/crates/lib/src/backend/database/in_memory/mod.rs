@@ -16,6 +16,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -317,6 +318,37 @@ impl BackendImpl for InMemory {
         tips: &[ID],
     ) -> Result<Vec<Entry>> {
         storage::get_store_from_tips(self, tree, subtree, tips).await
+    }
+
+    async fn get_entries_between_tips(
+        &self,
+        tree: &ID,
+        store: &str,
+        old_tips: &[ID],
+        new_tips: &[ID],
+    ) -> Result<Vec<Entry>> {
+        storage::get_entries_between_tips(self, tree, store, old_tips, new_tips).await
+    }
+
+    async fn store_private_key(&self, _key_name: &str, _private_key: SigningKey) -> Result<()> {
+        // Private keys are stored in instance_metadata for InMemory backend
+        // This method is a no-op since InMemory stores keys differently
+        Ok(())
+    }
+
+    async fn get_private_key(&self, _key_name: &str) -> Result<Option<SigningKey>> {
+        // Private keys are stored in instance_metadata for InMemory backend
+        Ok(None)
+    }
+
+    async fn list_private_keys(&self) -> Result<Vec<String>> {
+        // Private keys are stored in instance_metadata for InMemory backend
+        Ok(Vec::new())
+    }
+
+    async fn remove_private_key(&self, _key_name: &str) -> Result<()> {
+        // Private keys are stored in instance_metadata for InMemory backend
+        Ok(())
     }
 
     async fn get_instance_metadata(&self) -> Result<Option<InstanceMetadata>> {

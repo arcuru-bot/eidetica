@@ -353,3 +353,96 @@ pub(crate) fn get_store_from_tips(
 
     Ok(result)
 }
+
+/// Retrieves entries reachable from new_tips but not reachable from old_tips.
+///
+/// This is used for incremental cache updates - it finds the "diff" of entries
+/// that need to be processed when tips change.
+pub(crate) async fn get_entries_between_tips(
+    backend: &InMemory,
+    tree: &ID,
+    subtree: &str,
+    old_tips: &[ID],
+    new_tips: &[ID],
+) -> Result<Vec<Entry>> {
+    // Step 1: Collect all entries reachable from old_tips
+    let mut old_reachable = std::collections::HashSet::new();
+    {
+        let entries = backend.entries.read().await;
+        let mut to_process = std::collections::VecDeque::new();
+
+        for tip in old_tips {
+            if let Some(entry) = entries.get(tip)
+                && entry.in_tree(tree) && entry.in_subtree(subtree) {
+                    to_process.push_back(tip.clone());
+                }
+        }
+
+        while let Some(current_id) = to_process.pop_front() {
+            if old_reachable.contains(&current_id) {
+                continue;
+            }
+            old_reachable.insert(current_id.clone());
+
+            if let Some(entry) = entries.get(&current_id)
+                && entry.in_tree(tree) && entry.in_subtree(subtree)
+                    && let Ok(store_parents) = entry.subtree_parents(subtree) {
+                        for parent in store_parents {
+                            if !old_reachable.contains(&parent) {
+                                to_process.push_back(parent);
+                            }
+                        }
+                    }
+        }
+    }
+
+    // Step 2: Collect entries reachable from new_tips that are NOT in old_reachable
+    let mut result = Vec::new();
+    {
+        let entries = backend.entries.read().await;
+        let mut to_process = std::collections::VecDeque::new();
+        let mut processed = std::collections::HashSet::new();
+
+        for tip in new_tips {
+            if let Some(entry) = entries.get(tip)
+                && entry.in_tree(tree) && entry.in_subtree(subtree) {
+                    to_process.push_back(tip.clone());
+                }
+        }
+
+        while let Some(current_id) = to_process.pop_front() {
+            if processed.contains(&current_id) {
+                continue;
+            }
+
+            // If this entry is in the old set, skip it and all its ancestors
+            if old_reachable.contains(&current_id) {
+                processed.insert(current_id);
+                continue;
+            }
+
+            if let Some(entry) = entries.get(&current_id)
+                && entry.in_tree(tree) && entry.in_subtree(subtree) {
+                    // Add subtree parents to be processed
+                    if let Ok(store_parents) = entry.subtree_parents(subtree) {
+                        for parent in store_parents {
+                            if !processed.contains(&parent) {
+                                to_process.push_back(parent);
+                            }
+                        }
+                    }
+
+                    // Include this entry in the result (it's in new but not old)
+                    result.push(entry.clone());
+                    processed.insert(current_id);
+                }
+        }
+    }
+
+    // Sort the result by subtree height (ascending for incremental application)
+    if !result.is_empty() {
+        super::cache::sort_entries_by_subtree_height(backend, tree, subtree, &mut result);
+    }
+
+    Ok(result)
+}

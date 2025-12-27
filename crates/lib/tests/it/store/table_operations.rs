@@ -1298,6 +1298,17 @@ async fn test_table_cache_same_uuid_different_stores() {
     assert_eq!(record_b2.name, "Store B Record"); // Unchanged
 }
 
+// FIXME(cache-concurrency): This test is flaky due to a race condition in cache rebuilding.
+// When multiple concurrent tasks call get()/search(), they may all trigger cache validation
+// simultaneously. The cache rebuild is not atomic - multiple tasks can race to:
+// 1. Check if cache is valid (all see invalid)
+// 2. Start rebuilding (all start rebuilding)
+// 3. Write partial results (interleaved writes corrupt state)
+//
+// Fix requires either:
+// - A mutex/lock around cache validation+rebuild
+// - An async-aware cache rebuild that coordinates concurrent requests
+// - A "cache rebuilding" state that makes concurrent callers wait
 #[tokio::test]
 async fn test_table_cache_concurrent_reads() {
     // Test that concurrent reads work correctly with caching
@@ -1407,7 +1418,7 @@ async fn test_table_cache_after_fork_merge() {
             .await
             .expect("Failed to insert")
     };
-    let branch_a_id = op_a.commit().await.expect("Failed to commit branch A");
+    let _branch_a_id = op_a.commit().await.expect("Failed to commit branch A");
 
     // Fork: Branch B adds a different record
     let op_b = ctx
