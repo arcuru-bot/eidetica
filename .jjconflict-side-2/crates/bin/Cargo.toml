@@ -1,0 +1,30 @@
+[package]
+name = "eidetica-bin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Eidetica CLI binary"
+publish = false
+
+[[bin]]
+name = "eidetica"
+path = "src/main.rs"
+# doc = false
+
+[dependencies]
+eidetica = { path = "../lib" }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio = { workspace = true }
+axum = { workspace = true, features = ["form", "query"] }
+tower-cookies = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64ct = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }

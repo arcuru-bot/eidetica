@@ -1,0 +1,732 @@
+# Code Examples
+
+This page provides focused code snippets for common tasks in Eidetica.
+
+_Assumes basic setup like `use eidetica::{Instance, Database, Error, ...};` and error handling (`?`) for brevity._
+
+## 1. Initializing the Database (`Instance`)
+
+<!-- Code block ignored: Requires file system access during testing -->
+
+```rust,ignore
+use eidetica::{backend::database::Sqlite, Instance};
+use std::path::PathBuf;
+
+#[tokio::main]
+async fn main() -> eidetica::Result<()> {
+    let db_path = PathBuf::from("my_data.db");
+
+    // Option A: Create an in-memory database (for testing)
+    let backend = Sqlite::in_memory().await?;
+    let _instance = Instance::open(Box::new(backend)).await?;
+
+    // Option B: Create or open a persistent SQLite database
+    // SQLite automatically creates the file if it doesn't exist
+    let backend = Sqlite::open(&db_path).await?;
+    let instance = Instance::open(Box::new(backend)).await?;
+
+    // Data persists automatically with SQLite file backend
+    println!("Database opened at {:?}", db_path);
+
+    Ok(())
+}
+```
+
+## 2. Creating or Loading a Database
+
+```rust
+# extern crate eidetica;
+# extern crate tokio;
+# use eidetica::{Instance, backend::database::Sqlite, crdt::Doc};
+#
+# #[tokio::main]
+# async fn main() -> eidetica::Result<()> {
+# let instance = Instance::open(Box::new(Sqlite::in_memory().await?)).await?;
+# instance.create_user("alice", None).await?;
+# let mut user = instance.login_user("alice", None).await?;
+let tree_name = "my_app_data";
+
+let database = match user.find_database(tree_name).await {
+    Ok(mut databases) => {
+        println!("Found existing database: {}", tree_name);
+        databases.pop().unwrap() // Assume first one is correct
+    }
+    Err(e) if e.is_not_found() => {
+        println!("Creating new database: {}", tree_name);
+        let mut doc = Doc::new();
+        doc.set("name", tree_name);
+        let default_key = user.get_default_key()?;
+        user.create_database(doc, &default_key).await?
+    }
+    Err(e) => return Err(e.into()), // Propagate other errors
+};
+
+println!("Using Database with root ID: {}", database.root_id());
+# Ok(())
+# }
+```
+
+## 3. Writing Data (DocStore Example)
+
+```rust
+# extern crate eidetica;
+# extern crate tokio;
+# use eidetica::{Instance, backend::database::Sqlite, crdt::Doc, store::DocStore};
+#
+# #[tokio::main]
+# async fn main() -> eidetica::Result<()> {
+# let instance = Instance::open(Box::new(Sqlite::in_memory().await?)).await?;
+# instance.create_user("alice", None).await?;
+# let mut user = instance.login_user("alice", None).await?;
+# let mut settings = Doc::new();
+# settings.set("name", "test_db");
+# let default_key = user.get_default_key()?;
+# let database = user.create_database(settings, &default_key).await?;
+#
+// Start an authenticated transaction (automatically uses the database's default key)
+let txn = database.new_transaction().await?;
+
+{
+    // Get the DocStore store handle (scoped)
+    let config_store = txn.get_store::<DocStore>("configuration").await?;
+
+    // Set some values
+    config_store.set("api_key", "secret-key-123").await?;
+    config_store.set("retry_count", "3").await?;
+
+    // Overwrite a value
+    config_store.set("api_key", "new-secret-456").await?;
+
+    // Remove a value
+    config_store.delete("old_setting").await?; // Ok if it doesn't exist
+}
+
+// Commit the changes atomically
+let entry_id = txn.commit().await?;
+println!("DocStore changes committed in entry: {}", entry_id);
+# Ok(())
+# }
+```
+
+## 4. Writing Data (Table Example)
+
+```rust
+# extern crate eidetica;
+# extern crate tokio;
+# extern crate serde;
+# use eidetica::{Instance, backend::database::Sqlite, crdt::Doc, store::Table};
+# use serde::{Serialize, Deserialize};
+#
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct Task {
+    description: String,
+    completed: bool,
+}
+
+# #[tokio::main]
+# async fn main() -> eidetica::Result<()> {
+# let instance = Instance::open(Box::new(Sqlite::in_memory().await?)).await?;
+# instance.create_user("alice", None).await?;
+# let mut user = instance.login_user("alice", None).await?;
+# let mut settings = Doc::new();
+# settings.set("name", "test_db");
+# let default_key = user.get_default_key()?;
+# let database = user.create_database(settings, &default_key).await?;
+#
+// Start an authenticated transaction (automatically uses the database's default key)
+let txn = database.new_transaction().await?;
+let inserted_id;
+
+{
+    // Get the Table handle
+    let tasks_store = txn.get_store::<Table<Task>>("tasks").await?;
+
+    // Insert a new task
+    let task1 = Task { description: "Buy milk".to_string(), completed: false };
+    inserted_id = tasks_store.insert(task1).await?;
+    println!("Inserted task with ID: {}", inserted_id);
+
+    // Insert another task
+    let task2 = Task { description: "Write docs".to_string(), completed: false };
+    tasks_store.insert(task2).await?;
+
+    // Update the first task (requires getting it first if you only have the ID)
+    if let Ok(mut task_to_update) = tasks_store.get(&inserted_id).await {
+        task_to_update.completed = true;
+        tasks_store.set(&inserted_id, task_to_update).await?;
+        println!("Updated task {}", inserted_id);
+    } else {
+        eprintln!("Task {} not found for update?", inserted_id);
+    }
+
+    // Delete a task (if you knew its ID)
+    // tasks_store.delete(&some_other_id)?;
+}
+
+// Commit all inserts/updates/deletes
+let entry_id = txn.commit().await?;
+println!("Table changes committed in entry: {}", entry_id);
+# Ok(())
+# }
+```
+
+## 5. Reading Data (DocStore Viewer)
+
+```rust
+# extern crate eidetica;
+# extern crate tokio;
+# use eidetica::{Instance, backend::database::Sqlite, crdt::Doc, store::DocStore};
+#
+# #[tokio::main]
+# async fn main() -> eidetica::Result<()> {
+# let instance = Instance::open(Box::new(Sqlite::in_memory().await?)).await?;
+# instance.create_user("alice", None).await?;
+# let mut user = instance.login_user("alice", None).await?;
+# let mut settings = Doc::new();
+# settings.set("name", "test_db");
+# let default_key = user.get_default_key()?;
+# let database = user.create_database(settings, &default_key).await?;
+#
+// Get a read-only viewer for the latest state
+let config_viewer = database.get_store_viewer::<DocStore>("configuration").await?;
+
+match config_viewer.get("api_key").await {
+    Ok(api_key) => println!("Current API Key: {}", api_key),
+    Err(e) if e.is_not_found() => println!("API Key not set."),
+    Err(e) => return Err(e.into()),
+}
+
+match config_viewer.get("retry_count").await {
+    Ok(count_str) => {
+        // Note: DocStore values can be various types
+        if let Some(text) = count_str.as_text() {
+            if let Ok(count) = text.parse::<u32>() {
+                println!("Retry Count: {}", count);
+            }
+        }
+    }
+    Err(_) => println!("Retry count not set or invalid."),
+}
+# Ok(())
+# }
+```
+
+## 6. Reading Data (Table Viewer)
+
+```rust
+# extern crate eidetica;
+# extern crate tokio;
+# extern crate serde;
+# use eidetica::{Instance, backend::database::Sqlite, crdt::Doc, store::Table};
+# use serde::{Serialize, Deserialize};
+#
+# #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+# struct Task {
+#     description: String,
+#     completed: bool,
+# }
+#
+# #[tokio::main]
+# async fn main() -> eidetica::Result<()> {
+# let instance = Instance::open(Box::new(Sqlite::in_memory().await?)).await?;
+# instance.create_user("alice", None).await?;
+# let mut user = instance.login_user("alice", None).await?;
+# let mut settings = Doc::new();
+# settings.set("name", "test_db");
+# let default_key = user.get_default_key()?;
+# let database = user.create_database(settings, &default_key).await?;
+# let txn = database.new_transaction().await?;
+# let tasks_store = txn.get_store::<Table<Task>>("tasks").await?;
+# let id_to_find = tasks_store.insert(Task { description: "Test task".to_string(), completed: false }).await?;
+# txn.commit().await?;
+#
+// Get a read-only viewer
+let tasks_viewer = database.get_store_viewer::<Table<Task>>("tasks").await?;
+
+// Get a specific task by ID
+match tasks_viewer.get(&id_to_find).await {
+    Ok(task) => println!("Found task {}: {:?}", id_to_find, task),
+    Err(e) if e.is_not_found() => println!("Task {} not found.", id_to_find),
+    Err(e) => return Err(e.into()),
+}
+
+// Search for all tasks
+println!("\nAll Tasks:");
+match tasks_viewer.search(|_| true).await {
+    Ok(tasks) => {
+        for (id, task) in tasks {
+            println!("  ID: {}, Task: {:?}", id, task);
+        }
+    }
+    Err(e) => eprintln!("Error searching tasks: {}", e),
+}
+# Ok(())
+# }
+```
+
+## 7. Working with Nested Data (Path-Based Operations)
+
+```rust
+# extern crate eidetica;
+# extern crate tokio;
+# use eidetica::{Instance, backend::database::Sqlite, crdt::Doc, store::DocStore, path, Database};
+#
+# #[tokio::main]
+# async fn main() -> eidetica::Result<()> {
+# // Setup database for testing
+# let instance = Instance::open(Box::new(Sqlite::in_memory().await?)).await?;
+# instance.create_user("alice", None).await?;
+# let mut user = instance.login_user("alice", None).await?;
+# let mut settings = Doc::new();
+# settings.set("name", "test_db");
+# let default_key = user.get_default_key()?;
+# let database = user.create_database(settings, &default_key).await?;
+// Start an authenticated transaction (automatically uses the database's default key)
+let txn = database.new_transaction().await?;
+
+// Get the DocStore store handle
+let user_store = txn.get_store::<DocStore>("users").await?;
+
+// Using path-based operations to create and modify nested structures
+// Set profile information using paths - creates nested structure automatically
+user_store.set_path(path!("user123.profile.name"), "Jane Doe").await?;
+user_store.set_path(path!("user123.profile.email"), "jane@example.com").await?;
+
+// Set preferences using paths
+user_store.set_path(path!("user123.preferences.theme"), "dark").await?;
+user_store.set_path(path!("user123.preferences.notifications"), "enabled").await?;
+user_store.set_path(path!("user123.preferences.language"), "en").await?;
+
+// Set additional nested configuration
+user_store.set_path(path!("config.database.host"), "localhost").await?;
+user_store.set_path(path!("config.database.port"), "5432").await?;
+
+// Commit the changes
+let entry_id = txn.commit().await?;
+println!("Nested data changes committed in entry: {}", entry_id);
+
+// Read back the nested data using path operations
+let txn_viewer = database.new_transaction().await?;
+let viewer_store = txn_viewer.get_store::<DocStore>("users").await?;
+
+// Get individual values using path operations
+let _name_value = viewer_store.get_path(path!("user123.profile.name")).await?;
+let _email_value = viewer_store.get_path(path!("user123.profile.email")).await?;
+let _theme_value = viewer_store.get_path(path!("user123.preferences.theme")).await?;
+let _host_value = viewer_store.get_path(path!("config.database.host")).await?;
+
+// Get the entire user object to verify nested structure was created
+if let Ok(_user_data) = viewer_store.get("user123").await {
+    println!("User profile and preferences created successfully");
+}
+
+// Get the entire config object to verify nested structure
+if let Ok(_config_data) = viewer_store.get("config").await {
+    println!("Configuration data created successfully");
+}
+
+println!("Path-based operations completed successfully");
+# Ok(())
+# }
+```
+
+## 8. Working with Y-CRDT Documents (YDoc)
+
+The `YDoc` store provides access to Y-CRDT (Yrs) documents for collaborative data structures. This requires the "y-crdt" feature flag.
+
+```rust
+# extern crate eidetica;
+# extern crate tokio;
+# use eidetica::{Instance, backend::database::Sqlite, crdt::Doc, store::YDoc, Database};
+# use eidetica::y_crdt::{Map as YMap, Transact};
+#
+# #[tokio::main]
+# async fn main() -> eidetica::Result<()> {
+# // Setup database for testing
+# let backend = Sqlite::in_memory().await?;
+# let instance = Instance::open(Box::new(backend)).await?;
+# instance.create_user("alice", None).await?;
+# let mut user = instance.login_user("alice", None).await?;
+# let mut settings = Doc::new();
+# settings.set("name", "y_crdt_example");
+# let default_key = user.get_default_key()?;
+# let database = user.create_database(settings, &default_key).await?;
+#
+// Start an authenticated transaction (automatically uses the database's default key)
+let txn = database.new_transaction().await?;
+
+// Get the YDoc store handle
+let user_info_store = txn.get_store::<YDoc>("user_info").await?;
+
+// Writing to Y-CRDT document
+user_info_store.with_doc_mut(|doc| {
+    let user_info_map = doc.get_or_insert_map("user_info");
+    let mut txn = doc.transact_mut();
+
+    user_info_map.insert(&mut txn, "name", "Alice Johnson");
+    user_info_map.insert(&mut txn, "email", "alice@example.com");
+    user_info_map.insert(&mut txn, "bio", "Software developer");
+
+    Ok(())
+}).await?;
+
+// Commit the transaction
+let entry_id = txn.commit().await?;
+println!("YDoc changes committed in entry: {}", entry_id);
+
+// Reading from Y-CRDT document
+let read_op = database.new_transaction().await?;
+let reader_store = read_op.get_store::<YDoc>("user_info").await?;
+
+reader_store.with_doc(|doc| {
+    let user_info_map = doc.get_or_insert_map("user_info");
+    let txn = doc.transact();
+
+    println!("User Information:");
+
+    if let Some(name) = user_info_map.get(&txn, "name") {
+        let name_str = name.to_string(&txn);
+        println!("Name: {name_str}");
+    }
+
+    if let Some(email) = user_info_map.get(&txn, "email") {
+        let email_str = email.to_string(&txn);
+        println!("Email: {email_str}");
+    }
+
+    if let Some(bio) = user_info_map.get(&txn, "bio") {
+        let bio_str = bio.to_string(&txn);
+        println!("Bio: {bio_str}");
+    }
+
+    Ok(())
+}).await?;
+
+// Working with nested Y-CRDT maps
+let prefs_op = database.new_transaction().await?;
+let prefs_store = prefs_op.get_store::<YDoc>("user_prefs").await?;
+
+prefs_store.with_doc_mut(|doc| {
+    let prefs_map = doc.get_or_insert_map("preferences");
+    let mut txn = doc.transact_mut();
+
+    prefs_map.insert(&mut txn, "theme", "dark");
+    prefs_map.insert(&mut txn, "notifications", "enabled");
+    prefs_map.insert(&mut txn, "language", "en");
+
+    Ok(())
+}).await?;
+
+prefs_op.commit().await?;
+
+// Reading preferences
+let prefs_read_op = database.new_transaction().await?;
+let prefs_read_store = prefs_read_op.get_store::<YDoc>("user_prefs").await?;
+
+prefs_read_store.with_doc(|doc| {
+    let prefs_map = doc.get_or_insert_map("preferences");
+    let txn = doc.transact();
+
+    println!("User Preferences:");
+
+    // Iterate over all preferences
+    for (key, value) in prefs_map.iter(&txn) {
+        let value_str = value.to_string(&txn);
+        println!("{key}: {value_str}");
+    }
+
+    Ok(())
+}).await?;
+# Ok(())
+# }
+```
+
+**YDoc Features:**
+
+- **Collaborative Editing**: Y-CRDT documents provide conflict-free merging for concurrent modifications
+- **Rich Data Types**: Support for Maps, Arrays, Text, and other Y-CRDT types
+- **Functional Interface**: Access via `with_doc()` for reads and `with_doc_mut()` for writes
+- **Atomic Integration**: Changes are staged within the Transaction and committed atomically
+
+**Use Cases for YDoc:**
+
+- User profiles and preferences (as shown in the todo example)
+- Collaborative documents and shared state
+- Real-time data synchronization
+- Any scenario requiring conflict-free concurrent updates
+
+## 9. Persistent Storage with SQLite
+
+With SQLite, data is automatically persisted to disk when using a file path:
+
+<!-- Code block ignored: Requires file system access during testing -->
+
+```rust,ignore
+use eidetica::{backend::database::Sqlite, Instance, crdt::Doc};
+use std::path::PathBuf;
+
+#[tokio::main]
+async fn main() -> eidetica::Result<()> {
+    let db_path = PathBuf::from("my_database.db");
+
+    // Create or open a SQLite database file
+    // Data is automatically persisted on each commit
+    let backend = Sqlite::open(&db_path).await?;
+    let instance = Instance::open(Box::new(backend)).await?;
+
+    // Create user and database
+    instance.create_user("alice", None).await?;
+    let mut user = instance.login_user("alice", None).await?;
+    let mut settings = Doc::new();
+    settings.set("name", "persistent_example");
+    let default_key = user.get_default_key()?;
+    let _database = user.create_database(settings, &default_key).await?;
+
+    // All changes are automatically saved to my_database.db
+    println!("Database created/opened at {:?}", db_path);
+
+    Ok(())
+}
+```
+
+**Key Points:**
+
+- SQLite automatically handles persistence - no manual save needed
+- Use `Sqlite::in_memory()?` for testing without disk I/O
+- Use `Sqlite::open(&path).await?` for persistent storage
+
+---
+
+## Complete Example: Chat Application
+
+For a full working example that demonstrates Eidetica in a real application, see the **[Chat Example](https://github.com/arcuru/eidetica/blob/main/examples/chat/README.md)** in the repository.
+
+The chat application showcases:
+
+- **User Management**: Automatic passwordless user creation with key management
+- **Multiple Databases**: Each chat room is a separate database
+- **Table Store**: Messages stored with auto-generated IDs
+- **Multi-Transport Sync**: HTTP for local testing, Iroh for P2P with NAT traversal
+- **Bootstrap Protocol**: Automatic access requests when joining rooms
+- **Real-time Updates**: Periodic message refresh with automatic sync
+- **TUI Interface**: Interactive terminal UI using Ratatui
+
+### Key Architectural Concepts
+
+The chat example demonstrates several advanced patterns:
+
+**1. User API with Automatic Key Management**
+
+<!-- Code block ignored: Requires tokio runtime for async operations -->
+
+```rust,ignore
+// Initialize instance with sync enabled
+let backend = Sqlite::in_memory().await?;
+let instance = Instance::create(Box::new(backend))?;
+instance.enable_sync()?;
+
+// Create passwordless user (or use existing)
+let username = "alice";
+let _ = instance.create_user(username, None);
+
+// Login to get User session (handles key management automatically)
+let user = instance.login_user(username, None)?;
+
+// User API automatically manages cryptographic keys for databases
+let default_key = user.get_default_key()?;
+println!("User {} has key: {}", username, default_key);
+```
+
+**2. Room Creation with Global Access**
+
+<!-- Code block ignored: Requires tokio runtime and User API mutability -->
+
+```rust,ignore
+// Create a chat room (database) with settings
+let mut settings = Doc::new();
+settings.set("name", "Team Chat");
+
+let key_id = user.get_default_key()?;
+let database = user.create_database(settings, &key_id)?;
+
+// Add global permission so anyone can join and write
+let tx = database.new_transaction()?;
+let settings_store = tx.get_settings()?;
+let global_key = auth::AuthKey::active(None, auth::Permission::Write(10));
+settings_store.set_global_auth_key(global_key)?;
+tx.commit()?;
+
+println!("Chat room created with ID: {}", database.root_id());
+```
+
+**3. Message Storage with Table**
+
+<!-- Code block ignored: Requires chrono and uuid crates for timestamp/ID generation -->
+
+```rust,ignore
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatMessage {
+    id: String,
+    author: String,
+    content: String,
+    timestamp: DateTime<Utc>,
+}
+
+impl ChatMessage {
+    fn new(author: String, content: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            author,
+            content,
+            timestamp: Utc::now(),
+        }
+    }
+}
+
+// Send a message to the chat room
+let message = ChatMessage::new("alice".to_string(), "Hello, world!".to_string());
+
+let txn = database.new_transaction()?;
+let messages_store = txn.get_store::<Table<ChatMessage>>("messages")?;
+messages_store.insert(message)?;
+txn.commit()?;
+
+// Read all messages
+let txn_viewer = database.new_transaction()?;
+let viewer_store = txn_viewer.get_store::<Table<ChatMessage>>("messages")?;
+let all_messages = viewer_store.search(|_| true)?;
+
+for (_, msg) in all_messages {
+    println!("[{}] {}: {}", msg.timestamp.format("%H:%M:%S"), msg.author, msg.content);
+}
+```
+
+**4. Bootstrap Connection to Remote Room**
+
+<!-- Code block ignored: Requires network connectivity and running server -->
+
+```rust,ignore
+use eidetica::sync::{Address, DatabaseTicket, transports::http::HttpTransport};
+
+// Join an existing room using a ticket URL
+let ticket: DatabaseTicket = "eidetica:?db=bafyrei...&pr=http:127.0.0.1:8080".parse()?;
+let room_id = ticket.database_id().clone();
+let address = ticket.addresses().first().unwrap().clone();
+
+// Register sync transport
+if let Some(sync) = instance.sync() {
+    sync.register_transport("http", HttpTransport::builder().bind("127.0.0.1:0")).await?;
+
+    // Request access to the room (bootstrap protocol)
+    let key_id = user.get_default_key()?;
+    user.request_database_access(
+        &sync,
+        &address,
+        &room_id,
+        &key_id,
+        eidetica::auth::Permission::Write(10),
+    ).await?;
+
+    // Register the database with User's key manager
+    user.track_database(
+        room_id.clone(),
+        &key_id,
+        eidetica::user::types::SyncSettings::on_commit(),
+    ).await?;
+
+    // Open the synced database
+    let database = user.open_database(&room_id)?;
+    println!("Joined room successfully!");
+}
+```
+
+**5. Real-time Sync with Callbacks**
+
+<!-- Code block ignored: Complex setup with running server -->
+
+```rust,ignore
+// Automatic sync is configured via peer relationships
+// When you add a peer for a database, commits automatically trigger sync
+if let Some(sync) = instance.sync() {
+    if let Ok(peers) = sync.list_peers() {
+        if let Some(peer) = peers.first() {
+            // Add tree sync relationship - this enables automatic sync on commit
+            sync.add_tree_sync(&peer.pubkey, &database.root_id()).await?;
+
+            println!("Automatic sync enabled for database");
+        }
+    }
+}
+
+// Manually trigger immediate sync for a specific database
+sync.sync_with_peer(&Address::http("127.0.0.1:8080"), Some(&database.root_id())).await?;
+```
+
+### Running the Chat Example
+
+```bash
+# From the repository root
+cd examples/chat
+
+# Create a new room (default uses Iroh P2P transport)
+cargo run -- --username alice
+
+# Or use HTTP transport for local testing
+cargo run -- --username alice --transport http
+
+# Connect to an existing room
+cargo run -- <room_address> --username bob
+```
+
+**Creating a new room:**
+When you run without a room address, the app will:
+
+1. Create a new room
+2. Display the room address that others can use to join
+3. Wait for you to press Enter before starting the chat interface
+
+Example output:
+
+```text
+🚀 Eidetica Chat Room Created!
+📍 Room Address: abc123@127.0.0.1:54321
+👤 Username: alice
+
+Share this address with others to invite them to the chat.
+Press Enter to start chatting...
+```
+
+**Joining an existing room:**
+When you provide a room address as the first argument, the app connects and starts the chat interface immediately.
+
+### Transport Options
+
+**HTTP Transport** (`--transport http`):
+
+- Simple client-server model for local networks
+- Server binds to `127.0.0.1` with random port
+- Address format: `room_id@127.0.0.1:PORT`
+- Best for testing and same-machine demos
+
+**Iroh Transport** (`--transport iroh`, default):
+
+- Peer-to-peer with built-in NAT traversal
+- Uses QUIC protocol with relay servers
+- Address format: `room_id@{node-info-json}`
+- Best for internet connections across networks
+
+### Architecture Highlights
+
+The chat example demonstrates production-ready patterns:
+
+- **Multi-database architecture**: Each room is isolated with independent sync state
+- **User session management**: Automatic key discovery and database registration
+- **Bootstrap protocol**: Seamless joining of rooms with access requests
+- **Dual transport support**: Flexible networking for different environments
+- **CRDT-based messages**: Eventual consistency with deterministic ordering
+- **Automatic sync**: Background synchronization triggered by commits via callbacks
+
+See the [full chat example documentation](https://github.com/arcuru/eidetica/blob/main/examples/chat/README.md) for detailed usage instructions, complete workflow examples, troubleshooting tips, and implementation details.

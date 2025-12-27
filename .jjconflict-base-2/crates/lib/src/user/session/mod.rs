@@ -1,0 +1,956 @@
+//! User session management
+//!
+//! Represents an authenticated user session with decrypted keys.
+//!
+//! # API Overview
+//!
+//! The User API is organized into three areas for managing Databases:
+//!
+//! ## Database Lifecycle
+//!
+//! - **`create_database()`** - Create a new database
+//! - **`open_database()`** - Open an existing database
+//! - **`find_database()`** - Search for databases by name
+//!
+//! ## Tracked Databases
+//!
+//! Manage your personal list of tracked databases:
+//!
+//! - **`databases()`** - List all tracked databases
+//! - **`database()`** - Get a specific tracked database
+//! - **`track_database()`** - Add or update a tracked database (upsert)
+//! - **`untrack_database()`** - Remove a database from your tracked list
+//!
+//! ## Key-Database Mappings
+//!
+//! Control which keys access which databases:
+//!
+//! - **`map_key()`** - Map a key to a SigKey identifier for a database
+//! - **`key_mapping()`** - Get the SigKey mapping for a key-database pair
+//! - **`find_key()`** - Find which key can access a database
+//!
+//! This explicit approach ensures predictable behavior and avoids ambiguity about which
+//! keys have access to which databases.
+
+use handle_trait::Handle;
+use std::collections::HashMap;
+
+use super::{UserKeyManager, types::UserInfo};
+use crate::{
+    Database, Error, Instance, Result, Transaction,
+    auth::{Permission, SigKey, crypto::PublicKey},
+    crdt::Doc,
+    database::DatabaseKey,
+    entry::ID,
+    instance::{InstanceError, backend::Backend},
+    store::Table,
+    sync::{BootstrapRequest, DatabaseTicket, Sync},
+    user::{SyncSettings, TrackedDatabase, UserError},
+};
+
+#[cfg(test)]
+mod tests;
+
+/// User session object, returned after successful login
+///
+/// Represents an authenticated user with decrypted private keys loaded in memory.
+/// The User struct provides access to key management, tracked databases, and
+/// bootstrap approval operations.
+pub struct User {
+    /// Stable internal user UUID (Table primary key)
+    user_uuid: String,
+
+    /// Username (login identifier)
+    username: String,
+
+    /// User's private database (contains encrypted keys and tracked databases)
+    user_database: Database,
+
+    /// Instance reference for database operations
+    instance: Instance,
+
+    /// Decrypted user keys (in memory only during session)
+    key_manager: UserKeyManager,
+
+    /// User info (cached from _users database)
+    user_info: UserInfo,
+}
+
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("user_uuid", &self.user_uuid)
+            .field("username", &self.username)
+            .field("user_database", &self.user_database)
+            .field("instance", &self.instance)
+            .field("key_manager", &"<KeyManager [sensitive]>")
+            .field("user_info", &self.user_info)
+            .finish()
+    }
+}
+
+impl User {
+    /// Create a new User session
+    ///
+    /// This is an internal constructor used after successful login.
+    /// Use `Instance::login_user()` to create a User session.
+    ///
+    /// # Arguments
+    /// * `user_uuid` - Internal UUID (Table primary key)
+    /// * `user_info` - User information from _users database
+    /// * `user_database` - The user's private database
+    /// * `instance` - Instance reference
+    /// * `key_manager` - Initialized key manager with decrypted keys
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        user_uuid: String,
+        user_info: UserInfo,
+        user_database: Database,
+        instance: Instance,
+        key_manager: UserKeyManager,
+    ) -> Self {
+        Self {
+            user_uuid,
+            username: user_info.username.clone(),
+            user_database,
+            instance,
+            key_manager,
+            user_info,
+        }
+    }
+
+    // === Basic Session Methods ===
+
+    /// Get the internal user UUID (stable identifier)
+    pub fn user_uuid(&self) -> &str {
+        &self.user_uuid
+    }
+
+    /// Get the username (login identifier)
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// Get a reference to the user's database
+    pub fn user_database(&self) -> &Database {
+        &self.user_database
+    }
+
+    /// Get a reference to the backend
+    pub fn backend(&self) -> &Backend {
+        self.instance.backend()
+    }
+
+    /// Get a reference to the user info
+    pub fn user_info(&self) -> &UserInfo {
+        &self.user_info
+    }
+
+    /// Logout (consumes self and clears decrypted keys from memory)
+    ///
+    /// After logout, all decrypted keys are zeroized and the session is ended.
+    /// Keys are automatically cleared when the User is dropped.
+    pub fn logout(self) -> Result<()> {
+        // Consume self, all keys are stored in other Types that zeroize themselves on drop
+        Ok(())
+    }
+
+    // === Key Manager Access (Internal) ===
+
+    /// Get a reference to the key manager (for internal use)
+    #[allow(dead_code)]
+    pub(crate) fn key_manager(&self) -> &UserKeyManager {
+        &self.key_manager
+    }
+
+    /// Get a mutable reference to the key manager (for internal use)
+    #[allow(dead_code)]
+    pub(crate) fn key_manager_mut(&mut self) -> &mut UserKeyManager {
+        &mut self.key_manager
+    }
+
+    // === Database Operations (User Context) ===
+
+    /// Create a new database with explicit key selection.
+    ///
+    /// This method requires you to specify which key should be used to create and manage
+    /// the database, providing explicit control over key-database relationships.
+    ///
+    /// # Arguments
+    /// * `settings` - Initial database settings (metadata, name, etc.)
+    /// * `key_id` - The ID of the key to use for this database (public key string)
+    ///
+    /// # Returns
+    /// The created Database
+    ///
+    /// # Errors
+    /// - Returns an error if the specified key_id doesn't exist
+    /// - Returns an error if the key cannot be retrieved
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Get available keys
+    /// let keys = user.list_keys()?;
+    /// let key_id = &keys[1]; // Use the second key
+    ///
+    /// // Create database with explicit key selection
+    /// let mut settings = Doc::new();
+    /// settings.set("name", "My Database");
+    /// let database = user.new_database(settings, key_id)?;
+    /// ```
+    pub async fn create_database(&mut self, settings: Doc, key_id: &PublicKey) -> Result<Database> {
+        use crate::user::types::{SyncSettings, UserKey};
+
+        // Get the signing key from UserKeyManager
+        let signing_key = self
+            .key_manager
+            .get_signing_key(key_id)
+            .ok_or_else(|| UserError::KeyNotFound {
+                key_id: key_id.to_string(),
+            })?
+            .clone();
+
+        // Create the database with the provided key directly
+        let database = Database::create(&self.instance, signing_key, settings).await?;
+
+        // Store the mapping in UserKey and track the database
+        let tx = self.user_database.new_transaction().await?;
+        let keys_table = tx.get_store::<Table<UserKey>>("keys").await?;
+
+        // Find the key metadata in the database
+        let (uuid_primary_key, mut metadata) = keys_table
+            .search(|uk| &uk.key_id == key_id)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| UserError::KeyNotFound {
+                key_id: key_id.to_string(),
+            })?;
+
+        // Add the database sigkey mapping (None = default pubkey identity)
+        metadata
+            .database_sigkeys
+            .insert(database.root_id().clone(), None);
+
+        // Update the key in user database using the UUID primary key
+        keys_table.set(&uuid_primary_key, metadata.clone()).await?;
+
+        // Also track the database in the databases table
+        let databases_table = tx.get_store::<Table<TrackedDatabase>>("databases").await?;
+        let tracked = TrackedDatabase {
+            database_id: database.root_id().clone(),
+            key_id: key_id.clone(),
+            sync_settings: SyncSettings::disabled(),
+        };
+        databases_table
+            .set(&database.root_id().to_string(), tracked)
+            .await?;
+
+        tx.commit().await?;
+
+        // Update the in-memory key manager with the updated metadata
+        self.key_manager.add_key(metadata)?;
+
+        Ok(database)
+    }
+
+    /// Open an existing database by its root ID using this user's keys.
+    ///
+    /// This method automatically:
+    /// 1. Finds an appropriate key that has access to the database
+    /// 2. Retrieves the decrypted SigningKey from the UserKeyManager
+    /// 3. Gets the SigKey mapping for this database
+    /// 4. Creates a Database instance configured with the user's key
+    ///
+    /// The returned Database will use the user's provided key for all operations,
+    /// without requiring backend key lookups.
+    ///
+    /// # Arguments
+    /// * `root_id` - The root entry ID of the database
+    ///
+    /// # Returns
+    /// The opened Database configured to use this user's keys
+    ///
+    /// # Errors
+    /// - Returns an error if no key is found for the database
+    /// - Returns an error if no SigKey mapping exists
+    /// - Returns an error if the key is not in the UserKeyManager
+    pub async fn open_database(&self, root_id: &ID) -> Result<Database> {
+        // Validate the root exists
+        self.instance.backend().get(root_id).await?;
+
+        // Find an appropriate key for this database
+        let key_id =
+            self.find_key(root_id)?
+                .ok_or_else(|| super::errors::UserError::NoKeyForDatabase {
+                    database_id: root_id.clone(),
+                })?;
+
+        // Get the SigningKey from UserKeyManager
+        let signing_key = self.key_manager.get_signing_key(&key_id).ok_or_else(|| {
+            super::errors::UserError::KeyNotFound {
+                key_id: key_id.to_string(),
+            }
+        })?;
+
+        // Get the SigKey mapping for this database
+        let sigkey = self.key_mapping(&key_id, root_id)?.ok_or_else(|| {
+            super::errors::UserError::NoSigKeyMapping {
+                key_id: key_id.to_string(),
+                database_id: root_id.clone(),
+            }
+        })?;
+
+        // Create Database with user-provided key using resolved SigKey identity
+        let key = DatabaseKey::with_identity(signing_key.clone(), sigkey);
+        Database::open(self.instance.handle(), root_id, key).await
+    }
+
+    /// Find databases by name among the user's tracked databases.
+    ///
+    /// Searches only the databases this user has tracked for those matching the given name.
+    ///
+    /// # Arguments
+    /// * `name` - Database name to search for
+    ///
+    /// # Returns
+    /// Vector of matching databases from the user's tracked list
+    pub async fn find_database(&self, name: impl AsRef<str>) -> Result<Vec<Database>> {
+        let name = name.as_ref();
+        let tracked = self.databases().await?;
+        let mut matching = Vec::new();
+
+        for tracked_db in tracked {
+            if let Ok(database) = self.open_database(&tracked_db.database_id).await
+                && let Ok(db_name) = database.get_name().await
+                && db_name == name
+            {
+                matching.push(database);
+            }
+        }
+
+        if matching.is_empty() {
+            Err(UserError::DatabaseNotFoundByName {
+                name: name.to_string(),
+            }
+            .into())
+        } else {
+            Ok(matching)
+        }
+    }
+
+    /// Find which key can access a database.
+    ///
+    /// Searches this user's keys to find one that can access the specified database.
+    /// Considers the SigKey mappings stored in user key metadata.
+    ///
+    /// Returns the key_id of a suitable key, preferring keys with mappings for this database.
+    ///
+    /// # Arguments
+    /// * `database_id` - The ID of the database
+    ///
+    /// # Returns
+    /// Some(key_id) if a suitable key is found, None if no keys can access this database
+    pub fn find_key(&self, database_id: &ID) -> Result<Option<PublicKey>> {
+        // Iterate through all keys and find ones with SigKey mappings for this database
+        for key_id in self.key_manager.list_key_ids() {
+            if let Some(metadata) = self.key_manager.get_key_metadata(&key_id)
+                && metadata.database_sigkeys.contains_key(database_id)
+            {
+                return Ok(Some(key_id));
+            }
+        }
+
+        // No key found with mapping for this database
+        Ok(None)
+    }
+
+    /// Get the resolved SigKey mapping for a key in a specific database.
+    ///
+    /// Users map their private keys to SigKey identifiers on a per-database basis.
+    /// This retrieves the resolved SigKey that a specific key uses in
+    /// a specific database's authentication settings.
+    ///
+    /// Internally, `None` in the stored mapping means "default pubkey identity",
+    /// which this method resolves to the concrete `SigKey::from_pubkey(...)` value.
+    ///
+    /// # Arguments
+    /// * `key_id` - The user's key identifier
+    /// * `database_id` - The database ID
+    ///
+    /// # Returns
+    /// `Ok(Some(sigkey))` if a mapping exists (resolved to concrete SigKey),
+    /// `Ok(None)` if no mapping is configured for this database
+    ///
+    /// # Errors
+    /// Returns an error if the key_id doesn't exist in the UserKeyManager
+    pub fn key_mapping(&self, key_id: &PublicKey, database_id: &ID) -> Result<Option<SigKey>> {
+        let metadata = self.key_manager.get_key_metadata(key_id).ok_or_else(|| {
+            super::errors::UserError::KeyNotFound {
+                key_id: key_id.to_string(),
+            }
+        })?;
+
+        match metadata.database_sigkeys.get(database_id) {
+            None => Ok(None), // no mapping exists
+            Some(None) => {
+                // Default: pubkey identity derived directly from key_id
+                Ok(Some(SigKey::from_pubkey(key_id)))
+            }
+            Some(Some(sigkey)) => Ok(Some(sigkey.clone())),
+        }
+    }
+
+    /// Map a key to a SigKey identity for a specific database.
+    ///
+    /// Registers that this user's key should be used with a specific SigKey identity
+    /// when interacting with a database. This is typically used when a user has been
+    /// granted access to a database and needs to configure their local key to work with it.
+    ///
+    /// If the provided SigKey matches the default pubkey identity for this key,
+    /// it is normalized to `None` internally (compact storage for the common case).
+    ///
+    /// # Multi-Key Support
+    ///
+    /// **Note**: A database may have mappings to multiple keys. This is useful for
+    /// multi-device scenarios where the same user wants to access a database from
+    /// different devices, each with their own key.
+    ///
+    /// # Arguments
+    /// * `key_id` - The user's key identifier (public key)
+    /// * `database_id` - The database ID
+    /// * `sigkey` - The SigKey identity to use for this database
+    ///
+    /// # Errors
+    /// Returns an error if the key_id doesn't exist in the user database
+    pub async fn map_key(
+        &mut self,
+        key_id: &PublicKey,
+        database_id: &ID,
+        sigkey: SigKey,
+    ) -> Result<()> {
+        let tx = self.user_database.new_transaction().await?;
+        self.map_key_in_txn(&tx, key_id, database_id, sigkey)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Internal helper: Add a SigKey mapping within an existing transaction
+    ///
+    /// This is used internally by methods that manage their own transactions.
+    /// For external use, call `map_key()` instead.
+    ///
+    /// Normalizes the stored value: if the sigkey matches the default pubkey
+    /// identity for this key, stores `None` instead of `Some(sigkey)`.
+    async fn map_key_in_txn(
+        &mut self,
+        tx: &Transaction,
+        key_id: &PublicKey,
+        database_id: &ID,
+        sigkey: SigKey,
+    ) -> Result<()> {
+        use crate::store::Table;
+        use crate::user::types::UserKey;
+
+        let keys_table = tx.get_store::<Table<UserKey>>("keys").await?;
+
+        // Find the key metadata in the database
+        let (uuid_primary_key, mut metadata) = keys_table
+            .search(|uk| &uk.key_id == key_id)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| super::errors::UserError::KeyNotFound {
+                key_id: key_id.to_string(),
+            })?;
+
+        // Normalize: if the sigkey matches the default pubkey identity, store None
+        let default_sigkey = SigKey::from_pubkey(key_id);
+        let stored = if sigkey == default_sigkey {
+            None
+        } else {
+            Some(sigkey)
+        };
+
+        // Add the database sigkey mapping
+        metadata
+            .database_sigkeys
+            .insert(database_id.clone(), stored);
+
+        // Update the key in user database using the UUID primary key
+        keys_table.set(&uuid_primary_key, metadata.clone()).await?;
+
+        // Update the in-memory key manager with the updated metadata
+        self.key_manager.add_key(metadata)?;
+
+        Ok(())
+    }
+
+    /// Internal helper: Validate key and set up SigKey mapping within an existing transaction
+    ///
+    /// This validates that a key exists and has access to a database, discovers the appropriate
+    /// SigKey, and creates the mapping. Used by track_database (which has upsert behavior).
+    async fn validate_and_map_key_in_txn(
+        &mut self,
+        tx: &Transaction,
+        database_id: &ID,
+        key_id: &PublicKey,
+    ) -> Result<()> {
+        // Verify the key exists
+        if self.key_manager.get_signing_key(key_id).is_none() {
+            return Err(UserError::KeyNotFound {
+                key_id: key_id.to_string(),
+            }
+            .into());
+        }
+
+        // Discover available SigKeys for this public key
+        let available_sigkeys = Database::find_sigkeys(&self.instance, database_id, key_id).await?;
+
+        if available_sigkeys.is_empty() {
+            return Err(UserError::NoSigKeyFound {
+                key_id: key_id.to_string(),
+                database_id: database_id.clone(),
+            }
+            .into());
+        }
+
+        // Select the first SigKey (highest permission, since find_sigkeys returns sorted list)
+        let (sigkey, _permission) = &available_sigkeys[0];
+
+        // Store the discovered SigKey directly (map_key_in_txn normalizes to None if default)
+        self.map_key_in_txn(tx, key_id, database_id, sigkey.clone())
+            .await?;
+
+        Ok(())
+    }
+
+    // === Key Management (User Context) ===
+
+    /// Add a new private key to this user's keyring.
+    ///
+    /// Generates a new Ed25519 keypair, encrypts it (for password-protected users)
+    /// or stores it unencrypted (for passwordless users), and adds it to the user's
+    /// key database.
+    ///
+    /// # Arguments
+    /// * `display_name` - Optional display name for the key
+    ///
+    /// # Returns
+    /// The key ID (public key string)
+    pub async fn add_private_key(&mut self, display_name: Option<&str>) -> Result<PublicKey> {
+        use crate::auth::crypto::generate_keypair;
+        use crate::store::Table;
+        use crate::user::types::{KeyStorage, UserKey};
+
+        // Generate new keypair
+        let (private_key, public_key) = generate_keypair();
+
+        // Get current timestamp using the instance's clock
+        let timestamp = self.instance.clock().now_secs();
+
+        // Prepare UserKey based on encryption type
+        let user_key = if let Some(encryption_key) = self.key_manager.encryption_key() {
+            // Password-protected user: encrypt the key
+            use crate::user::crypto::encrypt_private_key;
+            let (ciphertext, nonce) = encrypt_private_key(&private_key, encryption_key)?;
+
+            UserKey {
+                key_id: public_key.clone(),
+                storage: KeyStorage::Encrypted {
+                    algorithm: "aes-256-gcm".to_string(),
+                    ciphertext,
+                    nonce,
+                },
+                display_name: display_name.map(|s| s.to_string()),
+                created_at: timestamp,
+                last_used: None,
+                is_default: false, // New keys are not default
+                database_sigkeys: HashMap::new(),
+            }
+        } else {
+            // Passwordless user: store unencrypted
+            UserKey {
+                key_id: public_key.clone(),
+                storage: KeyStorage::Unencrypted { key: private_key },
+                display_name: display_name.map(|s| s.to_string()),
+                created_at: timestamp,
+                last_used: None,
+                is_default: false, // New keys are not default
+                database_sigkeys: HashMap::new(),
+            }
+        };
+
+        // Store in user database
+        let tx = self.user_database.new_transaction().await?;
+        let keys_table = tx.get_store::<Table<UserKey>>("keys").await?;
+        keys_table.insert(user_key.clone()).await?;
+        tx.commit().await?;
+
+        // Add to in-memory key manager
+        self.key_manager.add_key(user_key)?;
+
+        Ok(public_key)
+    }
+
+    /// List all key IDs owned by this user.
+    ///
+    /// Keys are returned sorted by creation timestamp (oldest first), making the
+    /// first key in the list the "default" key created when the user was set up.
+    ///
+    /// # Returns
+    /// Vector of PublicKeys sorted by creation time
+    pub fn list_keys(&self) -> Result<Vec<PublicKey>> {
+        Ok(self.key_manager.list_key_ids())
+    }
+
+    /// Get the default key.
+    ///
+    /// Returns the key marked as is_default=true, or falls back to the oldest key
+    /// by creation timestamp if no default is explicitly set.
+    ///
+    /// # Returns
+    /// The PublicKey of the default key
+    ///
+    /// # Errors
+    /// Returns an error if no keys exist
+    pub fn get_default_key(&self) -> Result<PublicKey> {
+        self.key_manager
+            .get_default_key_id()
+            .ok_or_else(|| Error::from(InstanceError::AuthenticationRequired))
+    }
+
+    /// Get a signing key by its ID.
+    ///
+    /// # Arguments
+    /// * `key_id` - The public key identifier
+    ///
+    /// # Returns
+    /// The PrivateKey if found
+    #[cfg(any(test, feature = "testing"))]
+    pub fn get_signing_key(&self, key_id: &PublicKey) -> Result<crate::auth::crypto::PrivateKey> {
+        self.key_manager
+            .get_signing_key(key_id)
+            .cloned()
+            .ok_or_else(|| {
+                UserError::KeyNotFound {
+                    key_id: key_id.to_string(),
+                }
+                .into()
+            })
+    }
+
+    // === Bootstrap Request Management (User Context) ===
+
+    /// Get all pending bootstrap requests from the sync system.
+    ///
+    /// This is a convenience method that requires the Instance's Sync to be initialized.
+    ///
+    /// # Arguments
+    /// * `sync` - Reference to the Instance's Sync object
+    ///
+    /// # Returns
+    /// A vector of (request_id, bootstrap_request) pairs for pending requests
+    pub async fn pending_bootstrap_requests(
+        &self,
+        sync: &Sync,
+    ) -> Result<Vec<(String, BootstrapRequest)>> {
+        sync.pending_bootstrap_requests().await
+    }
+
+    /// Approve a bootstrap request and add the requesting key to the target database.
+    ///
+    /// The approving key must have Admin permission on the target database.
+    ///
+    /// # Arguments
+    /// * `sync` - Mutable reference to the Instance's Sync object
+    /// * `request_id` - The unique identifier of the request to approve
+    /// * `approving_key_id` - The ID of this user's key to use for approval (must have Admin permission)
+    ///
+    /// # Returns
+    /// Result indicating success or failure of the approval operation
+    ///
+    /// # Errors
+    /// - Returns an error if the user doesn't own the specified approving key
+    /// - Returns an error if the approving key doesn't have Admin permission on the target database
+    /// - Returns an error if the request doesn't exist or isn't pending
+    /// - Returns an error if the key addition to the database fails
+    pub async fn approve_bootstrap_request(
+        &self,
+        sync: &Sync,
+        request_id: &str,
+        approving_key_id: &PublicKey,
+    ) -> Result<()> {
+        // Get the signing key from the key manager
+        let signing_key = self
+            .key_manager
+            .get_signing_key(approving_key_id)
+            .ok_or_else(|| super::errors::UserError::KeyNotFound {
+                key_id: approving_key_id.to_string(),
+            })?;
+
+        // Delegate to Sync layer with the user-provided key
+        // The Sync layer will validate permissions when committing the transaction
+        let key = DatabaseKey::new(signing_key.clone());
+        sync.approve_bootstrap_request_with_key(request_id, &key)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Reject a bootstrap request.
+    ///
+    /// This method marks the request as rejected. The requesting device will not
+    /// be granted access to the target database. Requires Admin permission on the
+    /// target database to prevent unauthorized users from disrupting the bootstrap protocol.
+    ///
+    /// # Arguments
+    /// * `sync` - Mutable reference to the Instance's Sync object
+    /// * `request_id` - The unique identifier of the request to reject
+    /// * `rejecting_key_id` - The ID of this user's key (for permission validation and audit trail)
+    ///
+    /// # Returns
+    /// Result indicating success or failure of the rejection operation
+    ///
+    /// # Errors
+    /// - Returns an error if the user doesn't own the specified rejecting key
+    /// - Returns an error if the request doesn't exist or isn't pending
+    /// - Returns an error if the rejecting key lacks Admin permission on the target database
+    pub async fn reject_bootstrap_request(
+        &self,
+        sync: &Sync,
+        request_id: &str,
+        rejecting_key_id: &PublicKey,
+    ) -> Result<()> {
+        // Get the signing key from the key manager
+        let signing_key = self
+            .key_manager
+            .get_signing_key(rejecting_key_id)
+            .ok_or_else(|| super::errors::UserError::KeyNotFound {
+                key_id: rejecting_key_id.to_string(),
+            })?;
+
+        // Delegate to Sync layer with the user-provided key
+        // The Sync layer will validate Admin permission on the target database
+        let key = DatabaseKey::new(signing_key.clone());
+        sync.reject_bootstrap_request_with_key(request_id, &key)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Request access to a database from a peer (bootstrap sync).
+    ///
+    /// This convenience method initiates a bootstrap sync request to access a database
+    /// that this user doesn't have locally yet. The user's key will be sent to the peer
+    /// to request the specified permission level.
+    ///
+    /// This is useful for multi-device scenarios where a user wants to access their
+    /// existing database from a new device, or when requesting access to a database
+    /// shared by another user.
+    ///
+    /// # Arguments
+    /// * `sync` - Reference to the Instance's Sync object
+    /// * `ticket` - A ticket containing the database ID and address hints
+    /// * `key_id` - The ID of this user's key to use for the request
+    /// * `requested_permission` - The permission level being requested
+    ///
+    /// # Returns
+    /// Result indicating success or failure of the bootstrap request
+    ///
+    /// # Errors
+    /// - Returns an error if the user doesn't own the specified key
+    /// - Returns an error if all addresses in the ticket fail
+    /// - Returns an error if the bootstrap sync fails
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Request write access to a shared database
+    /// let user_key_id = user.get_default_key()?;
+    /// let ticket: DatabaseTicket = "eidetica:?db=sha256:abc...&pr=http:192.168.1.1:8080".parse()?;
+    /// user.request_database_access(
+    ///     &sync,
+    ///     &ticket,
+    ///     &user_key_id,
+    ///     Permission::Write(5),
+    /// ).await?;
+    ///
+    /// // After approval, the database can be opened
+    /// let database = user.open_database(ticket.database_id())?;
+    /// ```
+    pub async fn request_database_access(
+        &self,
+        sync: &Sync,
+        ticket: &DatabaseTicket,
+        key_id: &PublicKey,
+        requested_permission: Permission,
+    ) -> Result<()> {
+        if self.key_manager.get_signing_key(key_id).is_none() {
+            return Err(super::errors::UserError::KeyNotFound {
+                key_id: key_id.to_string(),
+            }
+            .into());
+        }
+
+        let key_name = key_id.to_string();
+
+        sync.bootstrap_with_ticket(ticket, key_id, &key_name, requested_permission)
+            .await
+    }
+
+    // === Tracked Databases ===
+
+    /// Track a database, adding it to this user's list with auto-discovery of SigKeys.
+    ///
+    /// This method adds an existing database to your tracked list, or updates it if
+    /// already tracked (upsert behavior).
+    ///
+    /// When tracking:
+    /// 1. Uses Database::find_sigkeys() to discover which SigKey the user can use
+    /// 2. Automatically selects the SigKey with highest permission
+    /// 3. Stores the key mapping and sync settings
+    ///
+    /// The sync_settings indicate your sync preferences, but do not automatically
+    /// configure sync. Use the Sync module's peer and tree methods to set up actual
+    /// sync relationships.
+    ///
+    /// # Arguments
+    /// * `database_id` - ID of the database to track
+    /// * `key_id` - Which user key to use for this database
+    /// * `sync_settings` - Sync preferences for this database
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    ///
+    /// # Errors
+    /// - Returns `NoSigKeyFound` if no SigKey can be found for the specified key
+    /// - Returns `KeyNotFound` if the specified key_id doesn't exist
+    pub async fn track_database(
+        &mut self,
+        database_id: impl Into<ID>,
+        key_id: &PublicKey,
+        sync_settings: SyncSettings,
+    ) -> Result<()> {
+        let tracked = TrackedDatabase {
+            database_id: database_id.into(),
+            key_id: key_id.clone(),
+            sync_settings,
+        };
+        // Single transaction for all operations
+        let tx = self.user_database.new_transaction().await?;
+        let databases_table = tx.get_store::<Table<TrackedDatabase>>("databases").await?;
+
+        // Use database ID as the key - check if it already exists (O(1))
+        let db_id_key = tracked.database_id.to_string();
+        let existing = databases_table.get(&db_id_key).await.ok();
+
+        // Determine if we need to validate and setup key mapping
+        let needs_key_validation = match &existing {
+            Some(existing) => existing.key_id != tracked.key_id, // Key changed
+            None => true,                                        // New database
+        };
+
+        // Validate key and set up mapping if needed
+        if needs_key_validation {
+            self.validate_and_map_key_in_txn(&tx, &tracked.database_id, &tracked.key_id)
+                .await?;
+        }
+
+        // Store using database ID as explicit key (not using insert's auto-generated UUID)
+        databases_table.set(&db_id_key, tracked).await?;
+
+        // Single commit for all changes
+        tx.commit().await?;
+
+        // Update sync system to immediately recompute combined settings
+        // This ensures automatic sync works right away, without waiting for background worker
+        if let Some(sync) = self.instance.sync() {
+            // Auto-sync user tracking if not already synced
+            // This is idempotent - safe to call multiple times
+            sync.sync_user(&self.user_uuid, self.user_database.root_id())
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// List all tracked databases.
+    ///
+    /// Returns all databases this user has added to their tracked list.
+    ///
+    /// # Returns
+    /// Vector of TrackedDatabase entries
+    pub async fn databases(&self) -> Result<Vec<TrackedDatabase>> {
+        let databases_table = self
+            .user_database
+            .get_store_viewer::<Table<TrackedDatabase>>("databases")
+            .await?;
+
+        // Get all entries from the table (returns Vec<(key, value)>)
+        let all_entries = databases_table.search(|_| true).await?;
+
+        // Extract just the values
+        let tracked: Vec<TrackedDatabase> = all_entries.into_iter().map(|(_key, db)| db).collect();
+
+        Ok(tracked)
+    }
+
+    /// Get a specific tracked database by ID.
+    ///
+    /// # Arguments
+    /// * `database_id` - The ID of the database
+    ///
+    /// # Returns
+    /// The TrackedDatabase if it's in the user's tracked list
+    ///
+    /// # Errors
+    /// Returns `DatabaseNotTracked` if the database is not in the user's list
+    pub async fn database(&self, database_id: &ID) -> Result<TrackedDatabase> {
+        let databases_table = self
+            .user_database()
+            .get_store_viewer::<Table<TrackedDatabase>>("databases")
+            .await?;
+
+        // Direct O(1) lookup using database ID as key
+        let db_id_key = database_id.to_string();
+        databases_table.get(&db_id_key).await.map_err(|_| {
+            UserError::DatabaseNotTracked {
+                database_id: database_id.clone(),
+            }
+            .into()
+        })
+    }
+
+    /// Stop tracking a database.
+    ///
+    /// This removes the database from the user's tracked list.
+    /// It does not delete the database itself, remove key mappings, or delete any data.
+    ///
+    /// # Arguments
+    /// * `database_id` - The ID of the database to stop tracking
+    ///
+    /// # Errors
+    /// Returns `DatabaseNotTracked` if the database is not in the user's list
+    pub async fn untrack_database(&mut self, database_id: &ID) -> Result<()> {
+        let tx = self.user_database.new_transaction().await?;
+        let databases_table = tx.get_store::<Table<TrackedDatabase>>("databases").await?;
+
+        // Direct O(1) delete using database ID as key
+        let db_id_key = database_id.to_string();
+
+        // Verify it exists before deleting
+        if databases_table.get(&db_id_key).await.is_err() {
+            return Err(UserError::DatabaseNotTracked {
+                database_id: database_id.clone(),
+            }
+            .into());
+        }
+
+        // Delete using database ID as key
+        databases_table.delete(&db_id_key).await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
+}

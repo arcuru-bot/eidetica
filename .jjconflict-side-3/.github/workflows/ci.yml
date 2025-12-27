@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: CI (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubicloud-standard-8
+          - system: aarch64-linux
+            runner: ubicloud-standard-8-arm
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Lint
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.${{ matrix.system }}.lint.default'
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#checks.${{ matrix.system }}.treefmt'
+
+      - name: Test
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.${{ matrix.system }}.test.all'
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.${{ matrix.system }}.eval.default'
+
+      - name: Integration tests
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.integration.default'
+
+      - name: Doc
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.${{ matrix.system }}.doc.default'
+
+      - name: Remaining Checks
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link

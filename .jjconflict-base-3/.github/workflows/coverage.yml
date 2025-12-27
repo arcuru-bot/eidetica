@@ -1,0 +1,53 @@
+name: Coverage
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    name: Coverage
+    runs-on: ubicloud-standard-8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Coverage
+        run: |
+          nix-fast-build --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.coverage'
+
+      - name: Extract coverage data
+        run: |
+          mkdir -p coverage/sqlite coverage/inmemory coverage/postgres
+          cp "$(nix build --no-link --print-out-paths '.#legacyPackages.x86_64-linux.coverage.sqlite')/lcov.info" coverage/sqlite/lcov.info
+          cp "$(nix build --no-link --print-out-paths '.#legacyPackages.x86_64-linux.coverage.inmemory')/lcov.info" coverage/inmemory/lcov.info
+          cp "$(nix build --no-link --print-out-paths '.#legacyPackages.x86_64-linux.coverage.postgres')/lcov.info" coverage/postgres/lcov.info
+
+      - name: Upload coverage (sqlite)
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: sqlite
+          files: coverage/sqlite/lcov.info
+          fail_ci_if_error: false
+
+      - name: Upload coverage (inmemory)
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: inmemory
+          files: coverage/inmemory/lcov.info
+          fail_ci_if_error: false
+
+      - name: Upload coverage (postgres)
+        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: postgres
+          files: coverage/postgres/lcov.info
+          fail_ci_if_error: false

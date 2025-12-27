@@ -1,0 +1,69 @@
+use eidetica::{Entry, constants::ROOT, entry::ID};
+
+use super::helpers::*;
+
+#[test]
+fn test_entry_creation() {
+    let root = "test_root";
+    let entry = create_entry_with_parents(root, &["parent1"]);
+
+    assert_eq!(entry.root(), Some(ID::from_bytes(root)));
+    assert!(!entry.is_root()); // Regular entries are not root entries
+
+    assert_has_parents(&entry, &["parent1"]); // Entry now has parents as required
+}
+
+#[test]
+fn test_entry_toplevel_creation() {
+    let entry = create_root_entry();
+
+    assert!(entry.root().is_none());
+    assert!(entry.is_root());
+    assert!(entry.in_subtree(ROOT)); // Top-level entries have a "root" subtree
+}
+
+#[test]
+fn test_in_tree_and_subtree() {
+    let root = "test_root_subtrees";
+    let entry = create_entry_with_subtree(root, "subtree1", "subtree_data");
+
+    // Root entries are in their own tree (by their own ID)
+    assert!(entry.in_tree(&entry.id())); // Check by entry ID
+    assert!(!entry.in_tree(&ID::from_bytes("other_tree")));
+    assert!(entry.in_subtree("subtree1"));
+    assert!(!entry.in_subtree("non_existent_subtree"));
+}
+
+#[test]
+fn test_entry_parents() {
+    let root = "test_root_parents";
+
+    // Create entry with main tree parents
+    let entry_with_parents = create_entry_with_parents(root, &["parent1", "parent2"]);
+    assert_has_parents(&entry_with_parents, &["parent1", "parent2"]);
+
+    // Create entry with subtree and subtree parents
+    let subtree_name = "subtree1";
+    let subtree_data = "subtree_data";
+    let entry_with_subtree_parents =
+        create_entry_with_subtree_parents(root, subtree_name, subtree_data, &["subtree_parent"]);
+
+    // Verify subtree parents
+    assert_subtree_has_parents(
+        &entry_with_subtree_parents,
+        subtree_name,
+        &["subtree_parent"],
+    );
+
+    // Test entry with both main and subtree parents
+    let mut builder = Entry::builder(ID::from_bytes(root));
+    builder.set_parents_mut(vec![ID::from_bytes("parent1"), ID::from_bytes("parent2")]);
+    builder.set_subtree_data_mut(subtree_name, subtree_data);
+    builder.set_subtree_parents_mut(subtree_name, vec![ID::from_bytes("subtree_parent")]);
+    let complex_entry = builder
+        .build()
+        .expect("Complex entry should build successfully");
+
+    assert_has_parents(&complex_entry, &["parent1", "parent2"]);
+    assert_subtree_has_parents(&complex_entry, subtree_name, &["subtree_parent"]);
+}
