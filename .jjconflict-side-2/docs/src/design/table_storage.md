@@ -1,8 +1,13 @@
 # Table Store: Row-Native Storage
 
-> **Status: Design Draft**
+> **Status: Partially Implemented**
 >
-> This design is under development and not yet implemented.
+> Core row-ops storage format is implemented. Entries store `Vec<TableRowOp>`
+> instead of serialized Doc. Cold start cache build and historical reads work.
+>
+> **Not yet implemented:**
+> - Incremental cache updates (`apply_diff`) - currently does full rebuild
+> - `get_entries_between_tips` backend method for computing diffs
 
 The Table store uses a row-native storage model where individual rows are materialized in the backend and incrementally maintained as the DAG evolves. This enables O(1) single-row lookups without loading the entire table into memory.
 

@@ -1631,3 +1631,56 @@ async fn test_table_delete_concurrent_modifications() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_table_entry_format_is_row_ops() {
+    use eidetica::store::{TableRowOp, RowOpKind};
+
+    let ctx = TestContext::new().with_database().await;
+
+    // Insert a record
+    let op = ctx
+        .database()
+        .new_transaction()
+        .await
+        .expect("Failed to create transaction");
+
+    let table = op
+        .get_store::<Table<TestRecord>>("format_test")
+        .await
+        .expect("Failed to get Table");
+
+    let key = table
+        .insert(TestRecord {
+            name: "Test".to_string(),
+            age: 25,
+            email: "test@test.com".to_string(),
+        })
+        .await
+        .expect("Failed to insert");
+
+    let entry_id = op.commit().await.expect("Failed to commit");
+
+    // Get the raw entry and check format
+    let entry = ctx.database().get_entry(&entry_id).await.expect("Failed to get entry");
+
+    let raw_data = entry.data("format_test").expect("No data for subtree");
+    println!("Raw entry data: {}", raw_data);
+
+    // Parse as row ops - this should succeed if using new format
+    let ops: Vec<TableRowOp> = serde_json::from_str(raw_data)
+        .expect("Failed to parse as row ops - NOT using new format!");
+
+    assert_eq!(ops.len(), 1, "Should have exactly one op");
+    assert_eq!(ops[0].uuid, key, "Op UUID should match inserted key");
+    match &ops[0].kind {
+        RowOpKind::Set { data } => {
+            let record: TestRecord = serde_json::from_str(data).expect("Failed to parse record");
+            assert_eq!(record.name, "Test");
+            assert_eq!(record.age, 25);
+        }
+        RowOpKind::Delete => panic!("Expected Set, got Delete"),
+    }
+
+    println!("✓ Entry format is correctly using row-ops!");
+}
