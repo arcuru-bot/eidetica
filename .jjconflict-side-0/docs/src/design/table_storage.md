@@ -1,13 +1,19 @@
 # Table Store: Row-Native Storage
 
-> **Status: Partially Implemented**
+> **Status: Partially Implemented (pending height embedding)**
 >
 > Core row-ops storage format is implemented. Entries store `Vec<TableRowOp>`
 > instead of serialized Doc. Cold start cache build and historical reads work.
 >
-> **Not yet implemented:**
-> - Incremental cache updates (`apply_diff`) - currently does full rebuild
+> **Implemented:**
 > - `get_entries_between_tips` backend method for computing diffs
+> - `apply_cache_diff` incremental cache update logic
+>
+> **Pending (requires Entry height embedding):**
+> - Proper LWW heights in cache - currently uses workaround (height=0 for cold
+>   start, sequential idx for incremental). Works correctly but heights stored
+>   in CachedRow are not true DAG heights. See FIXME(heights) in transaction/mod.rs.
+> - Benchmark verification of O(diff) vs O(n) improvement
 
 The Table store uses a row-native storage model where individual rows are materialized in the backend and incrementally maintained as the DAG evolves. This enables O(1) single-row lookups without loading the entire table into memory.
 

@@ -6,7 +6,6 @@ use uuid::Uuid;
 
 use crate::{
     Result, Store, Transaction,
-    crdt::{CRDT, Doc},
     store::{Registered, errors::StoreError},
 };
 
@@ -204,8 +203,8 @@ where
         // Fall back to walking entries for historical transactions
         // Uses get_full_state_cached which handles historical reads via build_state_from_row_ops
         let doc = self.atomic_op.get_full_state_cached(&self.name).await?;
-        if let Some(value) = doc.get(key) {
-            if let Some(text) = value.as_text() {
+        if let Some(value) = doc.get(key)
+            && let Some(text) = value.as_text() {
                 return serde_json::from_str(text).map_err(|e| {
                     StoreError::DeserializationFailed {
                         store: self.name.clone(),
@@ -214,7 +213,6 @@ where
                     .into()
                 });
             }
-        }
         Err(StoreError::KeyNotFound {
             store: self.name.clone(),
             key: key.to_string(),
@@ -329,18 +327,23 @@ where
     /// # Errors
     /// Returns an error if there's a serialization error or the operation fails
     pub async fn search(&self, query: impl Fn(&T) -> bool) -> Result<Vec<(String, T)>> {
-        // Get the full state combining local and backend data
         let mut result = Vec::new();
-
-        // Get data from the atomic op if it exists
-        let local_data = self.atomic_op.get_local_data::<Doc>(&self.name);
 
         // Get the full state from the backend (using cache if available)
         let mut data = self.atomic_op.get_full_state_cached(&self.name).await?;
 
-        // If there's also local data, merge it with the full state
-        if let Ok(local) = local_data {
-            data = data.merge(&local)?;
+        // Apply in-transaction row operations to the cached state
+        // This ensures search() sees uncommitted changes (like get() does)
+        let local_ops = self.atomic_op.get_table_ops(&self.name);
+        for op in &local_ops {
+            match &op.kind {
+                RowOpKind::Set { data: row_data } => {
+                    data.set(&op.uuid, row_data.clone());
+                }
+                RowOpKind::Delete => {
+                    data.remove(&op.uuid);
+                }
+            }
         }
 
         // Iterate through all key-value pairs

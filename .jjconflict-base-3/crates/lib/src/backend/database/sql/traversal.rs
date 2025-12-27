@@ -3,7 +3,7 @@
 //! This module implements graph traversal operations like finding tips,
 //! computing merge bases, and collecting paths through the DAG using sqlx.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use crate::Result;
 use crate::backend::errors::BackendError;
@@ -568,6 +568,147 @@ pub async fn get_store_from_tips(
                 source: None,
             })?;
         entries.push(entry);
+    }
+
+    Ok(entries)
+}
+
+/// Get entries reachable from new_tips but not reachable from old_tips.
+///
+/// This is used for incremental cache updates - it finds the "diff" of entries
+/// that need to be processed when tips change.
+pub async fn get_entries_between_tips(
+    backend: &SqlxBackend,
+    tree: &ID,
+    store: &str,
+    old_tips: &[ID],
+    new_tips: &[ID],
+) -> Result<Vec<Entry>> {
+    if new_tips.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let pool = backend.pool();
+
+    // Step 1: Collect all entries reachable from old_tips
+    let mut old_reachable: HashSet<ID> = HashSet::new();
+    {
+        let mut to_visit: VecDeque<ID> = VecDeque::new();
+
+        for tip in old_tips {
+            let in_tree_and_store: Option<(i32,)> = sqlx::query_as(
+                "SELECT 1 FROM entries e
+                 JOIN subtrees st ON st.entry_id = e.id
+                 WHERE e.id = $1 AND e.tree_id = $2 AND st.store_name = $3",
+            )
+            .bind(tip.to_string())
+            .bind(tree.to_string())
+            .bind(store)
+            .fetch_optional(pool)
+            .await
+            .sql_context("Failed to check tree/store membership")?;
+
+            if in_tree_and_store.is_some() {
+                to_visit.push_back(tip.clone());
+            }
+        }
+
+        while let Some(entry_id) = to_visit.pop_front() {
+            if old_reachable.contains(&entry_id) {
+                continue;
+            }
+            old_reachable.insert(entry_id.clone());
+
+            let parent_rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT parent_id FROM store_parents WHERE child_id = $1 AND store_name = $2",
+            )
+            .bind(entry_id.to_string())
+            .bind(store)
+            .fetch_all(pool)
+            .await
+            .sql_context("Failed to get store parents")?;
+
+            for (parent_id,) in parent_rows {
+                let parent_id = ID::from(parent_id);
+                if !old_reachable.contains(&parent_id) {
+                    to_visit.push_back(parent_id);
+                }
+            }
+        }
+    }
+
+    // Step 2: Collect entries reachable from new_tips that are NOT in old_reachable
+    let mut diff_entries: HashSet<ID> = HashSet::new();
+    {
+        let mut to_visit: VecDeque<ID> = VecDeque::new();
+
+        for tip in new_tips {
+            let in_tree_and_store: Option<(i32,)> = sqlx::query_as(
+                "SELECT 1 FROM entries e
+                 JOIN subtrees st ON st.entry_id = e.id
+                 WHERE e.id = $1 AND e.tree_id = $2 AND st.store_name = $3",
+            )
+            .bind(tip.to_string())
+            .bind(tree.to_string())
+            .bind(store)
+            .fetch_optional(pool)
+            .await
+            .sql_context("Failed to check tree/store membership")?;
+
+            if in_tree_and_store.is_some() {
+                to_visit.push_back(tip.clone());
+            }
+        }
+
+        while let Some(entry_id) = to_visit.pop_front() {
+            if diff_entries.contains(&entry_id) {
+                continue;
+            }
+
+            // If this entry is in old_reachable, skip it and don't traverse its ancestors
+            if old_reachable.contains(&entry_id) {
+                continue;
+            }
+
+            diff_entries.insert(entry_id.clone());
+
+            let parent_rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT parent_id FROM store_parents WHERE child_id = $1 AND store_name = $2",
+            )
+            .bind(entry_id.to_string())
+            .bind(store)
+            .fetch_all(pool)
+            .await
+            .sql_context("Failed to get store parents")?;
+
+            for (parent_id,) in parent_rows {
+                let parent_id = ID::from(parent_id);
+                if !diff_entries.contains(&parent_id) && !old_reachable.contains(&parent_id) {
+                    to_visit.push_back(parent_id);
+                }
+            }
+        }
+    }
+
+    // Fetch the diff entries
+    let mut entries = Vec::with_capacity(diff_entries.len());
+    for id in &diff_entries {
+        let row: Option<(String,)> = sqlx::query_as("SELECT entry_json FROM entries WHERE id = $1")
+            .bind(id.to_string())
+            .fetch_optional(pool)
+            .await
+            .sql_context("Failed to get entry")?;
+
+        if let Some((json,)) = row {
+            let entry: Entry = serde_json::from_str(&json)
+                .map_err(|e| BackendError::DeserializationFailed { source: e })?;
+            entries.push(entry);
+        }
+    }
+
+    // Sort by store height (ascending for incremental application)
+    if !entries.is_empty() {
+        super::cache::sort_entries_by_height(&mut entries);
     }
 
     Ok(entries)

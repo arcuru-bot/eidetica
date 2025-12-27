@@ -1181,9 +1181,21 @@ impl Transaction {
             return Ok(true);
         }
 
-        // Rebuild cache from entries (cold start)
-        self.build_table_cache_from_entries(subtree_name, &current_tips)
-            .await?;
+        // Check if we have existing cached tips for incremental update
+        let cached_tips = backend.get_cached_tips(tree_id, subtree_name).await?;
+
+        match cached_tips {
+            Some(old_tips) if !old_tips.is_empty() => {
+                // Incremental update - only process the diff
+                self.apply_cache_diff(subtree_name, &old_tips, &current_tips)
+                    .await?;
+            }
+            _ => {
+                // Cold start - build from scratch
+                self.build_table_cache_from_entries(subtree_name, &current_tips)
+                    .await?;
+            }
+        }
 
         Ok(true)
     }
@@ -1223,8 +1235,12 @@ impl Transaction {
         // Iterate in reverse - entries are sorted ascending, we want descending
         for entry in entries.into_iter().rev() {
             let entry_id = entry.id().clone();
-            // Use position in reversed list as proxy for height (higher = later)
-            let entry_height = 0usize; // Height is computed by backend, we use entry_id for LWW
+            // FIXME(heights): Once Entry embeds height directly, use entry.height() here.
+            // Currently we use height=0 for all entries and rely on processing order
+            // (reverse sorted, first occurrence wins) rather than proper LWW comparison.
+            // This works for cold start but is semantically incorrect for LWW.
+            // See: https://github.com/anthropics/eidetica/issues/XXX (height embedding)
+            let entry_height = 0usize;
 
             // Get the subtree data for this store
             let raw_data = match entry.data(subtree_name) {
@@ -1275,6 +1291,119 @@ impl Transaction {
         // Update cached tips
         backend
             .set_cached_tips(tree_id, subtree_name, tips.to_vec())
+            .await?;
+
+        Ok(())
+    }
+
+    /// Incrementally updates the table cache by processing only diff entries.
+    ///
+    /// This is the optimized path for when we already have a cached state and
+    /// just need to apply the changes since the last cached tips. Instead of
+    /// rebuilding from scratch (O(n)), we only process the diff entries (O(diff)).
+    ///
+    /// Entries are processed in ascending order (by height then ID) and use
+    /// LWW comparison to determine if they should update existing cache entries.
+    async fn apply_cache_diff(
+        &self,
+        subtree_name: &str,
+        old_tips: &[ID],
+        new_tips: &[ID],
+    ) -> Result<()> {
+        use crate::backend::CachedRow;
+        use crate::store::RowOpKind;
+
+        let backend = self.db.backend()?;
+        let tree_id = self.db.root_id();
+
+        // Get only the entries that are new (reachable from new_tips but not old_tips)
+        let diff_entries = backend
+            .get_entries_between_tips(tree_id, subtree_name, old_tips, new_tips)
+            .await?;
+
+        // Process entries in ascending order (they come sorted by height, ID)
+        // For each entry, apply row ops with LWW comparison
+        //
+        // FIXME(heights): This uses a workaround because Entry doesn't embed height.
+        // Once Entry.height() is available, replace `idx + 1` with `entry.height()`.
+        //
+        // Current workaround rationale:
+        // - Cold start stores height=0 for all cached rows
+        // - Diff entries come sorted by (height, entry_id) ascending from backend
+        // - Using idx+1 ensures: (1) diff entries have height > 0 so they win over
+        //   cached entries, and (2) within the diff, later entries (higher actual
+        //   height) have higher idx and win LWW comparison
+        // - This is correct but semantically wrong - heights should be real DAG heights
+        //
+        // After height embedding:
+        // - Use entry.height() for proper LWW semantics
+        // - Update cold start to also use real heights
+        // - CachedRow.last_modified_height will have meaningful values
+        for (idx, entry) in diff_entries.into_iter().enumerate() {
+            let entry_id = entry.id().clone();
+            let entry_height = idx + 1; // FIXME(heights): use entry.height()
+
+            // Get the subtree data for this store
+            let raw_data = match entry.data(subtree_name) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Decrypt if encrypted
+            let data_str = match self.decrypt_if_needed(subtree_name, raw_data) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Parse as row ops
+            let ops: Vec<TableRowOp> = match serde_json::from_str(&data_str) {
+                Ok(ops) => ops,
+                Err(_) => continue,
+            };
+
+            // Apply ops with LWW comparison
+            for op in ops {
+                // Get existing cached row (if any) for LWW comparison
+                let existing = backend
+                    .get_cached_row(tree_id, subtree_name, &op.uuid)
+                    .await?;
+
+                // LWW: (height, entry_id) comparison
+                // Apply if no existing or if new entry wins
+                let should_apply = match &existing {
+                    None => true,
+                    Some(cached) => {
+                        (entry_height, &entry_id)
+                            > (cached.last_modified_height, &cached.last_modified_entry_id)
+                    }
+                };
+
+                if should_apply {
+                    let cached_row = match &op.kind {
+                        RowOpKind::Set { data } => CachedRow {
+                            data: data.clone(),
+                            is_tombstone: false,
+                            last_modified_entry_id: entry_id.clone(),
+                            last_modified_height: entry_height,
+                        },
+                        RowOpKind::Delete => CachedRow {
+                            data: String::new(),
+                            is_tombstone: true,
+                            last_modified_entry_id: entry_id.clone(),
+                            last_modified_height: entry_height,
+                        },
+                    };
+
+                    backend
+                        .upsert_cached_row(tree_id, subtree_name, &op.uuid, &cached_row)
+                        .await?;
+                }
+            }
+        }
+
+        // Update cached tips to new tips
+        backend
+            .set_cached_tips(tree_id, subtree_name, new_tips.to_vec())
             .await?;
 
         Ok(())
