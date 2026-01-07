@@ -1,0 +1,63 @@
+[package]
+name = "eidetica"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description.workspace = true
+
+[features]
+default = ["full"]
+full = ["y-crdt", "sqlite", "postgres"]
+y-crdt = ["dep:yrs"]
+sqlite = ["dep:sqlx"]
+postgres = ["dep:sqlx"]
+# Exposes internal testing utilities
+# Includes FixedClock, Instance::open_with_clock, and other internal hooks.
+testing = []
+
+[dependencies]
+chrono = { workspace = true }
+base64ct = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+yrs = { workspace = true, optional = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+iroh = { workspace = true }
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+zeroize = { workspace = true }
+handle_trait = { workspace = true }
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+ctor = { workspace = true }
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[[bench]]
+name = "backend_benchmarks"
+harness = false
+
+[[bench]]
+name = "iroh_benchmarks"
+harness = false
