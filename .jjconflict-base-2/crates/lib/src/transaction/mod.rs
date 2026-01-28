@@ -1065,9 +1065,8 @@ impl Transaction {
             }
             Ok(doc)
         } else {
-            // Cache is invalid - build cache from row-ops entries
-            self.build_table_cache_from_entries(subtree_name, &current_tips)
-                .await?;
+            // Cache is invalid - use coordinator to rebuild safely
+            self.ensure_table_cache_valid(subtree_name).await?;
 
             // Reconstruct Doc from cached rows
             let cached_rows = backend.get_all_cached_rows(tree_id, subtree_name).await?;
@@ -1150,8 +1149,9 @@ impl Transaction {
 
     /// Ensures the table cache is valid, rebuilding if necessary.
     ///
-    /// If cache is invalid (tips don't match), computes full CRDT state
-    /// and rebuilds the cache. After this call, single-row lookups are safe.
+    /// If cache is invalid (tips don't match), coordinates with other concurrent
+    /// transactions to ensure only one rebuild happens at a time. Uses a coordination
+    /// mechanism to prevent concurrent rebuilds from corrupting the cache.
     ///
     /// # Arguments
     /// * `subtree_name` - The name of the Table store
@@ -1172,13 +1172,48 @@ impl Transaction {
 
         let backend = self.db.backend()?;
         let tree_id = self.db.root_id();
+        let coordinator = backend.cache_rebuild_coordinator().clone();
+
+        loop {
+            // Try to acquire the rebuild lock
+            if let Some(guard) = coordinator.try_start_rebuild(tree_id, subtree_name).await {
+                // We're the rebuilder - double-check validity (could have changed while waiting)
+                if self.is_table_cache_valid(subtree_name).await? {
+                    guard.complete().await; // Notify waiters before returning
+                    return Ok(true);
+                }
+
+                // Perform the actual rebuild
+                self.do_cache_rebuild(subtree_name).await?;
+                guard.complete().await; // Notify waiters before returning
+                return Ok(true);
+            } else {
+                // Another task is rebuilding - wait for it to complete
+                coordinator.wait_for_rebuild(tree_id, subtree_name).await;
+
+                // Check if cache is now valid
+                if self.is_table_cache_valid(subtree_name).await? {
+                    return Ok(true);
+                }
+                // If still invalid (e.g., tips changed during rebuild), loop and retry
+            }
+        }
+    }
+
+    /// Performs the actual cache rebuild.
+    ///
+    /// This is extracted from ensure_table_cache_valid to keep the coordination
+    /// logic separate from the rebuild logic.
+    async fn do_cache_rebuild(&self, subtree_name: &str) -> Result<()> {
+        let backend = self.db.backend()?;
+        let tree_id = self.db.root_id();
 
         // Get current store tips for rebuilding
         let current_tips = backend.get_store_tips(tree_id, subtree_name).await?;
 
         // Empty store - nothing to cache
         if current_tips.is_empty() {
-            return Ok(true);
+            return Ok(());
         }
 
         // Check if we have existing cached tips for incremental update
@@ -1197,7 +1232,7 @@ impl Transaction {
             }
         }
 
-        Ok(true)
+        Ok(())
     }
 
     /// Builds the table cache by walking entries from tips.

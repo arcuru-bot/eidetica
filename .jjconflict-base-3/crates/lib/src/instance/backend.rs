@@ -11,7 +11,7 @@ use handle_trait::Handle;
 
 use crate::{
     Result,
-    backend::{BackendImpl, InstanceMetadata, VerificationStatus},
+    backend::{BackendImpl, CacheRebuildCoordinator, InstanceMetadata, VerificationStatus},
     entry::{Entry, ID},
 };
 
@@ -25,12 +25,21 @@ use crate::{
 #[derive(Clone, Handle)]
 pub struct Backend {
     backend_impl: Arc<dyn BackendImpl>,
+    cache_rebuild_coordinator: Arc<CacheRebuildCoordinator>,
 }
 
 impl Backend {
     /// Create a new Backend wrapping a BackendImpl
     pub fn new(backend_impl: Arc<dyn BackendImpl>) -> Self {
-        Self { backend_impl }
+        Self {
+            backend_impl,
+            cache_rebuild_coordinator: Arc::new(CacheRebuildCoordinator::new()),
+        }
+    }
+
+    /// Get the cache rebuild coordinator for coordinating concurrent cache rebuilds
+    pub fn cache_rebuild_coordinator(&self) -> &Arc<CacheRebuildCoordinator> {
+        &self.cache_rebuild_coordinator
     }
 
     /// Get an entry from the backend
