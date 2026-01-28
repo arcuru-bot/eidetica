@@ -1,0 +1,19 @@
+# Typos spell checker configuration
+# https://github.com/crate-ci/typos
+
+[files]
+extend-exclude = [
+    "target/",
+    "*.lock",
+]
+
+[default.extend-words]
+# Project-specific terms
+ratatui = "ratatui"  # Rust TUI library
+leafs = "leafs"  # Used in function names
+
+[default]
+extend-ignore-re = [
+    # Base64 encoded strings
+    "[a-zA-Z0-9+/]{40,}",
+]

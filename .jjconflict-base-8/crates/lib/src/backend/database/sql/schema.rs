@@ -1,0 +1,298 @@
+//! SQL schema definitions and migrations.
+//!
+//! This module contains the database schema used by SQL backends.
+//! The schema is designed to be portable between SQLite and Postgres.
+//!
+//! # Schema Versioning
+//!
+//! Version 0 indicates an unstable schema. Any schema changes during v0
+//! require full database recreation - no migrations are supported until v1.
+//!
+//! # Migration System
+//!
+//! The migration system uses code-based migrations rather than SQL files to handle
+//! dialect differences between SQLite and PostgreSQL. Each migration is a function
+//! that receives the backend and can execute database-specific SQL as needed.
+//!
+//! ## Adding a New Migration
+//!
+//! 1. Increment `SCHEMA_VERSION`
+//! 2. Add a new `migrate_vN_to_vM` async function
+//! 3. Add the migration to the match statement in `run_migration`
+//! 4. Document what the migration does
+
+use crate::Result;
+use crate::backend::errors::BackendError;
+
+use super::{SqlxBackend, SqlxResultExt};
+
+/// Current schema version.
+///
+/// Version 0 indicates unstable schema - full database recreation required
+/// for any schema changes. Migrations will be supported starting from v1.
+pub const SCHEMA_VERSION: i64 = 0;
+
+/// SQL statements to create the schema tables.
+///
+/// Each statement uses portable SQL that works on both SQLite and PostgreSQL.
+pub const CREATE_TABLES: &[&str] = &[
+    // Schema version tracking
+    // BIGINT (64-bit) used for portability between SQLite and PostgreSQL
+    "CREATE TABLE IF NOT EXISTS schema_version (
+        version BIGINT PRIMARY KEY
+    )",
+    // Core entry storage
+    // Entries are content-addressable via hash of entry content
+    "CREATE TABLE IF NOT EXISTS entries (
+        id TEXT PRIMARY KEY NOT NULL,
+        tree_id TEXT NOT NULL,
+        is_root BIGINT NOT NULL DEFAULT 0,
+        verification_status BIGINT NOT NULL DEFAULT 0,
+        height BIGINT NOT NULL DEFAULT 0,
+        entry_json TEXT NOT NULL
+    )",
+    // Tree parent relationships (main tree DAG edges)
+    // Each entry can have multiple parents for merge commits
+    "CREATE TABLE IF NOT EXISTS tree_parents (
+        child_id TEXT NOT NULL,
+        parent_id TEXT NOT NULL,
+        PRIMARY KEY (child_id, parent_id)
+    )",
+    // Subtrees - denormalized subtree data for efficient queries
+    // Replaces store_memberships with additional columns for height and data
+    "CREATE TABLE IF NOT EXISTS subtrees (
+        tree_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        height BIGINT NOT NULL,
+        data TEXT,
+        PRIMARY KEY (entry_id, store_name)
+    )",
+    // Store parent relationships (per-store DAG edges)
+    // Parents within a specific store context
+    "CREATE TABLE IF NOT EXISTS store_parents (
+        child_id TEXT NOT NULL,
+        parent_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        PRIMARY KEY (child_id, parent_id, store_name)
+    )",
+    // Tips cache - maintained incrementally
+    // Tips are entries with no children in their tree/store context
+    // store_name uses empty string for tree-level tips (PostgreSQL disallows NULL in PK)
+    "CREATE TABLE IF NOT EXISTS tips (
+        entry_id TEXT NOT NULL,
+        tree_id TEXT NOT NULL,
+        store_name TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (entry_id, tree_id, store_name)
+    )",
+    // Instance metadata (singleton row pattern)
+    // Contains device key and system database IDs.
+    // Uses singleton=1 constraint to ensure only one row exists.
+    "CREATE TABLE IF NOT EXISTS instance_metadata (
+        singleton BIGINT PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+        data TEXT NOT NULL
+    )",
+    // CRDT state cache
+    "CREATE TABLE IF NOT EXISTS crdt_cache (
+        entry_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        state TEXT NOT NULL,
+        PRIMARY KEY (entry_id, store_name)
+    )",
+    // Cached row data for Table stores
+    // Stores materialized CRDT state for fast reads
+    "CREATE TABLE IF NOT EXISTS cached_rows (
+        tree_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        uuid TEXT NOT NULL,
+        data TEXT NOT NULL,
+        is_tombstone BIGINT NOT NULL DEFAULT 0,
+        last_modified_entry_id TEXT NOT NULL,
+        last_modified_height BIGINT NOT NULL,
+        PRIMARY KEY (tree_id, store_name, uuid)
+    )",
+    // Cache metadata: which tips the cache was computed from
+    // One row per tip for the (tree, store) pair
+    "CREATE TABLE IF NOT EXISTS cache_tips (
+        tree_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        tip_id TEXT NOT NULL,
+        PRIMARY KEY (tree_id, store_name, tip_id)
+    )",
+];
+
+/// SQL statements to create indexes.
+pub const CREATE_INDEXES: &[&str] = &[
+    // Entry lookups and filtering
+    "CREATE INDEX IF NOT EXISTS idx_entries_tree_id ON entries(tree_id)",
+    "CREATE INDEX IF NOT EXISTS idx_entries_tree_height ON entries(tree_id, height DESC, id)",
+    "CREATE INDEX IF NOT EXISTS idx_entries_verification ON entries(verification_status)",
+    "CREATE INDEX IF NOT EXISTS idx_entries_is_root ON entries(is_root)",
+    // Parent relationship traversal
+    "CREATE INDEX IF NOT EXISTS idx_tree_parents_parent ON tree_parents(parent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tree_parents_child ON tree_parents(child_id)",
+    // Store-specific queries
+    "CREATE INDEX IF NOT EXISTS idx_subtrees_tree_store_height ON subtrees(tree_id, store_name, height DESC, entry_id)",
+    "CREATE INDEX IF NOT EXISTS idx_subtrees_store_height ON subtrees(store_name, height DESC, entry_id)",
+    "CREATE INDEX IF NOT EXISTS idx_store_parents_parent ON store_parents(store_name, parent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_store_parents_child ON store_parents(store_name, child_id)",
+    // Tip lookups
+    "CREATE INDEX IF NOT EXISTS idx_tips_tree_store ON tips(tree_id, store_name)",
+    // Cached rows lookup
+    "CREATE INDEX IF NOT EXISTS idx_cached_rows_tree_store ON cached_rows(tree_id, store_name)",
+    // Cache tips lookup
+    "CREATE INDEX IF NOT EXISTS idx_cache_tips_tree_store ON cache_tips(tree_id, store_name)",
+];
+
+/// Initialize the database schema.
+///
+/// Creates tables and indexes if they don't exist, and handles migrations
+/// if the schema version has changed.
+pub async fn initialize(backend: &SqlxBackend) -> Result<()> {
+    let pool = backend.pool();
+
+    // Create tables
+    for statement in CREATE_TABLES {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .sql_context("Schema creation failed")?;
+    }
+
+    // Check current schema version
+    let row: Option<(i64,)> = sqlx::query_as("SELECT version FROM schema_version")
+        .fetch_optional(pool)
+        .await
+        .sql_context("Failed to check schema version")?;
+
+    if row.is_none() {
+        // First initialization
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(SCHEMA_VERSION)
+            .execute(pool)
+            .await
+            .sql_context("Failed to initialize schema version")?;
+    } else if let Some((current_version,)) = row
+        && current_version < SCHEMA_VERSION
+    {
+        // Run migrations
+        migrate(backend, current_version, SCHEMA_VERSION).await?;
+    }
+
+    // Create indexes
+    for statement in CREATE_INDEXES {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .sql_context("Index creation failed")?;
+    }
+
+    Ok(())
+}
+
+/// Run migrations sequentially from one schema version to another.
+///
+/// Migrations are run one at a time, incrementing the version after each.
+/// This allows for proper error handling and rollback semantics.
+async fn migrate(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
+    tracing::info!(from, to, "Starting SQL schema migration");
+
+    let mut current = from;
+    while current < to {
+        let next = current + 1;
+        tracing::info!(from = current, to = next, "Running migration");
+
+        run_migration(backend, current, next).await?;
+
+        // Update schema version after successful migration
+        sqlx::query("UPDATE schema_version SET version = $1")
+            .bind(next)
+            .execute(backend.pool())
+            .await
+            .sql_context("Failed to update schema version")?;
+
+        tracing::info!(version = next, "Migration completed");
+        current = next;
+    }
+
+    tracing::info!(from, to, "All migrations completed successfully");
+    Ok(())
+}
+
+/// Execute a single migration step.
+///
+/// Each migration is a separate async function that handles the schema change.
+/// Add new migrations here as match arms.
+///
+/// # Adding a New Migration
+///
+/// When incrementing `SCHEMA_VERSION`, add a match arm here:
+///
+/// ```ignore
+/// match from {
+///     1 => migrate_v1_to_v2(backend).await,
+///     // ... existing migrations ...
+///     _ => { /* error handling */ }
+/// }
+/// ```
+async fn run_migration(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
+    // Suppress unused variable warning until migrations are added
+    let _ = backend;
+
+    // Version 0 is unstable - no migrations supported.
+    // When we move to v1+, add migration match arms here:
+    //
+    // match from {
+    //     1 => migrate_v1_to_v2(backend).await,
+    //     _ => Err(...),
+    // }
+
+    Err(BackendError::SqlxError {
+        reason: format!(
+            "Unknown migration path: v{from} to v{to}. \
+             Version 0 is unstable and requires full database recreation for schema changes."
+        ),
+        source: None,
+    }
+    .into())
+}
+
+// =============================================================================
+// Migration Function Templates
+// =============================================================================
+//
+// When SCHEMA_VERSION moves to 1+, use these patterns for migrations.
+// Each migration is an async function that receives the backend.
+//
+// Example migration (uncomment and adapt when needed):
+//
+// /// Migrate from v1 to v2: Add new_column to entries table.
+// ///
+// /// This migration adds a new column with a default value.
+// #[allow(dead_code)]
+// async fn migrate_v1_to_v2(backend: &SqlxBackend) -> Result<()> {
+//     let pool = backend.pool();
+//
+//     // SQLite and PostgreSQL may require different syntax
+//     if backend.is_sqlite() {
+//         sqlx::query("ALTER TABLE entries ADD COLUMN new_column TEXT DEFAULT ''")
+//             .execute(pool)
+//             .await
+//             .sql_context("Failed to add new_column")?;
+//     } else {
+//         // PostgreSQL syntax (if different)
+//         sqlx::query("ALTER TABLE entries ADD COLUMN new_column TEXT DEFAULT ''")
+//             .execute(pool)
+//             .await
+//             .sql_context("Failed to add new_column")?;
+//     }
+//
+//     Ok(())
+// }
+//
+// Then add to run_migration():
+//
+// match from {
+//     1 => migrate_v1_to_v2(backend).await,
+//     _ => Err(BackendError::SqlxError { ... }.into()),
+// }

@@ -8,16 +8,157 @@
 //!
 //! Instance wraps BackendImpl in a `Backend` struct that provides a layer for future development.
 
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, watch};
 
 use crate::{
     Result,
     auth::crypto::PrivateKey,
     entry::{Entry, ID},
 };
+
+// =============================================================================
+// Cache Rebuild Coordination
+// =============================================================================
+
+/// Key for cache rebuild coordination: (tree_id, store_name)
+type CacheKey = (ID, String);
+
+/// State for a single cache rebuild operation.
+struct RebuildState {
+    /// Whether a rebuild is currently in progress
+    in_progress: bool,
+    /// Watch channel to notify waiters when rebuild completes.
+    /// Value is the "generation" - incremented each time a rebuild completes.
+    notifier: watch::Sender<u64>,
+}
+
+/// Coordinates cache rebuilds to prevent concurrent rebuilds for the same (tree, store).
+///
+/// When a cache rebuild is needed:
+/// 1. First task acquires the rebuild lock and starts rebuilding
+/// 2. Other tasks wait on the watch channel for completion
+/// 3. Once complete, the rebuilding task signals via the watch channel
+/// 4. Waiting tasks wake up and can use the now-valid cache
+#[derive(Default)]
+pub struct CacheRebuildCoordinator {
+    /// Maps (tree_id, store_name) -> rebuild state
+    rebuilds: Mutex<HashMap<CacheKey, RebuildState>>,
+}
+
+impl CacheRebuildCoordinator {
+    /// Create a new coordinator.
+    pub fn new() -> Self {
+        Self {
+            rebuilds: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Attempt to start a cache rebuild.
+    ///
+    /// Returns `Some(RebuildGuard)` if this task should perform the rebuild.
+    /// Returns `None` if another task is already rebuilding (caller should wait).
+    pub async fn try_start_rebuild(
+        self: &Arc<Self>,
+        tree_id: &ID,
+        store: &str,
+    ) -> Option<RebuildGuard> {
+        let key = (tree_id.clone(), store.to_string());
+        let mut rebuilds = self.rebuilds.lock().await;
+
+        let state = rebuilds.entry(key.clone()).or_insert_with(|| {
+            let (tx, _rx) = watch::channel(0u64);
+            RebuildState {
+                in_progress: false,
+                notifier: tx,
+            }
+        });
+
+        if state.in_progress {
+            // Another task is rebuilding
+            None
+        } else {
+            // We win - mark as in progress
+            state.in_progress = true;
+            Some(RebuildGuard {
+                coordinator: Arc::clone(self),
+                key,
+            })
+        }
+    }
+
+    /// Wait for any in-progress rebuild to complete.
+    ///
+    /// Returns immediately if no rebuild is in progress.
+    pub async fn wait_for_rebuild(&self, tree_id: &ID, store: &str) {
+        let key = (tree_id.clone(), store.to_string());
+        let receiver = {
+            let rebuilds = self.rebuilds.lock().await;
+            if let Some(state) = rebuilds.get(&key) {
+                if state.in_progress {
+                    Some(state.notifier.subscribe())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(mut rx) = receiver {
+            // Wait for the generation to change (signaling completion)
+            let _ = rx.changed().await;
+        }
+    }
+
+    /// Mark rebuild as complete (called by RebuildGuard on drop).
+    async fn complete_rebuild(&self, key: &CacheKey) {
+        let mut rebuilds = self.rebuilds.lock().await;
+        if let Some(state) = rebuilds.get_mut(key) {
+            state.in_progress = false;
+            // Increment generation to wake up waiters
+            state.notifier.send_modify(|g| *g += 1);
+        }
+    }
+}
+
+/// RAII guard that marks the rebuild as complete when dropped.
+///
+/// The rebuild is marked complete even if the rebuild itself fails,
+/// allowing waiting tasks to retry.
+pub struct RebuildGuard {
+    coordinator: Arc<CacheRebuildCoordinator>,
+    key: CacheKey,
+}
+
+impl RebuildGuard {
+    /// Manually complete the rebuild and consume the guard.
+    ///
+    /// This is the preferred way to complete a rebuild as it allows
+    /// proper async cleanup. If dropped without calling this, the
+    /// rebuild will still be marked complete via a spawned task.
+    pub async fn complete(self) {
+        self.coordinator.complete_rebuild(&self.key).await;
+        // Prevent Drop from running
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for RebuildGuard {
+    fn drop(&mut self) {
+        // Spawn a task to complete the rebuild asynchronously.
+        // This handles the case where the guard is dropped without
+        // calling complete() (e.g., due to a panic or early return).
+        let coordinator = Arc::clone(&self.coordinator);
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            coordinator.complete_rebuild(&key).await;
+        });
+    }
+}
 
 /// Persistent metadata for an Eidetica instance.
 ///
@@ -589,12 +730,8 @@ pub trait BackendImpl: Send + Sync + Any {
     ///
     /// # Returns
     /// A `Result` containing an `Option<CachedRow>`. Returns `None` if not cached.
-    async fn get_cached_row(
-        &self,
-        tree: &ID,
-        store: &str,
-        uuid: &str,
-    ) -> Result<Option<CachedRow>>;
+    async fn get_cached_row(&self, tree: &ID, store: &str, uuid: &str)
+    -> Result<Option<CachedRow>>;
 
     /// Upsert a cached row in a Table store.
     ///

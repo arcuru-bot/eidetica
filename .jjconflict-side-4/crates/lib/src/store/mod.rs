@@ -13,7 +13,7 @@ mod value_editor;
 pub use value_editor::ValueEditor;
 
 mod table;
-pub use table::{Table, TableRowOp, RowOpKind};
+pub use table::{RowOpKind, Table, TableRowOp};
 
 mod settings_store;
 pub use settings_store::SettingsStore;

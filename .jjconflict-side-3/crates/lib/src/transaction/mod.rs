@@ -1052,35 +1052,33 @@ impl Transaction {
             None => false,
         };
 
-        if cache_valid {
-            // Cache is valid - reconstruct Doc from cached rows
-            let cached_rows = backend.get_all_cached_rows(tree_id, subtree_name).await?;
-            let mut doc = Doc::new();
-            for (uuid, row) in cached_rows {
-                if row.is_tombstone {
-                    doc.remove(&uuid);
-                } else {
-                    doc.set(&uuid, row.data);
-                }
-            }
-            Ok(doc)
-        } else {
-            // Cache is invalid - build cache from row-ops entries
-            self.build_table_cache_from_entries(subtree_name, &current_tips)
-                .await?;
+        if !cache_valid {
+            // Cache is invalid - coordinate rebuild to avoid races
+            let coordinator = backend.cache_rebuild_coordinator().clone();
 
-            // Reconstruct Doc from cached rows
-            let cached_rows = backend.get_all_cached_rows(tree_id, subtree_name).await?;
-            let mut doc = Doc::new();
-            for (uuid, row) in cached_rows {
-                if row.is_tombstone {
-                    doc.remove(&uuid);
-                } else {
-                    doc.set(&uuid, row.data);
-                }
+            // Try to acquire rebuild lock. If we can't, wait for the other task to finish.
+            if let Some(guard) = coordinator.try_start_rebuild(tree_id, subtree_name).await {
+                // We're the rebuilder - perform the rebuild
+                self.build_table_cache_from_entries(subtree_name, &current_tips)
+                    .await?;
+                guard.complete().await;
+            } else {
+                // Another task is rebuilding - wait for it to complete
+                coordinator.wait_for_rebuild(tree_id, subtree_name).await;
             }
-            Ok(doc)
         }
+
+        // Reconstruct Doc from cached rows
+        let cached_rows = backend.get_all_cached_rows(tree_id, subtree_name).await?;
+        let mut doc = Doc::new();
+        for (uuid, row) in cached_rows {
+            if row.is_tombstone {
+                doc.remove(&uuid);
+            } else {
+                doc.set(&uuid, row.data);
+            }
+        }
+        Ok(doc)
     }
 
     /// Checks if the table cache is valid for a given store.
@@ -1150,8 +1148,9 @@ impl Transaction {
 
     /// Ensures the table cache is valid, rebuilding if necessary.
     ///
-    /// If cache is invalid (tips don't match), computes full CRDT state
-    /// and rebuilds the cache. After this call, single-row lookups are safe.
+    /// If cache is invalid (tips don't match), coordinates with other concurrent
+    /// transactions to ensure only one rebuild happens at a time. Uses a coordination
+    /// mechanism to prevent concurrent rebuilds from corrupting the cache.
     ///
     /// # Arguments
     /// * `subtree_name` - The name of the Table store
@@ -1235,12 +1234,7 @@ impl Transaction {
         // Iterate in reverse - entries are sorted ascending, we want descending
         for entry in entries.into_iter().rev() {
             let entry_id = entry.id().clone();
-            // FIXME(heights): Once Entry embeds height directly, use entry.height() here.
-            // Currently we use height=0 for all entries and rely on processing order
-            // (reverse sorted, first occurrence wins) rather than proper LWW comparison.
-            // This works for cold start but is semantically incorrect for LWW.
-            // See: https://github.com/anthropics/eidetica/issues/XXX (height embedding)
-            let entry_height = 0usize;
+            let entry_height = entry.subtree_height(subtree_name).unwrap_or(0) as usize;
 
             // Get the subtree data for this store
             let raw_data = match entry.data(subtree_name) {
@@ -1323,25 +1317,9 @@ impl Transaction {
 
         // Process entries in ascending order (they come sorted by height, ID)
         // For each entry, apply row ops with LWW comparison
-        //
-        // FIXME(heights): This uses a workaround because Entry doesn't embed height.
-        // Once Entry.height() is available, replace `idx + 1` with `entry.height()`.
-        //
-        // Current workaround rationale:
-        // - Cold start stores height=0 for all cached rows
-        // - Diff entries come sorted by (height, entry_id) ascending from backend
-        // - Using idx+1 ensures: (1) diff entries have height > 0 so they win over
-        //   cached entries, and (2) within the diff, later entries (higher actual
-        //   height) have higher idx and win LWW comparison
-        // - This is correct but semantically wrong - heights should be real DAG heights
-        //
-        // After height embedding:
-        // - Use entry.height() for proper LWW semantics
-        // - Update cold start to also use real heights
-        // - CachedRow.last_modified_height will have meaningful values
-        for (idx, entry) in diff_entries.into_iter().enumerate() {
+        for entry in diff_entries {
             let entry_id = entry.id().clone();
-            let entry_height = idx + 1; // FIXME(heights): use entry.height()
+            let entry_height = entry.subtree_height(subtree_name).unwrap_or(0) as usize;
 
             // Get the subtree data for this store
             let raw_data = match entry.data(subtree_name) {

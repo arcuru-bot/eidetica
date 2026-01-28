@@ -1,19 +1,10 @@
 # Table Store: Row-Native Storage
 
-> **Status: Partially Implemented (pending height embedding)**
+> ⚠️ **Status: Superseded**
 >
-> Core row-ops storage format is implemented. Entries store `Vec<TableRowOp>`
-> instead of serialized Doc. Cold start cache build and historical reads work.
->
-> **Implemented:**
-> - `get_entries_between_tips` backend method for computing diffs
-> - `apply_cache_diff` incremental cache update logic
->
-> **Pending (requires Entry height embedding):**
-> - Proper LWW heights in cache - currently uses workaround (height=0 for cold
->   start, sequential idx for incremental). Works correctly but heights stored
->   in CachedRow are not true DAG heights. See FIXME(heights) in transaction/mod.rs.
-> - Benchmark verification of O(diff) vs O(n) improvement
+> This design has been consolidated into the comprehensive Table Store documentation.
+> See **[Table Store](table.md)** for the current design documentation covering
+> row-ops format, caching, incremental updates, and cache rebuild coordination.
 
 The Table store uses a row-native storage model where individual rows are materialized in the backend and incrementally maintained as the DAG evolves. This enables O(1) single-row lookups without loading the entire table into memory.
 
@@ -113,7 +104,7 @@ The previous Doc-based approach for Table stores has fundamental limitations:
 
 **Entries** contain row operations (not serialized Doc):
 
-```rust
+```rust,ignore
 pub struct TableRowOp {
     pub uuid: String,
     pub kind: RowOpKind,
@@ -127,7 +118,7 @@ pub enum RowOpKind {
 
 **Cached rows** store materialized state with CRDT metadata:
 
-```rust
+```rust,ignore
 pub struct CachedRow {
     pub data: String,              // Serialized row JSON
     pub is_tombstone: bool,        // Deleted flag
@@ -138,7 +129,7 @@ pub struct CachedRow {
 
 **Cache tips** track which tips the cache represents:
 
-```rust
+```rust,ignore
 // Per (tree_id, store_name): the tips this cache was computed from
 cache_tips: Vec<ID>
 ```
@@ -147,7 +138,7 @@ cache_tips: Vec<ID>
 
 Table entries store a list of row operations in `SubTreeNode.data`:
 
-```rust
+```rust,ignore
 // When Table::insert/set/delete is called:
 // 1. Create TableRowOp for the operation
 // 2. Add to list of ops for this subtree in the transaction
@@ -176,7 +167,7 @@ Each entry records the row operations performed, not the full table state.
 
 ### Current Tips Read (Common Case)
 
-```rust
+```rust,ignore
 pub async fn get(&self, key: &str) -> Result<T> {
     // 1. Check local staged data first
     if let Some(value) = self.check_staged_data(key)? {
@@ -214,7 +205,7 @@ pub async fn get(&self, key: &str) -> Result<T> {
 
 For reads at non-current tips, walk backwards through entries:
 
-```rust
+```rust,ignore
 async fn read_historical(&self, key: &str, tips: &[ID]) -> Result<T> {
     // Walk entries backwards from tips (reverse height order)
     let mut entries = self.backend.get_store_from_tips(tree_id, store, tips).await?;
@@ -244,7 +235,7 @@ async fn read_historical(&self, key: &str, tips: &[ID]) -> Result<T> {
 
 Writes stage row operations in the transaction, committed as an entry:
 
-```rust
+```rust,ignore
 pub async fn set(&self, key: &str, value: &T) -> Result<()> {
     let data = serde_json::to_string(value)?;
     let op = TableRowOp {
@@ -274,7 +265,7 @@ pub async fn delete(&self, key: &str) -> Result<()> {
 
 When `cached_tips != current_tips`, update incrementally:
 
-```rust
+```rust,ignore
 async fn update_cache(
     &self,
     cached_tips: &Option<Vec<ID>>,
@@ -355,7 +346,7 @@ async fn apply_row_op_lww(
 
 When no cache exists, build it by walking backwards from tips:
 
-```rust
+```rust,ignore
 async fn build_cache_cold(&self, tips: &[ID]) -> Result<()> {
     // Get all entries reachable from tips
     let entries = self.backend.get_store_from_tips(tree_id, store, tips).await?;
@@ -458,37 +449,38 @@ CREATE INDEX IF NOT EXISTS idx_cache_tips_lookup
 
 ## Performance Characteristics
 
-| Operation | Warm Cache | Cold Cache | Historical |
-|-----------|------------|------------|------------|
-| `get(key)` | O(1) | O(n) build, then O(1) | O(n) walk |
-| `search(pred)` | O(rows) | O(n) build, then O(rows) | O(n) walk |
-| Tip change | O(diff entries) | N/A | N/A |
-| Write | O(1) | O(1) | N/A |
+| Operation      | Warm Cache      | Cold Cache               | Historical |
+| -------------- | --------------- | ------------------------ | ---------- |
+| `get(key)`     | O(1)            | O(n) build, then O(1)    | O(n) walk  |
+| `search(pred)` | O(rows)         | O(n) build, then O(rows) | O(n) walk  |
+| Tip change     | O(diff entries) | N/A                      | N/A        |
+| Write          | O(1)            | O(1)                     | N/A        |
 
 Where:
+
 - n = number of entries in the store's DAG
 - diff entries = entries between old and new tips
 
 **Key improvements over Doc-based approach:**
 
-| Aspect | Doc-Based | Row-Native |
-|--------|-----------|------------|
-| Cache rebuild | O(n) entries, full Doc in memory | O(diff) entries, streaming |
-| Cold start | Full CRDT merge in memory | Streaming walk, no full state |
-| Large tables | Limited by memory | Limited by storage only |
-| Tip change cost | Full rebuild | Incremental diff |
+| Aspect          | Doc-Based                        | Row-Native                    |
+| --------------- | -------------------------------- | ----------------------------- |
+| Cache rebuild   | O(n) entries, full Doc in memory | O(diff) entries, streaming    |
+| Cold start      | Full CRDT merge in memory        | Streaming walk, no full state |
+| Large tables    | Limited by memory                | Limited by storage only       |
+| Tip change cost | Full rebuild                     | Incremental diff              |
 
 ## Comparison with Doc-Based Stores
 
 Table's row-native storage differs from DocStore and YDoc:
 
-| Aspect | Table (Row-Native) | DocStore/YDoc (Doc-Based) |
-|--------|-------------------|---------------------------|
-| Entry contains | Row operations | Full serialized CRDT |
-| CRDT granularity | Per-row LWW | Per-document merge |
-| Read without cache | Walk backwards | Compute full CRDT state |
-| Memory requirement | O(1) per read | O(table size) |
-| Conflict resolution | Row-level LWW | Document CRDT semantics |
+| Aspect              | Table (Row-Native) | DocStore/YDoc (Doc-Based) |
+| ------------------- | ------------------ | ------------------------- |
+| Entry contains      | Row operations     | Full serialized CRDT      |
+| CRDT granularity    | Per-row LWW        | Per-document merge        |
+| Read without cache  | Walk backwards     | Compute full CRDT state   |
+| Memory requirement  | O(1) per read      | O(table size)             |
+| Conflict resolution | Row-level LWW      | Document CRDT semantics   |
 
 DocStore and YDoc continue to use the Doc-based approach because their access patterns benefit from document-level CRDT semantics (nested structures, collaborative editing).
 
@@ -553,7 +545,7 @@ WHERE tree_id = ? AND store_name = ?
 
 For very large tables, stream entries from storage without loading all entry metadata:
 
-```rust
+```rust,ignore
 async fn build_cache_streaming(&self, tips: &[ID]) -> Result<()> {
     let mut stream = self.backend.stream_entries_from_tips(tree_id, store, tips);
     // Process entries as they arrive...
@@ -572,7 +564,7 @@ For extremely large tables, maintain cache for "hot" rows only:
 
 Move cache updates into `backend.put()` so rows are materialized as entries are ingested, not lazily on read:
 
-```rust
+```rust,ignore
 // In backend.put():
 if is_table_store(&subtree.name) {
     for op in parse_table_ops(&subtree.data) {

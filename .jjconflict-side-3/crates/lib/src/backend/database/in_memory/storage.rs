@@ -373,9 +373,11 @@ pub(crate) async fn get_entries_between_tips(
 
         for tip in old_tips {
             if let Some(entry) = entries.get(tip)
-                && entry.in_tree(tree) && entry.in_subtree(subtree) {
-                    to_process.push_back(tip.clone());
-                }
+                && entry.in_tree(tree)
+                && entry.in_subtree(subtree)
+            {
+                to_process.push_back(tip.clone());
+            }
         }
 
         while let Some(current_id) = to_process.pop_front() {
@@ -385,14 +387,16 @@ pub(crate) async fn get_entries_between_tips(
             old_reachable.insert(current_id.clone());
 
             if let Some(entry) = entries.get(&current_id)
-                && entry.in_tree(tree) && entry.in_subtree(subtree)
-                    && let Ok(store_parents) = entry.subtree_parents(subtree) {
-                        for parent in store_parents {
-                            if !old_reachable.contains(&parent) {
-                                to_process.push_back(parent);
-                            }
-                        }
+                && entry.in_tree(tree)
+                && entry.in_subtree(subtree)
+                && let Ok(store_parents) = entry.subtree_parents(subtree)
+            {
+                for parent in store_parents {
+                    if !old_reachable.contains(&parent) {
+                        to_process.push_back(parent);
                     }
+                }
+            }
         }
     }
 
@@ -405,9 +409,11 @@ pub(crate) async fn get_entries_between_tips(
 
         for tip in new_tips {
             if let Some(entry) = entries.get(tip)
-                && entry.in_tree(tree) && entry.in_subtree(subtree) {
-                    to_process.push_back(tip.clone());
-                }
+                && entry.in_tree(tree)
+                && entry.in_subtree(subtree)
+            {
+                to_process.push_back(tip.clone());
+            }
         }
 
         while let Some(current_id) = to_process.pop_front() {
@@ -422,20 +428,22 @@ pub(crate) async fn get_entries_between_tips(
             }
 
             if let Some(entry) = entries.get(&current_id)
-                && entry.in_tree(tree) && entry.in_subtree(subtree) {
-                    // Add subtree parents to be processed
-                    if let Ok(store_parents) = entry.subtree_parents(subtree) {
-                        for parent in store_parents {
-                            if !processed.contains(&parent) {
-                                to_process.push_back(parent);
-                            }
+                && entry.in_tree(tree)
+                && entry.in_subtree(subtree)
+            {
+                // Add subtree parents to be processed
+                if let Ok(store_parents) = entry.subtree_parents(subtree) {
+                    for parent in store_parents {
+                        if !processed.contains(&parent) {
+                            to_process.push_back(parent);
                         }
                     }
-
-                    // Include this entry in the result (it's in new but not old)
-                    result.push(entry.clone());
-                    processed.insert(current_id);
                 }
+
+                // Include this entry in the result (it's in new but not old)
+                result.push(entry.clone());
+                processed.insert(current_id);
+            }
         }
     }
 

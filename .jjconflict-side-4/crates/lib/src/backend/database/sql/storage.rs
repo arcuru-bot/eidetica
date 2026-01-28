@@ -730,14 +730,13 @@ pub async fn get_cached_tips(
 ) -> Result<Option<Vec<ID>>> {
     let pool = backend.pool();
 
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT tip_id FROM cache_tips WHERE tree_id = $1 AND store_name = $2",
-    )
-    .bind(tree.to_string())
-    .bind(store)
-    .fetch_all(pool)
-    .await
-    .sql_context("Failed to get cached tips")?;
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT tip_id FROM cache_tips WHERE tree_id = $1 AND store_name = $2")
+            .bind(tree.to_string())
+            .bind(store)
+            .fetch_all(pool)
+            .await
+            .sql_context("Failed to get cached tips")?;
 
     if rows.is_empty() {
         Ok(None)

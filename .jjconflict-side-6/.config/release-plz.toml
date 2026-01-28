@@ -1,0 +1,49 @@
+# release-plz configuration
+# https://release-plz.dev/docs/config
+
+[workspace]
+# Unified versioning: all crates in the workspace share the same version
+# This enables tags like vX.Y.Z instead of <crate>-vX.Y.Z
+git_tag_name = "v{{ version }}"
+
+# Customize the pull request
+pr_name = "chore: release v{{ version }}"
+pr_body = """
+{% for release in releases -%}
+## Release v{{ release.next_version }}
+
+This PR prepares the next release for the entire workspace. The changelog has been automatically generated from commit messages.
+
+**Before merging:**
+- Review the version bump ({{ release.previous_version }} → {{ release.next_version }})
+- Review semver compatibility: {{ release.semver_check }}
+- Edit `CHANGELOG.md` to add any custom commentary, context, or highlights
+- Ensure all changes are documented appropriately
+
+After merging, all packages will be automatically published to crates.io and a GitHub release will be created with tag `v{{ release.next_version }}`.
+{% endfor -%}
+"""
+
+# Add labels to release PRs for easier filtering
+pr_labels = ["release"]
+
+# Use git-cliff for changelog generation (all commits between tags)
+changelog_config = ".config/cliff.toml"
+
+# Customize GitHub release
+git_release_type = "auto"  # Automatically determine if it's a pre-release based on version
+git_release_body = """
+{{ changelog }}
+
+---
+📦 **Installation:**
+```bash
+cargo add eidetica@{{ version }}
+```
+
+📚 **Documentation:** https://docs.rs/eidetica/{{ version }}
+🏠 **Homepage:** https://eidetica.dev
+"""
+
+# Enable release draft mode if you want to review GitHub releases before publishing
+# git_release_draft = true

@@ -1298,17 +1298,6 @@ async fn test_table_cache_same_uuid_different_stores() {
     assert_eq!(record_b2.name, "Store B Record"); // Unchanged
 }
 
-// FIXME(cache-concurrency): This test is flaky due to a race condition in cache rebuilding.
-// When multiple concurrent tasks call get()/search(), they may all trigger cache validation
-// simultaneously. The cache rebuild is not atomic - multiple tasks can race to:
-// 1. Check if cache is valid (all see invalid)
-// 2. Start rebuilding (all start rebuilding)
-// 3. Write partial results (interleaved writes corrupt state)
-//
-// Fix requires either:
-// - A mutex/lock around cache validation+rebuild
-// - An async-aware cache rebuild that coordinates concurrent requests
-// - A "cache rebuilding" state that makes concurrent callers wait
 #[tokio::test]
 async fn test_table_cache_concurrent_reads() {
     // Test that concurrent reads work correctly with caching
@@ -1459,10 +1448,16 @@ async fn test_table_cache_after_fork_merge() {
     let base_record = viewer_merged.get(&key1).await.expect("Base record missing");
     assert_eq!(base_record.name, "Base User");
 
-    let a_record = viewer_merged.get(&key_a).await.expect("Branch A record missing");
+    let a_record = viewer_merged
+        .get(&key_a)
+        .await
+        .expect("Branch A record missing");
     assert_eq!(a_record.name, "Branch A User");
 
-    let b_record = viewer_merged.get(&key_b).await.expect("Branch B record missing");
+    let b_record = viewer_merged
+        .get(&key_b)
+        .await
+        .expect("Branch B record missing");
     assert_eq!(b_record.name, "Branch B User");
 
     // Merge: Create an entry that has both branches as parents
@@ -1645,7 +1640,7 @@ async fn test_table_delete_concurrent_modifications() {
 
 #[tokio::test]
 async fn test_table_entry_format_is_row_ops() {
-    use eidetica::store::{TableRowOp, RowOpKind};
+    use eidetica::store::{RowOpKind, TableRowOp};
 
     let ctx = TestContext::new().with_database().await;
 
@@ -1673,14 +1668,18 @@ async fn test_table_entry_format_is_row_ops() {
     let entry_id = op.commit().await.expect("Failed to commit");
 
     // Get the raw entry and check format
-    let entry = ctx.database().get_entry(&entry_id).await.expect("Failed to get entry");
+    let entry = ctx
+        .database()
+        .get_entry(&entry_id)
+        .await
+        .expect("Failed to get entry");
 
     let raw_data = entry.data("format_test").expect("No data for subtree");
     println!("Raw entry data: {}", raw_data);
 
     // Parse as row ops - this should succeed if using new format
-    let ops: Vec<TableRowOp> = serde_json::from_str(raw_data)
-        .expect("Failed to parse as row ops - NOT using new format!");
+    let ops: Vec<TableRowOp> =
+        serde_json::from_str(raw_data).expect("Failed to parse as row ops - NOT using new format!");
 
     assert_eq!(ops.len(), 1, "Should have exactly one op");
     assert_eq!(ops[0].uuid, key, "Op UUID should match inserted key");

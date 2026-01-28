@@ -1,0 +1,235 @@
+# Forgejo CI workflow for Nix builds
+#
+# Repository Secrets (configure in Forgejo Settings → Secrets → Actions):
+#   ATTIC_SERVER_URL: Attic server URL (required for caching)
+#   ATTIC_AUTH_TOKEN: Token for Attic cache
+#   CACHIX_AUTH_TOKEN: Token for pushing to Cachix (eidetica cache)
+#   CODECOV_TOKEN: Token for uploading coverage to Codecov
+#
+name: Nix
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    container:
+      image: nixos/nix:latest@sha256:d5cce2440bda1f966357732c06d86cb92368069fb52dfb6b2bae8725eea488a5
+    steps:
+      - name: Install Node.js for actions
+        run: nix-env -iA nixpkgs.nodejs
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Nix
+        run: ./.forgejo/scripts/setup-nix.sh --attic nixpkgs#nix-fast-build
+        env:
+          ATTIC_SERVER_URL: "${{ secrets.ATTIC_SERVER_URL }}"
+          ATTIC_AUTH_TOKEN: "${{ secrets.ATTIC_AUTH_TOKEN }}"
+
+      - name: Lint and format
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.lint.default'
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#checks.x86_64-linux.treefmt'
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    container:
+      image: nixos/nix:latest@sha256:d5cce2440bda1f966357732c06d86cb92368069fb52dfb6b2bae8725eea488a5
+    steps:
+      - name: Install Node.js for actions
+        run: nix-env -iA nixpkgs.nodejs
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Nix
+        run: ./.forgejo/scripts/setup-nix.sh --attic nixpkgs#nix-fast-build
+        env:
+          ATTIC_SERVER_URL: "${{ secrets.ATTIC_SERVER_URL }}"
+          ATTIC_AUTH_TOKEN: "${{ secrets.ATTIC_AUTH_TOKEN }}"
+
+      - name: Documentation checks
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.doc.default'
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    container:
+      image: nixos/nix:latest@sha256:d5cce2440bda1f966357732c06d86cb92368069fb52dfb6b2bae8725eea488a5
+    steps:
+      - name: Install Node.js for actions
+        run: nix-env -iA nixpkgs.nodejs
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Nix
+        run: ./.forgejo/scripts/setup-nix.sh --attic nixpkgs#nix-fast-build
+        env:
+          ATTIC_SERVER_URL: "${{ secrets.ATTIC_SERVER_URL }}"
+          ATTIC_AUTH_TOKEN: "${{ secrets.ATTIC_AUTH_TOKEN }}"
+
+      - name: Build and test
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.eidetica.bin'
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.test.sqlite'
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.test.minimal'
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.eval.default'
+
+  test-backends:
+    name: Test Backends (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        backend: [inmemory, postgres]
+      fail-fast: false
+    container:
+      image: nixos/nix:latest@sha256:d5cce2440bda1f966357732c06d86cb92368069fb52dfb6b2bae8725eea488a5
+    steps:
+      - name: Install Node.js for actions
+        run: nix-env -iA nixpkgs.nodejs
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Nix
+        run: ./.forgejo/scripts/setup-nix.sh --attic nixpkgs#nix-fast-build
+        env:
+          ATTIC_SERVER_URL: "${{ secrets.ATTIC_SERVER_URL }}"
+          ATTIC_AUTH_TOKEN: "${{ secrets.ATTIC_AUTH_TOKEN }}"
+
+      - name: Test ${{ matrix.backend }}
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.test.${{ matrix.backend }}'
+
+  coverage:
+    name: Coverage (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        backend: [sqlite, inmemory, postgres]
+      fail-fast: false
+    container:
+      image: nixos/nix:latest@sha256:d5cce2440bda1f966357732c06d86cb92368069fb52dfb6b2bae8725eea488a5
+    steps:
+      - name: Install Node.js for actions
+        run: nix-env -iA nixpkgs.nodejs
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Nix
+        run: ./.forgejo/scripts/setup-nix.sh --attic nixpkgs#nix-fast-build
+        env:
+          ATTIC_SERVER_URL: "${{ secrets.ATTIC_SERVER_URL }}"
+          ATTIC_AUTH_TOKEN: "${{ secrets.ATTIC_AUTH_TOKEN }}"
+
+      - name: Build coverage
+        run: |
+          nix-fast-build --skip-cached --no-nom --no-link \
+            -f '.#legacyPackages.x86_64-linux.coverage.${{ matrix.backend }}'
+
+      - name: Extract coverage data
+        run: |
+          cp "$(nix path-info '.#coverage.${{ matrix.backend }}')/lcov.info" lcov.info
+          if command -v attic &> /dev/null; then
+            attic push eidetica "$(nix path-info '.#coverage.${{ matrix.backend }}')"
+          fi
+
+      - name: Upload coverage to Codecov
+        uses: https://github.com/codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: arcuru/eidetica
+          flags: ${{ matrix.backend }}
+          files: lcov.info
+          fail_ci_if_error: false
+
+  sanitize:
+    name: Sanitize (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        sanitizer: [asan, lsan]
+      fail-fast: false
+    container:
+      image: nixos/nix:latest@sha256:d5cce2440bda1f966357732c06d86cb92368069fb52dfb6b2bae8725eea488a5
+    steps:
+      - name: Install Node.js for actions
+        run: nix-env -iA nixpkgs.nodejs
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Nix
+        run: ./.forgejo/scripts/setup-nix.sh --attic nixpkgs#nix-fast-build
+        env:
+          ATTIC_SERVER_URL: "${{ secrets.ATTIC_SERVER_URL }}"
+          ATTIC_AUTH_TOKEN: "${{ secrets.ATTIC_AUTH_TOKEN }}"
+
+      - name: Run ${{ matrix.sanitizer }}
+        run: |
+          PATHS=$(nix build .#sanitize.${{ matrix.sanitizer }} --no-link --print-out-paths)
+          if command -v attic &> /dev/null; then
+            echo "$PATHS" | xargs attic push eidetica
+          fi
+
+  artifacts:
+    name: Artifacts
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [lint, doc, test]
+    container:
+      image: nixos/nix:latest@sha256:d5cce2440bda1f966357732c06d86cb92368069fb52dfb6b2bae8725eea488a5
+    steps:
+      - name: Install Node.js for actions
+        run: nix-env -iA nixpkgs.nodejs
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Nix
+        run: ./.forgejo/scripts/setup-nix.sh --attic --cachix
+        env:
+          ATTIC_SERVER_URL: "${{ secrets.ATTIC_SERVER_URL }}"
+          ATTIC_AUTH_TOKEN: "${{ secrets.ATTIC_AUTH_TOKEN }}"
+          CACHIX_AUTH_TOKEN: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+      - name: Build and push artifacts
+        run: |
+          for pkg in eidetica.bin eidetica.image test.artifacts bench; do
+            echo "Building $pkg..."
+            PATHS=$(nix build .#$pkg --no-link --print-out-paths)
+
+            if command -v attic &> /dev/null; then
+              echo "Pushing to Attic..."
+              echo "$PATHS" | xargs attic push eidetica
+            fi
+
+            if [[ -n "${CACHIX_AUTH_TOKEN:-}" ]]; then
+              echo "Pushing to Cachix..."
+              echo "$PATHS" | cachix push eidetica
+            fi
+          done
+        env:
+          CACHIX_AUTH_TOKEN: "${{ secrets.CACHIX_AUTH_TOKEN }}"
