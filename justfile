@@ -476,7 +476,7 @@ ci mode='local':
 # Nix
 # =============================================================================
 
-# Nix commands: build, check, test, test-all, bench, integration, full
+# Nix commands: build, check, test, test-all, bench, bench-all, integration, full
 nix action='check':
     #!/usr/bin/env bash
     set -e
@@ -496,7 +496,11 @@ nix action='check':
             ;;
         bench)
             # Force re-run hermetic benchmarks (rebuild even if cached)
-            nix build .#bench --rebuild --print-build-logs --no-link
+            nix build .#bench.default --rebuild --print-build-logs --no-link
+            ;;
+        bench-all)
+            # Force re-run all hermetic benchmarks including extended (rebuild even if cached)
+            nix build .#bench.all --rebuild --print-build-logs --no-link
             ;;
         integration)
             nix build .#integration.nixos .#integration.container --print-build-logs --no-link
@@ -508,7 +512,7 @@ nix action='check':
             ;;
         *)
             echo "Unknown action: {{ action }}"
-            echo "Options: build, check, test, test-all, bench, integration, full"
+            echo "Options: build, check, test, test-all, bench, bench-all, integration, full"
             exit 1
             ;;
     esac
@@ -540,7 +544,12 @@ container type='docker':
 # Benchmarks
 # =============================================================================
 
-# Run benchmarks and open HTML report
+# Run default benchmarks (excludes extended/slow benchmarks)
 bench:
+    TEST_BACKEND=sqlite cargo bench --bench benchmarks --bench backend_benchmarks --bench table_cache_benchmarks --bench scale_benchmarks
+    xdg-open target/criterion/report/index.html 2>/dev/null || true
+
+# Run all benchmarks (default + extended)
+bench-all:
     TEST_BACKEND=sqlite cargo bench --workspace
     xdg-open target/criterion/report/index.html 2>/dev/null || true

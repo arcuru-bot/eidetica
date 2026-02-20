@@ -144,13 +144,12 @@
               inherit (testPkgs) artifacts;
             };
 
-          # Bench package - nix build .#bench runs hermetic benchmarks
-          # nix run .#bench for interactive benchmarks
-          bench =
-            benchPkgs.builds.default
-            // {
-              inherit (benchPkgs) artifacts;
-            };
+          # Bench group - nix build .#bench.default (excludes extended), .#bench.all
+          bench = {
+            inherit (benchPkgs.builds) default;
+            inherit (benchPkgs.builds) all;
+            inherit (benchPkgs) artifacts;
+          };
 
           # Coverage group - nix build .#coverage.default (sqlite), .#coverage.sqlite, .#coverage.all
           coverage =
@@ -278,7 +277,8 @@
             default = mkApp "${mainPkgs.eidetica-bin}/bin/eidetica" "Run the Eidetica binary";
             eidetica = mkApp "${mainPkgs.eidetica-bin}/bin/eidetica" "Run the Eidetica database";
             fix = mkApp "${lintPkgs.runners.fix}/bin/eidetica-fix" "Run auto-fixes and format code";
-            bench = mkApp "${benchPkgs.runners.default}/bin/bench-runner" "Run benchmarks interactively";
+            bench = mkApp "${benchPkgs.runners.default}/bin/bench-runner" "Run default benchmarks interactively";
+            bench-all = mkApp "${benchPkgs.runners.all}/bin/bench-all-runner" "Run all benchmarks interactively";
             coverage = mkApp "${coveragePkgs.runners.default}/bin/coverage-runner" "Run coverage interactively";
             doc-links = mkApp "${docPkgs.runners.links-online}/bin/doc-links-online" "Check documentation links online";
 

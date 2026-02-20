@@ -37,6 +37,7 @@
 - [Service (Daemon)](internal/service.md)
 - [Bootstrap](internal/bootstrap.md)
 - [Testing](internal/testing.md)
+- [Benchmarks](internal/benchmarks.md)
 - [Performance](internal/performance.md)
 - [Errors](internal/errors.md)
 

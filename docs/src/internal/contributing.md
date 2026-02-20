@@ -42,20 +42,23 @@ just   # See all available commands
 
 Direct Nix commands are available when needed:
 
-| Command                    | Description                                            |
-| -------------------------- | ------------------------------------------------------ |
-| `nix develop`              | Enter the development shell                            |
-| `nix build`                | Build the default package                              |
-| `nix flake check`          | Run all CI checks                                      |
-| `nix build .#test.default` | Run default tests (sqlite)                             |
-| `nix build .#test.all`     | Run all tests including all backends                   |
-| `nix build .#lint.default` | Run fast lints (clippy, deny, statix...)               |
-| `nix run .#test`           | Interactive test runner (override with `TEST_BACKEND`) |
-| `nix run .#fix`            | Auto-fix linting issues and format code                |
-| `nix run .#bench`          | Run benchmarks interactively                           |
-| `nix run .#coverage`       | Run coverage interactively                             |
+| Command                     | Description                                            |
+| --------------------------- | ------------------------------------------------------ |
+| `nix develop`               | Enter the development shell                            |
+| `nix build`                 | Build the default package                              |
+| `nix flake check`           | Run all CI checks                                      |
+| `nix build .#test.default`  | Run default tests (sqlite)                             |
+| `nix build .#test.all`      | Run all tests including all backends                   |
+| `nix build .#lint.default`  | Run fast lints (clippy, deny, statix...)               |
+| `nix build .#bench.default` | Run default benchmarks (hermetic)                      |
+| `nix build .#bench.all`     | Run all benchmarks including extended (hermetic)       |
+| `nix run .#test`            | Interactive test runner (override with `TEST_BACKEND`) |
+| `nix run .#fix`             | Auto-fix linting issues and format code                |
+| `nix run .#bench`           | Run default benchmarks interactively                   |
+| `nix run .#bench-all`       | Run all benchmarks interactively                       |
+| `nix run .#coverage`        | Run coverage interactively                             |
 
-Packages are organized into groups: `test`, `doc`, `lint`, `coverage`, `sanitize`.
+Packages are organized into groups: `test`, `doc`, `lint`, `coverage`, `sanitize`, `bench`.
 Each group supports `.#<group>.default` (fast), `.#<group>.all` (all), and `.#<group>.<name>` (specific).
 See [CI/Build Infrastructure](ci.md) for details.
 
