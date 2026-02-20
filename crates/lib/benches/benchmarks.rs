@@ -107,7 +107,7 @@ fn bench_batch_add_entries(c: &mut Criterion) {
         .expect("Failed to build Tokio runtime");
     let mut group = c.benchmark_group("batch_add_entries");
 
-    for batch_size in [1, 10, 50, 100, 500, 1000].iter() {
+    for batch_size in [1, 10, 50, 100, 200].iter() {
         group.throughput(Throughput::Elements(*batch_size as u64));
         group.bench_with_input(
             BenchmarkId::new("batch", batch_size),
