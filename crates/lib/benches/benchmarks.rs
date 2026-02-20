@@ -13,12 +13,15 @@ fn setup_tree(rt: &Runtime) -> (Instance, User, Database) {
     rt.block_on(setup_tree_async())
 }
 
-/// Creates a tree pre-populated with the specified number of key-value entries
-/// Each entry has format "key_N" -> "value_N" where N is the entry index
+/// Creates a tree pre-populated with the specified number of key-value entries.
+/// Uses batched transactions (50 entries per txn) for efficiency at larger scales.
+/// Each entry has format "key_N" -> "value_N" where N is the entry index.
 async fn setup_tree_with_entries_async(entry_count: usize) -> (Instance, User, Database) {
     let (instance, user, tree) = setup_tree_async().await;
 
-    for i in 0..entry_count {
+    let batch_size = 50;
+    let mut i = 0;
+    while i < entry_count {
         let txn = tree
             .new_transaction()
             .await
@@ -28,12 +31,16 @@ async fn setup_tree_with_entries_async(entry_count: usize) -> (Instance, User, D
             .await
             .expect("Failed to get DocStore");
 
-        doc_store
-            .set(format!("key_{i}"), format!("value_{i}"))
-            .await
-            .expect("Failed to set value");
+        let end = (i + batch_size).min(entry_count);
+        for j in i..end {
+            doc_store
+                .set(format!("key_{j}"), format!("value_{j}"))
+                .await
+                .expect("Failed to set value");
+        }
 
         txn.commit().await.expect("Failed to commit transaction");
+        i = end;
     }
 
     (instance, user, tree)
@@ -53,7 +60,7 @@ fn bench_add_entries(c: &mut Criterion) {
         .expect("Failed to build Tokio runtime");
     let mut group = c.benchmark_group("add_entries");
 
-    for tree_size in [0, 10, 100].iter() {
+    for tree_size in [0, 10, 100, 500, 1000].iter() {
         group.bench_with_input(
             BenchmarkId::new("single_entry", tree_size),
             tree_size,
@@ -100,7 +107,7 @@ fn bench_batch_add_entries(c: &mut Criterion) {
         .expect("Failed to build Tokio runtime");
     let mut group = c.benchmark_group("batch_add_entries");
 
-    for batch_size in [1, 10, 50, 100].iter() {
+    for batch_size in [1, 10, 50, 100, 500, 1000].iter() {
         group.throughput(Throughput::Elements(*batch_size as u64));
         group.bench_with_input(
             BenchmarkId::new("batch", batch_size),
@@ -151,7 +158,7 @@ fn bench_incremental_add_entries(c: &mut Criterion) {
         .expect("Failed to build Tokio runtime");
     let mut group = c.benchmark_group("incremental_add_entries");
 
-    for initial_size in [0, 100].iter() {
+    for initial_size in [0, 100, 500].iter() {
         group.bench_with_input(
             BenchmarkId::new("incremental_single", initial_size),
             initial_size,
@@ -199,7 +206,7 @@ fn bench_access_entries(c: &mut Criterion) {
         .expect("Failed to build Tokio runtime");
     let mut group = c.benchmark_group("access_entries");
 
-    for tree_size in [10, 100].iter() {
+    for tree_size in [10, 100, 500, 1000].iter() {
         group.bench_with_input(
             BenchmarkId::new("random_access", tree_size),
             tree_size,
@@ -269,7 +276,7 @@ fn bench_tree_operations(c: &mut Criterion) {
         });
     });
 
-    for tree_size in [0, 10, 100].iter() {
+    for tree_size in [0, 10, 100, 500, 1000].iter() {
         group.bench_with_input(
             BenchmarkId::new("create_transaction", tree_size),
             tree_size,
@@ -295,7 +302,7 @@ fn bench_tree_operations(c: &mut Criterion) {
 /// Custom Criterion configuration for consistent benchmarking
 /// Fixed sample size ensures reproducible results across different machines
 fn criterion_config() -> Criterion {
-    Criterion::default().sample_size(50).configure_from_args()
+    Criterion::default().sample_size(20).configure_from_args()
 }
 
 criterion_group! {
