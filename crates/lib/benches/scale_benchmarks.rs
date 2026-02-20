@@ -146,8 +146,7 @@ fn bench_docstore_write_scaling(c: &mut Criterion) {
                         let _ = &inst;
                         rt.block_on(async {
                             let txn = db.new_transaction().await.expect("txn");
-                            let store =
-                                txn.get_store::<DocStore>("data").await.expect("store");
+                            let store = txn.get_store::<DocStore>("data").await.expect("store");
                             store
                                 .set(
                                     black_box("new_key"),
@@ -185,14 +184,10 @@ fn bench_docstore_batch_write_scaling(c: &mut Criterion) {
                         let _ = &inst;
                         rt.block_on(async {
                             let txn = db.new_transaction().await.expect("txn");
-                            let store =
-                                txn.get_store::<DocStore>("data").await.expect("store");
+                            let store = txn.get_store::<DocStore>("data").await.expect("store");
                             for i in 0..batch_size {
                                 store
-                                    .set(
-                                        black_box(format!("k_{i}")),
-                                        black_box(format!("v_{i}")),
-                                    )
+                                    .set(black_box(format!("k_{i}")), black_box(format!("v_{i}")))
                                     .await
                                     .expect("set");
                             }
@@ -238,12 +233,8 @@ fn bench_table_write_scaling(c: &mut Criterion) {
                                 .get_store::<Table<Record>>("records")
                                 .await
                                 .expect("store");
-                            let _ = black_box(
-                                table
-                                    .insert(make_record(9999))
-                                    .await
-                                    .expect("insert"),
-                            );
+                            let _ =
+                                black_box(table.insert(make_record(9999)).await.expect("insert"));
                             txn.commit().await.expect("commit");
                         });
                     },
@@ -317,11 +308,8 @@ fn bench_docstore_read_scaling(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let txn = db.new_transaction().await.expect("txn");
-                        let store =
-                            txn.get_store::<DocStore>("data").await.expect("store");
-                        let _ = black_box(
-                            store.get(black_box(&target_key)).await.expect("get"),
-                        );
+                        let store = txn.get_store::<DocStore>("data").await.expect("store");
+                        let _ = black_box(store.get(black_box(&target_key)).await.expect("get"));
                     });
                 });
             },
@@ -353,8 +341,7 @@ fn bench_docstore_get_all_scaling(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let txn = db.new_transaction().await.expect("txn");
-                        let store =
-                            txn.get_store::<DocStore>("data").await.expect("store");
+                        let store = txn.get_store::<DocStore>("data").await.expect("store");
                         let _ = black_box(store.get_all().await.expect("get_all"));
                     });
                 });
@@ -372,51 +359,40 @@ fn bench_docstore_contains_key(c: &mut Criterion) {
     group.sample_size(30);
 
     for &db_size in &[100, 500, 1000] {
-        group.bench_with_input(
-            BenchmarkId::new("hit", db_size),
-            &db_size,
-            |b, &size| {
-                let (inst, _user, db) = rt.block_on(async {
-                    let (inst, user, db) = setup_tree_async().await;
-                    populate_docstore_batched(&db, size, 50).await;
-                    (inst, user, db)
-                });
-                let _ = &inst;
-                let target_key = format!("key_{}", size / 2);
+        group.bench_with_input(BenchmarkId::new("hit", db_size), &db_size, |b, &size| {
+            let (inst, _user, db) = rt.block_on(async {
+                let (inst, user, db) = setup_tree_async().await;
+                populate_docstore_batched(&db, size, 50).await;
+                (inst, user, db)
+            });
+            let _ = &inst;
+            let target_key = format!("key_{}", size / 2);
 
-                b.iter(|| {
-                    rt.block_on(async {
-                        let txn = db.new_transaction().await.expect("txn");
-                        let store =
-                            txn.get_store::<DocStore>("data").await.expect("store");
-                        let _ = black_box(store.contains_key(black_box(&target_key)).await);
-                    });
+            b.iter(|| {
+                rt.block_on(async {
+                    let txn = db.new_transaction().await.expect("txn");
+                    let store = txn.get_store::<DocStore>("data").await.expect("store");
+                    let _ = black_box(store.contains_key(black_box(&target_key)).await);
                 });
-            },
-        );
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("miss", db_size),
-            &db_size,
-            |b, &size| {
-                let (inst, _user, db) = rt.block_on(async {
-                    let (inst, user, db) = setup_tree_async().await;
-                    populate_docstore_batched(&db, size, 50).await;
-                    (inst, user, db)
-                });
-                let _ = &inst;
+        group.bench_with_input(BenchmarkId::new("miss", db_size), &db_size, |b, &size| {
+            let (inst, _user, db) = rt.block_on(async {
+                let (inst, user, db) = setup_tree_async().await;
+                populate_docstore_batched(&db, size, 50).await;
+                (inst, user, db)
+            });
+            let _ = &inst;
 
-                b.iter(|| {
-                    rt.block_on(async {
-                        let txn = db.new_transaction().await.expect("txn");
-                        let store =
-                            txn.get_store::<DocStore>("data").await.expect("store");
-                        let _ =
-                            black_box(store.contains_key(black_box("nonexistent_key")).await);
-                    });
+            b.iter(|| {
+                rt.block_on(async {
+                    let txn = db.new_transaction().await.expect("txn");
+                    let store = txn.get_store::<DocStore>("data").await.expect("store");
+                    let _ = black_box(store.contains_key(black_box("nonexistent_key")).await);
                 });
-            },
-        );
+            });
+        });
     }
 
     group.finish();
@@ -452,9 +428,7 @@ fn bench_table_read_scaling(c: &mut Criterion) {
                             .get_store::<Table<Record>>("records")
                             .await
                             .expect("store");
-                        let _ = black_box(
-                            table.get(black_box(target_key)).await.expect("get"),
-                        );
+                        let _ = black_box(table.get(black_box(target_key)).await.expect("get"));
                     });
                 });
             },
@@ -563,8 +537,7 @@ fn bench_docstore_update_scaling(c: &mut Criterion) {
                         let _ = &inst;
                         rt.block_on(async {
                             let txn = db.new_transaction().await.expect("txn");
-                            let store =
-                                txn.get_store::<DocStore>("data").await.expect("store");
+                            let store = txn.get_store::<DocStore>("data").await.expect("store");
                             // Overwrite existing key in the middle
                             store
                                 .set(
@@ -662,8 +635,7 @@ fn bench_docstore_delete_scaling(c: &mut Criterion) {
                         let _ = &inst;
                         rt.block_on(async {
                             let txn = db.new_transaction().await.expect("txn");
-                            let store =
-                                txn.get_store::<DocStore>("data").await.expect("store");
+                            let store = txn.get_store::<DocStore>("data").await.expect("store");
                             let _ = black_box(
                                 store
                                     .delete(black_box(format!("key_{}", size / 2)))
@@ -710,10 +682,7 @@ fn bench_table_delete_scaling(c: &mut Criterion) {
                                 .await
                                 .expect("store");
                             let _ = black_box(
-                                table
-                                    .delete(black_box(&target_key))
-                                    .await
-                                    .expect("delete"),
+                                table.delete(black_box(&target_key)).await.expect("delete"),
                             );
                             txn.commit().await.expect("commit");
                         });
@@ -754,8 +723,7 @@ fn bench_transaction_granularity(c: &mut Criterion) {
                         rt.block_on(async {
                             for t in 0..txn_count {
                                 let txn = db.new_transaction().await.expect("txn");
-                                let store =
-                                    txn.get_store::<DocStore>("data").await.expect("store");
+                                let store = txn.get_store::<DocStore>("data").await.expect("store");
                                 for e in 0..entries_per_txn {
                                     let idx = t * entries_per_txn + e;
                                     store
@@ -842,9 +810,7 @@ fn bench_store_viewer(c: &mut Criterion) {
                             .get_store_viewer::<DocStore>("data")
                             .await
                             .expect("viewer");
-                        let _ = black_box(
-                            viewer.get(black_box(&target_key)).await.expect("get"),
-                        );
+                        let _ = black_box(viewer.get(black_box(&target_key)).await.expect("get"));
                     });
                 });
             },
@@ -868,9 +834,7 @@ fn bench_store_viewer(c: &mut Criterion) {
                             .get_store_viewer::<Table<Record>>("records")
                             .await
                             .expect("viewer");
-                        let _ = black_box(
-                            viewer.get(black_box(target_key)).await.expect("get"),
-                        );
+                        let _ = black_box(viewer.get(black_box(target_key)).await.expect("get"));
                     });
                 });
             },
@@ -911,8 +875,7 @@ fn bench_database_creation(c: &mut Criterion) {
                         let (inst, mut user, db) = setup_tree_async().await;
                         let _ = &inst;
                         let mut dbs = vec![db];
-                        let key_id =
-                            user.get_default_key().expect("key");
+                        let key_id = user.get_default_key().expect("key");
                         for _ in 1..count {
                             let db = user
                                 .create_database(Doc::new(), &key_id)
@@ -1070,8 +1033,7 @@ fn bench_incremental_growth(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let txn = db.new_transaction().await.expect("txn");
-                        let store =
-                            txn.get_store::<DocStore>("data").await.expect("store");
+                        let store = txn.get_store::<DocStore>("data").await.expect("store");
                         store
                             .set(format!("inc_{counter}"), format!("val_{counter}"))
                             .await
@@ -1140,9 +1102,8 @@ fn bench_entry_history(c: &mut Criterion) {
 
                 b.iter(|| {
                     rt.block_on(async {
-                        let entries = black_box(
-                            db.get_all_entries().await.expect("get_all_entries"),
-                        );
+                        let entries =
+                            black_box(db.get_all_entries().await.expect("get_all_entries"));
                         black_box(entries.len());
                     });
                 });
@@ -1221,4 +1182,9 @@ criterion_group! {
         bench_entry_history,
 }
 
-criterion_main!(write_benches, read_benches, mutate_benches, operational_benches);
+criterion_main!(
+    write_benches,
+    read_benches,
+    mutate_benches,
+    operational_benches
+);
