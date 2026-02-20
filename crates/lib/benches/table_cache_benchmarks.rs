@@ -89,7 +89,7 @@ fn bench_cache_rebuild_after_single_commit(c: &mut Criterion) {
     let mut group = c.benchmark_group("table_cache_rebuild");
 
     // Test with different table sizes to show O(n) vs O(1) difference
-    for &history_size in &[10, 50, 100, 200] {
+    for &history_size in &[10, 50, 100, 200, 500, 1000] {
         group.bench_with_input(
             BenchmarkId::new("single_commit_diff", history_size),
             &history_size,
@@ -160,7 +160,7 @@ fn bench_warm_cache_read(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("table_warm_cache");
 
-    for &history_size in &[10, 50, 100, 200] {
+    for &history_size in &[10, 50, 100, 200, 500, 1000] {
         group.bench_with_input(
             BenchmarkId::new("single_read", history_size),
             &history_size,
@@ -209,7 +209,7 @@ fn bench_cold_cache_rebuild(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("table_cold_cache");
 
-    for &history_size in &[10, 50, 100, 200] {
+    for &history_size in &[10, 50, 100, 200, 500, 1000] {
         group.bench_with_input(
             BenchmarkId::new("first_read", history_size),
             &history_size,
