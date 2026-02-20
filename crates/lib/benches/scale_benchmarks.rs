@@ -129,7 +129,7 @@ fn bench_docstore_write_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("docstore_write_scaling");
     group.sample_size(20);
 
-    for &db_size in &[0, 100, 500, 1000, 2000] {
+    for &db_size in &[0, 100, 500, 1000] {
         group.bench_with_input(
             BenchmarkId::new("single_write", db_size),
             &db_size,
@@ -172,7 +172,7 @@ fn bench_docstore_batch_write_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("docstore_batch_write");
     group.sample_size(15);
 
-    for &batch in &[10, 50, 100, 500, 1000] {
+    for &batch in &[10, 50, 100, 200] {
         group.throughput(Throughput::Elements(batch as u64));
         group.bench_with_input(
             BenchmarkId::new("batch", batch),
@@ -252,7 +252,7 @@ fn bench_table_batch_write_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("table_batch_write");
     group.sample_size(15);
 
-    for &batch in &[10, 50, 100, 500] {
+    for &batch in &[10, 50, 100, 200] {
         group.throughput(Throughput::Elements(batch as u64));
         group.bench_with_input(
             BenchmarkId::new("batch", batch),
@@ -292,7 +292,7 @@ fn bench_docstore_read_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("docstore_read_scaling");
     group.sample_size(30);
 
-    for &db_size in &[10, 100, 500, 1000, 2000] {
+    for &db_size in &[10, 100, 500, 1000] {
         group.bench_with_input(
             BenchmarkId::new("single_read", db_size),
             &db_size,
@@ -706,10 +706,10 @@ fn bench_transaction_granularity(c: &mut Criterion) {
     let mut group = c.benchmark_group("transaction_granularity");
     group.sample_size(10);
 
-    let total_entries = 100;
+    let total_entries = 50;
 
     // N entries across K transactions
-    for &txn_count in &[1, 10, 50, 100] {
+    for &txn_count in &[1, 5, 10, 50] {
         let entries_per_txn = total_entries / txn_count;
         group.throughput(Throughput::Elements(total_entries as u64));
         group.bench_with_input(
@@ -903,10 +903,10 @@ fn bench_mixed_workload(c: &mut Criterion) {
     let mut group = c.benchmark_group("mixed_workload");
     group.sample_size(10);
 
-    let db_size = 500;
+    let db_size = 200;
 
     // Read-heavy: 90% reads, 10% writes (10 ops total per iteration)
-    group.bench_function("read_heavy_500", |b| {
+    group.bench_function("read_heavy", |b| {
         let (inst, _user, db) = rt.block_on(async {
             let (inst, user, db) = setup_tree_async().await;
             populate_docstore_batched(&db, db_size, 50).await;
@@ -938,7 +938,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
     });
 
     // Write-heavy: 10% reads, 90% writes (10 ops total per iteration)
-    group.bench_function("write_heavy_500", |b| {
+    group.bench_function("write_heavy", |b| {
         let (inst, _user, db) = rt.block_on(async {
             let (inst, user, db) = setup_tree_async().await;
             populate_docstore_batched(&db, db_size, 50).await;
@@ -970,7 +970,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
     });
 
     // Balanced: 50% reads, 50% writes (10 ops total per iteration)
-    group.bench_function("balanced_500", |b| {
+    group.bench_function("balanced", |b| {
         let (inst, _user, db) = rt.block_on(async {
             let (inst, user, db) = setup_tree_async().await;
             populate_docstore_batched(&db, db_size, 50).await;

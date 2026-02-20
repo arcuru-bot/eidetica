@@ -194,7 +194,7 @@ pub fn bench_merge_base_linear_chains(c: &mut Criterion) {
         .expect("Failed to build Tokio runtime");
     let mut group = c.benchmark_group("find_merge_base_linear");
 
-    for chain_length in [10, 50, 100, 500] {
+    for chain_length in [10, 50, 100] {
         group.bench_with_input(
             BenchmarkId::new("length", chain_length),
             &chain_length,
@@ -320,7 +320,7 @@ pub fn bench_tree_traversal_scalability(c: &mut Criterion) {
     let mut group = c.benchmark_group("large_tree_operations");
     group.sample_size(10); // Reduce sample size for large tree operations
 
-    let tree_sizes = [100, 500, 1000, 2000];
+    let tree_sizes = [100, 500, 1000];
     let structures = ["linear", "wide"];
 
     for &size in &tree_sizes {
@@ -461,7 +461,7 @@ pub fn bench_get_tree_from_tips(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_tree_from_tips");
     group.sample_size(10);
 
-    let tree_sizes = [100, 500, 1000, 2000];
+    let tree_sizes = [100, 500, 1000];
     let structures = ["linear", "wide"];
 
     for &size in &tree_sizes {
