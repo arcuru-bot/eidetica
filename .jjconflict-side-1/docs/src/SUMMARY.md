@@ -51,3 +51,5 @@
   - [Key Management](design/key_management.md)
   - [Bootstrap & Access Control](design/bootstrap.md)
   - [Error Handling](design/error_handling.md)
+  - [Identity Database](design/identity_database.md)
+  - [Delegated Authentication](design/delegated_authentication.md)
