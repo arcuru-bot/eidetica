@@ -38,14 +38,14 @@ use std::collections::HashMap;
 use super::{UserKeyManager, types::UserInfo};
 use crate::{
     Database, Error, Instance, Result, Transaction,
-    auth::{Permission, SigKey, crypto::PublicKey},
+    auth::{Permission, SigKey, crypto::PublicKey, types::AuthKey},
     crdt::Doc,
     database::DatabaseKey,
     entry::ID,
     instance::{InstanceError, backend::Backend},
-    store::Table,
+    store::{DocStore, Table},
     sync::{BootstrapRequest, DatabaseTicket, Sync},
-    user::{SyncSettings, TrackedDatabase, UserError},
+    user::{Identity, IdentityStatus, SyncSettings, TrackedDatabase, TrackedIdentity, UserError},
 };
 
 #[cfg(test)]
@@ -750,6 +750,10 @@ impl User {
     /// existing database from a new device, or when requesting access to a database
     /// shared by another user.
     ///
+    // TODO: Remove the `sync` parameter and use `self.instance.sync()` instead,
+    // like `register_identity` does. Same applies to `pending_bootstrap_requests`,
+    // `approve_bootstrap_request`, and `reject_bootstrap_request`.
+    //
     /// # Arguments
     /// * `sync` - Reference to the Instance's Sync object
     /// * `ticket` - A ticket containing the database ID and address hints
@@ -949,6 +953,205 @@ impl User {
 
         // Delete using database ID as key
         databases_table.delete(&db_id_key).await?;
+        tx.commit().await?;
+
+        Ok(())
+    }
+
+    // === Identity Database Management ===
+
+    /// Internal helper: read identity tracking entry by name.
+    ///
+    /// Returns `None` if the name is not tracked, or `Some(TrackedIdentity)` if found.
+    async fn identity_tracking(&self, name: &str) -> Result<Option<TrackedIdentity>> {
+        let identities = self
+            .user_database
+            .get_store_viewer::<DocStore>("identities")
+            .await?;
+        match identities.get(name).await {
+            Ok(value) => Ok(Some(TrackedIdentity::try_from(&value)?)),
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Create a new identity database.
+    ///
+    /// Creates a database with the given key as Admin(0), adds a global read
+    /// permission, and tracks it under the given name.
+    ///
+    /// # Arguments
+    /// * `name` - Human-friendly name for this identity (e.g. "personal", "work")
+    /// * `key_id` - The public key to use as the identity's initial Admin(0) key
+    ///
+    /// # Returns
+    /// The created `Identity`
+    ///
+    /// # Errors
+    /// - Returns `IdentityAlreadyExists` if the name is already tracked
+    pub async fn create_identity(&mut self, name: &str, key_id: &PublicKey) -> Result<Identity> {
+        // Check name doesn't already exist
+        if self.identity_tracking(name).await?.is_some() {
+            return Err(UserError::IdentityAlreadyExists {
+                name: name.to_string(),
+            }
+            .into());
+        }
+
+        // Create the identity database with the provided key
+        let database = self.create_database(Doc::new(), key_id).await?;
+
+        // Add global read permission in a separate transaction
+        // (Database::create rejects auth in initial_settings)
+        let tx = database.new_transaction().await?;
+        let settings = tx.get_settings()?;
+        settings
+            .set_global_auth_key(AuthKey::active(None, Permission::Read))
+            .await?;
+        tx.commit().await?;
+
+        // Track the identity in user's private database
+        let tx = self.user_database.new_transaction().await?;
+        let identities_store = tx.get_store::<DocStore>("identities").await?;
+        let tracked = TrackedIdentity {
+            root_id: database.root_id().clone(),
+            status: IdentityStatus::Active,
+        };
+        identities_store.set(name, tracked).await?;
+        tx.commit().await?;
+
+        Ok(Identity::new(database))
+    }
+
+    /// Register an identity from a `DatabaseTicket` and send a bootstrap request.
+    ///
+    /// The identity is tracked locally in a pending state until the bootstrap request
+    /// is approved by an existing device. Uses the `Instance`'s sync system to send
+    /// the request.
+    ///
+    /// # Arguments
+    /// * `name` - Human-friendly name for this identity
+    /// * `ticket` - A `DatabaseTicket` obtained from an existing device
+    /// * `key_id` - The user's key to use for the bootstrap request
+    /// * `auth_key` - The requested permission level
+    ///
+    /// # Errors
+    /// - Returns `IdentityAlreadyExists` if the name is already tracked
+    /// - Returns an error if sync is not enabled on the instance
+    pub async fn register_identity(
+        &mut self,
+        name: &str,
+        ticket: &DatabaseTicket,
+        key_id: &PublicKey,
+        auth_key: &AuthKey,
+    ) -> Result<()> {
+        // Check name doesn't already exist
+        if self.identity_tracking(name).await?.is_some() {
+            return Err(UserError::IdentityAlreadyExists {
+                name: name.to_string(),
+            }
+            .into());
+        }
+
+        // Track as pending
+        let tx = self.user_database.new_transaction().await?;
+        let identities_store = tx.get_store::<DocStore>("identities").await?;
+        let tracked = TrackedIdentity {
+            root_id: ticket.database_id().clone(),
+            status: IdentityStatus::Pending,
+        };
+        identities_store.set(name, tracked).await?;
+        tx.commit().await?;
+
+        // Send bootstrap request via the instance's sync system
+        let sync = self
+            .instance
+            .sync()
+            .ok_or_else(|| InstanceError::InvalidOperation {
+                reason: "sync is not enabled on this instance".to_string(),
+            })?;
+        self.request_database_access(&sync, ticket, key_id, *auth_key.permissions())
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get a named identity.
+    ///
+    /// Returns `Some(Identity)` if the identity is active and accessible.
+    /// For pending identities, attempts to open the database — on success, transitions
+    /// to active and returns `Some`; on failure, returns `None`.
+    /// Returns `None` if the name is unknown.
+    ///
+    /// Takes `&mut self` because a pending→active transition writes to the user database.
+    pub async fn get_identity(&mut self, name: &str) -> Result<Option<Identity>> {
+        let tracked = match self.identity_tracking(name).await? {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        match tracked.status {
+            IdentityStatus::Active => {
+                let db = self.open_database(&tracked.root_id).await?;
+                Ok(Some(Identity::new(db)))
+            }
+            IdentityStatus::Pending => {
+                // Try to open — if bootstrap was approved, the database is now accessible
+                match self.open_database(&tracked.root_id).await {
+                    Ok(db) => {
+                        // Transition to active
+                        let tx = self.user_database.new_transaction().await?;
+                        let identities_store = tx.get_store::<DocStore>("identities").await?;
+                        let updated = TrackedIdentity {
+                            root_id: tracked.root_id,
+                            status: IdentityStatus::Active,
+                        };
+                        identities_store.set(name, updated).await?;
+                        tx.commit().await?;
+                        Ok(Some(Identity::new(db)))
+                    }
+                    Err(_) => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// Get the root ID of a named identity.
+    ///
+    /// Available for both active and pending identities.
+    /// Returns `None` if the name is unknown.
+    pub async fn identity_id(&self, name: &str) -> Result<Option<ID>> {
+        Ok(self.identity_tracking(name).await?.map(|t| t.root_id))
+    }
+
+    /// List all tracked identities with their names and status.
+    pub async fn identities(&self) -> Result<Doc> {
+        let identities_store = self
+            .user_database
+            .get_store_viewer::<DocStore>("identities")
+            .await?;
+        identities_store.get_all().await
+    }
+
+    /// Remove a named identity from tracking.
+    ///
+    /// This removes the name-to-ID mapping from the user's private database.
+    /// It does NOT delete the underlying identity database.
+    ///
+    /// # Errors
+    /// - Returns `IdentityNotFound` if the name is not tracked
+    pub async fn remove_identity(&mut self, name: &str) -> Result<()> {
+        // Verify exists
+        if self.identity_tracking(name).await?.is_none() {
+            return Err(UserError::IdentityNotFound {
+                name: name.to_string(),
+            }
+            .into());
+        }
+
+        let tx = self.user_database.new_transaction().await?;
+        let identities_store = tx.get_store::<DocStore>("identities").await?;
+        identities_store.delete(name).await?;
         tx.commit().await?;
 
         Ok(())

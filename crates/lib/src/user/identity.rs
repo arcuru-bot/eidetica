@@ -38,7 +38,6 @@ impl Deref for Identity {
 
 impl Identity {
     /// Create an Identity from an existing database.
-    #[allow(dead_code)]
     pub(crate) fn new(database: Database) -> Self {
         Self { database }
     }
