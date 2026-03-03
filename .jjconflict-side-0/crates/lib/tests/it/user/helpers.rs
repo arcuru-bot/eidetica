@@ -9,7 +9,8 @@
 #![allow(dead_code)]
 
 use eidetica::{
-    Database, Instance, auth::crypto::PublicKey, crdt::Doc, entry::ID, sync::Sync, user::User,
+    Database, Identity, Instance, auth::crypto::PublicKey, crdt::Doc, entry::ID, sync::Sync,
+    user::User,
 };
 
 use crate::helpers::test_instance;
@@ -364,4 +365,14 @@ pub async fn test_concurrent_database_creation(
     }
 
     (instance, users, all_databases)
+}
+
+// ===== IDENTITY HELPERS =====
+
+/// Create an identity for a user and return it
+pub async fn create_user_identity(user: &mut User, name: &str) -> Identity {
+    let default_key = user.get_default_key().expect("Failed to get default key");
+    user.create_identity(name, &default_key)
+        .await
+        .expect("Failed to create identity")
 }

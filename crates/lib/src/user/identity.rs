@@ -24,6 +24,7 @@ use crate::{
 /// controls. The root ID is the user's stable identity address.
 ///
 /// `Identity` dereferences to `Database`, so all database operations are available directly.
+#[derive(Debug)]
 pub struct Identity {
     database: Database,
 }
