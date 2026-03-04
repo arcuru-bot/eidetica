@@ -56,7 +56,7 @@ use crate::{
     entry::ID,
     instance::{InstanceError, backend::Backend},
     store::{DocStore, Table},
-    sync::{BootstrapRequest, DatabaseTicket, Sync},
+    sync::{BootstrapRequest, DatabaseTicket, Sync, error::SyncError},
     user::{Identity, IdentityStatus, SyncSettings, TrackedDatabase, TrackedIdentity, UserError},
 };
 
@@ -1082,8 +1082,16 @@ impl User {
             .ok_or_else(|| InstanceError::InvalidOperation {
                 reason: "sync is not enabled on this instance".to_string(),
             })?;
-        self.request_database_access(&sync, ticket, key_id, *auth_key.permissions())
-            .await?;
+        match self
+            .request_database_access(&sync, ticket, key_id, *auth_key.permissions())
+            .await
+        {
+            Ok(()) => {}
+            Err(Error::Sync(SyncError::BootstrapPending { .. })) => {
+                // Expected for manual approval — request was sent and stored on peer
+            }
+            Err(e) => return Err(e),
+        }
 
         Ok(())
     }
@@ -1108,9 +1116,20 @@ impl User {
                 Ok(Some(Identity::new(db)))
             }
             IdentityStatus::Pending => {
-                // Try to open — if bootstrap was approved, the database is now accessible
-                match self.open_database(&tracked.root_id).await {
+                // Pending identities have no key mapping yet — use discovery.
+                let key_id = match self.identity_key(name).await {
+                    Ok(k) => k,
+                    Err(_) => return Ok(None), // Key not yet visible (approval not synced)
+                };
+                match self.open_database_with_key(&tracked.root_id, &key_id).await {
                     Ok(db) => {
+                        // Set up tracking so open_database works in future
+                        self.track_database(
+                            tracked.root_id.clone(),
+                            &key_id,
+                            SyncSettings::disabled(),
+                        )
+                        .await?;
                         // Transition to active
                         let tx = self.user_database.new_transaction().await?;
                         let identities_store = tx.get_store::<DocStore>("identities").await?;

@@ -9,8 +9,11 @@ use eidetica::{
     crdt::Doc,
     database::DatabaseKey,
     store::DocStore,
-    user::{IdentityStatus, TrackedIdentity, UserError},
+    sync::{DatabaseTicket, transports::http::HttpTransport},
+    user::{IdentityStatus, SyncSettings, TrackedIdentity, UserError},
 };
+
+use crate::sync::helpers::{setup_instance_with_initialized, start_sync_server};
 
 use super::helpers::{login_user, setup_instance};
 
@@ -503,6 +506,142 @@ async fn test_identity_ticket_contains_root_id() -> Result<()> {
     let ticket = identity.ticket();
 
     assert_eq!(ticket.database_id(), identity.root_id());
+
+    Ok(())
+}
+
+// ===== CROSS-INSTANCE REGISTRATION TESTS =====
+
+/// End-to-end test for `register_identity` across two separate Instances using HTTP sync.
+///
+/// Flow:
+/// 1. Device A creates an identity and enables sync for it
+/// 2. Device B calls `register_identity` with a ticket → BootstrapPending handled
+/// 3. Device A approves the bootstrap request
+/// 4. Device B re-syncs and calls `get_identity` → Pending transitions to Active
+#[tokio::test]
+async fn test_register_identity_across_instances() -> Result<()> {
+    // ===== Device A (server): create identity and start sync server =====
+    let server_instance = setup_instance_with_initialized().await;
+    server_instance.create_user("alice", None).await?;
+    let mut server_user = server_instance.login_user("alice", None).await?;
+    let server_key_id = server_user.add_private_key(Some("device_a")).await?;
+
+    // Create identity on server
+    let identity = server_user
+        .create_identity("personal", &server_key_id)
+        .await?;
+    let identity_root_id = identity.root_id().clone();
+
+    // Add the instance's device key as Admin on the identity database
+    // (needed for the sync handler to process bootstrap requests)
+    let device_pubkey = server_instance.device_key().public_key();
+    let txn = identity.new_transaction().await?;
+    let settings = txn.get_settings()?;
+    settings
+        .set_auth_key(
+            &device_pubkey,
+            AuthKey::active(Some("device"), Permission::Admin(0)),
+        )
+        .await?;
+    txn.commit().await?;
+
+    // Track the identity DB for sync
+    let server_sync = server_instance.sync().expect("Sync should be initialized");
+    server_user
+        .track_database(
+            identity_root_id.clone(),
+            &server_key_id,
+            SyncSettings::enabled(),
+        )
+        .await?;
+    server_sync
+        .sync_user(
+            server_user.user_uuid(),
+            server_user.user_database().root_id(),
+        )
+        .await?;
+
+    // Start HTTP sync server
+    let server_addr = start_sync_server(&server_sync).await;
+
+    // Build a ticket with the server's address
+    let mut ticket = identity.ticket();
+    ticket.add_address(server_addr.clone());
+
+    // ===== Device B (client): register identity via ticket =====
+    let client_instance = setup_instance_with_initialized().await;
+    client_instance.create_user("alice", None).await?;
+    let mut client_user = client_instance.login_user("alice", None).await?;
+    let client_key_id = client_user.add_private_key(Some("device_b")).await?;
+
+    // Register HTTP transport on client
+    let client_sync = client_instance.sync().expect("Sync should be initialized");
+    client_sync
+        .register_transport("http", HttpTransport::builder())
+        .await?;
+
+    // register_identity should succeed (BootstrapPending is caught internally)
+    let auth_key = AuthKey::active(Some("device_b"), Permission::Admin(0));
+    client_user
+        .register_identity("personal", &ticket, &client_key_id, &auth_key)
+        .await?;
+
+    // Verify identity is tracked as Pending on client
+    let tracked = client_user.identities().await?;
+    assert_eq!(tracked.len(), 1);
+    let tracked_identity = TrackedIdentity::try_from(tracked.iter().next().unwrap().1).unwrap();
+    assert_eq!(tracked_identity.status, IdentityStatus::Pending);
+    assert_eq!(tracked_identity.root_id, identity_root_id);
+
+    // get_identity should return None (not yet approved)
+    let result = client_user.get_identity("personal").await?;
+    assert!(
+        result.is_none(),
+        "Identity should not be accessible before approval"
+    );
+
+    // ===== Device A: approve the bootstrap request =====
+    let pending = server_sync.pending_bootstrap_requests().await?;
+    assert_eq!(pending.len(), 1, "Should have exactly one pending request");
+    let (request_id, pending_req) = &pending[0];
+    assert_eq!(pending_req.tree_id, identity_root_id);
+    assert_eq!(pending_req.requesting_pubkey, client_key_id);
+
+    server_user
+        .approve_bootstrap_request(&server_sync, request_id, &server_key_id)
+        .await?;
+    server_sync.flush().await.ok();
+
+    // ===== Device B: re-sync and retrieve identity =====
+
+    // Sync the identity database from the server (unauthenticated read via global key)
+    let sync_ticket =
+        DatabaseTicket::with_addresses(identity_root_id.clone(), vec![server_addr.clone()]);
+    client_sync.sync_with_ticket(&sync_ticket).await?;
+    client_sync.flush().await.ok();
+
+    // get_identity should now transition Pending → Active
+    let identity_b = client_user
+        .get_identity("personal")
+        .await?
+        .expect("Identity should be accessible after approval and sync");
+
+    // Verify identity properties
+    assert_eq!(identity_b.root_id(), &identity_root_id);
+
+    // Verify Device B's key is in the identity auth settings
+    let auth = identity_b.keys().await?;
+    let client_key_entry = auth.get_key_by_pubkey(&client_key_id)?;
+    assert_eq!(client_key_entry.status(), &KeyStatus::Active);
+
+    // Verify identity is now Active in tracking
+    let tracked = client_user.identities().await?;
+    let tracked_identity = TrackedIdentity::try_from(tracked.iter().next().unwrap().1).unwrap();
+    assert_eq!(tracked_identity.status, IdentityStatus::Active);
+
+    // Cleanup
+    server_sync.stop_server().await?;
 
     Ok(())
 }
