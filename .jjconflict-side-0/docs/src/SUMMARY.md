@@ -15,6 +15,7 @@
 - [Encryption Guide](user_guide/encryption_guide.md)
 - [Synchronization Guide](user_guide/synchronization_guide.md)
 - [Bootstrapping](user_guide/bootstrap.md)
+- [Identity Guide](user_guide/identity_guide.md)
 - [Sync Quick Reference](user_guide/sync_quick_reference.md)
 - [Logging](user_guide/logging.md)
 - [CLI Reference](user_guide/cli.md)
