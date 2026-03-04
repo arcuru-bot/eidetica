@@ -292,6 +292,9 @@ pub struct TrackedIdentity {
     pub root_id: ID,
     /// Current status of the identity
     pub status: IdentityStatus,
+    /// The public key associated with this identity (for opening databases via Identity)
+    /// `None` for legacy entries created before key_id tracking was added.
+    pub key_id: Option<PublicKey>,
 }
 
 // ==================== Doc Conversions ====================
@@ -307,6 +310,9 @@ impl From<TrackedIdentity> for Doc {
         let mut doc = Doc::atomic();
         doc.set("root_id", identity.root_id.as_str());
         doc.set("status", identity.status.to_string());
+        if let Some(key_id) = &identity.key_id {
+            doc.set("key_id", key_id.to_prefixed_string());
+        }
         doc
     }
 }
@@ -343,6 +349,18 @@ impl TryFrom<&Doc> for TrackedIdentity {
         })?;
         let status: IdentityStatus = status_str.parse()?;
 
-        Ok(TrackedIdentity { root_id, status })
+        let key_id = doc
+            .get_as::<&str>("key_id")
+            .map(PublicKey::from_prefixed_string)
+            .transpose()
+            .map_err(|e| crate::crdt::CRDTError::DeserializationFailed {
+                reason: format!("invalid key_id: {e}"),
+            })?;
+
+        Ok(TrackedIdentity {
+            root_id,
+            status,
+            key_id,
+        })
     }
 }

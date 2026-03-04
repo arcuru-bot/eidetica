@@ -9,13 +9,15 @@ use std::ops::Deref;
 use crate::{
     Database, Result,
     auth::{
-        crypto::PublicKey,
+        crypto::{PrivateKey, PublicKey},
         settings::AuthSettings,
         types::{AuthKey, DelegatedTreeRef, PermissionBounds, TreeReference},
     },
+    database::DatabaseKey,
     entry::ID,
     store::SettingsStore,
     sync::DatabaseTicket,
+    user::UserError,
 };
 
 /// A user identity backed by a dedicated database.
@@ -24,9 +26,13 @@ use crate::{
 /// controls. The root ID is the user's stable identity address.
 ///
 /// `Identity` dereferences to `Database`, so all database operations are available directly.
+/// `Identity` carries the signing key needed to open databases that delegate to it,
+/// enabling `identity.open_database(&target_root_id)` without going back through `User`.
 #[derive(Debug)]
 pub struct Identity {
     database: Database,
+    key_id: PublicKey,
+    signing_key: PrivateKey,
 }
 
 impl Deref for Identity {
@@ -38,9 +44,13 @@ impl Deref for Identity {
 }
 
 impl Identity {
-    /// Create an Identity from an existing database.
-    pub(crate) fn new(database: Database) -> Self {
-        Self { database }
+    /// Create an Identity from an existing database with its associated key.
+    pub(crate) fn new(database: Database, key_id: PublicKey, signing_key: PrivateKey) -> Self {
+        Self {
+            database,
+            key_id,
+            signing_key,
+        }
     }
 
     /// The root ID of this identity (the shareable identity address).
@@ -48,9 +58,40 @@ impl Identity {
         self.database.root_id()
     }
 
+    /// The public key associated with this identity on this device.
+    pub fn key_id(&self) -> &PublicKey {
+        &self.key_id
+    }
+
     /// A reference to the underlying database.
     pub fn database(&self) -> &Database {
         &self.database
+    }
+
+    /// Open a database that delegates to this identity.
+    ///
+    /// Discovers the delegation SigKey for this identity's key in the target database
+    /// and opens it. This is the preferred way to open databases through an identity,
+    /// without going back through `User`.
+    ///
+    /// # Arguments
+    /// * `root_id` - The root entry ID of the target database
+    ///
+    /// # Errors
+    /// - Returns `NoSigKeyFound` if no SigKey (direct or delegation) is found for this identity's key
+    pub async fn open_database(&self, root_id: &ID) -> Result<Database> {
+        let instance = self.database.instance()?;
+        let available = Database::find_sigkeys(&instance, root_id, &self.key_id).await?;
+        let (sigkey, _perm) =
+            available
+                .into_iter()
+                .next()
+                .ok_or_else(|| UserError::NoSigKeyFound {
+                    key_id: self.key_id.to_string(),
+                    database_id: root_id.clone(),
+                })?;
+        let key = DatabaseKey::with_identity(self.signing_key.clone(), sigkey);
+        Database::open(instance, root_id, key).await
     }
 
     /// Add a device key to this identity's auth settings.

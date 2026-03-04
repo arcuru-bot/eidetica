@@ -1028,11 +1028,20 @@ impl User {
         let tracked = TrackedIdentity {
             root_id: database.root_id().clone(),
             status: IdentityStatus::Active,
+            key_id: Some(key_id.clone()),
         };
         identities_store.set(name, tracked).await?;
         tx.commit().await?;
 
-        Ok(Identity::new(database))
+        let signing_key = self
+            .key_manager
+            .get_signing_key(key_id)
+            .cloned()
+            .ok_or_else(|| UserError::KeyNotFound {
+                key_id: key_id.to_string(),
+            })?;
+
+        Ok(Identity::new(database, key_id.clone(), signing_key))
     }
 
     /// Register an identity from a `DatabaseTicket` and send a bootstrap request.
@@ -1071,6 +1080,7 @@ impl User {
         let tracked = TrackedIdentity {
             root_id: ticket.database_id().clone(),
             status: IdentityStatus::Pending,
+            key_id: Some(key_id.clone()),
         };
         identities_store.set(name, tracked).await?;
         tx.commit().await?;
@@ -1112,15 +1122,55 @@ impl User {
 
         match tracked.status {
             IdentityStatus::Active => {
+                // Resolve the key_id: prefer stored, fall back to discovery for legacy entries
+                let key_id = match tracked.key_id {
+                    Some(k) => k,
+                    None => {
+                        let discovered = match self.identity_key_discover(&tracked.root_id).await {
+                            Ok(k) => k,
+                            Err(_) => return Ok(None),
+                        };
+                        // Backfill key_id for legacy entry
+                        let tx = self.user_database.new_transaction().await?;
+                        let identities_store = tx.get_store::<DocStore>("identities").await?;
+                        let updated = TrackedIdentity {
+                            root_id: tracked.root_id.clone(),
+                            status: IdentityStatus::Active,
+                            key_id: Some(discovered.clone()),
+                        };
+                        identities_store.set(name, updated).await?;
+                        tx.commit().await?;
+                        discovered
+                    }
+                };
+
+                let signing_key = self
+                    .key_manager
+                    .get_signing_key(&key_id)
+                    .cloned()
+                    .ok_or_else(|| UserError::KeyNotFound {
+                        key_id: key_id.to_string(),
+                    })?;
+
                 let db = self.open_database(&tracked.root_id).await?;
-                Ok(Some(Identity::new(db)))
+                Ok(Some(Identity::new(db, key_id, signing_key)))
             }
             IdentityStatus::Pending => {
-                // Pending identities have no key mapping yet — use discovery.
-                let key_id = match self.identity_key(name).await {
-                    Ok(k) => k,
-                    Err(_) => return Ok(None), // Key not yet visible (approval not synced)
+                // Resolve key_id: prefer stored, fall back to discovery
+                let key_id = match tracked.key_id.clone() {
+                    Some(k) => k,
+                    None => match self.identity_key_discover(&tracked.root_id).await {
+                        Ok(k) => k,
+                        Err(_) => return Ok(None),
+                    },
                 };
+                // Verify the key is actually in the identity's auth settings
+                if tracked.key_id.is_some() {
+                    match self.identity_key_discover(&tracked.root_id).await {
+                        Ok(_) => {}
+                        Err(_) => return Ok(None), // Key not yet visible (approval not synced)
+                    }
+                }
                 match self.open_database_with_key(&tracked.root_id, &key_id).await {
                     Ok(db) => {
                         // Set up tracking so open_database works in future
@@ -1136,10 +1186,20 @@ impl User {
                         let updated = TrackedIdentity {
                             root_id: tracked.root_id,
                             status: IdentityStatus::Active,
+                            key_id: Some(key_id.clone()),
                         };
                         identities_store.set(name, updated).await?;
                         tx.commit().await?;
-                        Ok(Some(Identity::new(db)))
+
+                        let signing_key = self
+                            .key_manager
+                            .get_signing_key(&key_id)
+                            .cloned()
+                            .ok_or_else(|| UserError::KeyNotFound {
+                                key_id: key_id.to_string(),
+                            })?;
+
+                        Ok(Some(Identity::new(db, key_id, signing_key)))
                     }
                     Err(_) => Ok(None),
                 }
@@ -1209,14 +1269,14 @@ impl User {
 
     /// Find the user's local key that exists in a named identity's auth settings.
     ///
-    /// Opens the identity database (unauthenticated, since identities have global read)
-    /// and checks which of the user's local keys appear in its auth settings.
+    /// Prefers the stored `key_id` from the tracked identity when available.
+    /// Falls back to discovery (scanning auth settings) for legacy entries.
     ///
     /// # Arguments
     /// * `name` - The name of the tracked identity
     ///
     /// # Returns
-    /// The `PublicKey` of the first local key found in the identity's auth settings
+    /// The `PublicKey` of the local key associated with this identity
     ///
     /// # Errors
     /// - Returns `IdentityNotFound` if the name is not tracked
@@ -1229,7 +1289,28 @@ impl User {
                     name: name.to_string(),
                 })?;
 
-        let identity_db = Database::open_unauthenticated(tracked.root_id.clone(), &self.instance)?;
+        if let Some(key_id) = tracked.key_id {
+            return Ok(key_id);
+        }
+
+        // Legacy fallback: discover by scanning auth settings
+        self.identity_key_discover(&tracked.root_id)
+            .await
+            .map_err(|_| {
+                UserError::NoKeyInIdentity {
+                    name: name.to_string(),
+                    identity_id: tracked.root_id,
+                }
+                .into()
+            })
+    }
+
+    /// Discover which local key exists in an identity database's auth settings.
+    ///
+    /// Opens the identity database unauthenticated (identities have global read)
+    /// and checks which of the user's local keys appear in its auth settings.
+    async fn identity_key_discover(&self, identity_root_id: &ID) -> Result<PublicKey> {
+        let identity_db = Database::open_unauthenticated(identity_root_id.clone(), &self.instance)?;
         let settings = identity_db.get_settings().await?;
         let auth = settings.auth_snapshot().await?;
 
@@ -1240,8 +1321,8 @@ impl User {
         }
 
         Err(UserError::NoKeyInIdentity {
-            name: name.to_string(),
-            identity_id: tracked.root_id,
+            name: String::new(),
+            identity_id: identity_root_id.clone(),
         }
         .into())
     }

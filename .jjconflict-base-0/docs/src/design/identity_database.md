@@ -180,19 +180,20 @@ target_settings.add_delegated_tree(delegation).await?;
 
 ### Opening a Database Through Identity
 
-Once delegation is set up, `identity_key` and `open_database_with_key` provide a streamlined way to open the target database:
+Once delegation is set up, `Identity::open_database` opens the target database directly:
 
 <!-- Code block ignored: Requires full Instance and User setup with delegation -->
 
 ```rust,ignore
-// Find which local key is in this identity
-let key = user.identity_key("personal").await?;
+let identity = user.get_identity("personal").await?.unwrap();
 
-// Open the target database — auto-discovers the delegation SigKey
-let db = user.open_database_with_key(&target_root_id, &key).await?;
+// Open the target database — delegation path is discovered automatically
+let db = identity.open_database(&target_root_id).await?;
 ```
 
-`open_database_with_key` calls `Database::find_sigkeys` internally, which discovers both direct keys and single-hop delegation paths. No manual `SigKey::Delegation` construction is needed.
+`Identity::open_database` calls `Database::find_sigkeys` internally, which discovers both direct keys and single-hop delegation paths. No manual `SigKey::Delegation` construction is needed.
+
+The older two-step approach via `identity_key` and `open_database_with_key` remains available for advanced use cases.
 
 ## API Surface
 
@@ -212,11 +213,13 @@ let db = user.open_database_with_key(&target_root_id, &key).await?;
 
 ### Identity Type
 
-`Identity` wraps a `Database` and provides identity-specific convenience methods. The underlying `Database` is accessible via `Deref` for full database operations.
+`Identity` wraps a `Database` and carries the signing key needed to open databases that delegate to it. The underlying `Database` is accessible via `Deref` for full database operations.
 
 ```rust,ignore
 pub struct Identity {
     database: Database,
+    key_id: PublicKey,
+    signing_key: PrivateKey,
 }
 ```
 
@@ -235,12 +238,19 @@ pub struct Identity {
 | `Identity::as_delegation(bounds)` | Returns a `DelegatedTreeRef` pointing to this identity with the given `PermissionBounds`. The result can be passed to `SettingsStore::add_delegated_tree()` on any target database. |
 | `Identity::ticket()`              | Returns a `DatabaseTicket` for this identity database (sync, infallible), suitable for sharing with other devices or users.                                                         |
 
+### Identity Methods (Database Access)
+
+| Method                             | Description                                                                                                                                              |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Identity::open_database(root_id)` | Opens a database that delegates to this identity. Discovers the delegation SigKey automatically and opens the database using the identity's signing key. |
+
 ### Identity Methods (Accessors)
 
-| Method                 | Description                                                   |
-| ---------------------- | ------------------------------------------------------------- |
-| `Identity::root_id()`  | Returns the root ID of this identity (the shareable address). |
-| `Identity::database()` | Returns a reference to the underlying `Database`.             |
+| Method                 | Description                                                          |
+| ---------------------- | -------------------------------------------------------------------- |
+| `Identity::root_id()`  | Returns the root ID of this identity (the shareable address).        |
+| `Identity::key_id()`   | Returns the public key associated with this identity on this device. |
+| `Identity::database()` | Returns a reference to the underlying `Database`.                    |
 
 ## Storage Conventions
 

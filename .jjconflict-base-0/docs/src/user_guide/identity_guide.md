@@ -29,8 +29,8 @@ let my_id = identity.root_id().clone();
 // Share my_id with collaborators — they add a single delegation
 // instead of tracking each device key individually
 
-// Use your identity key to open delegated databases
-let key = user.identity_key("personal").await?;
+// Open delegated databases directly through the identity
+// let db = identity.open_database(&target_root_id).await?;
 # Ok(())
 # }
 ```
@@ -234,7 +234,7 @@ txn.commit().await?;
 
 ### Opening a Delegated Database
 
-Once delegation is set up, `identity_key` finds which local key exists in the identity, and `open_database_with_key` discovers the delegation path automatically:
+Once delegation is set up, `Identity::open_database` opens the target database directly:
 
 ```rust
 # extern crate eidetica;
@@ -267,11 +267,8 @@ Once delegation is set up, `identity_key` finds which local key exists in the id
 # txn.get_settings()?.add_delegated_tree(delegation).await?;
 # txn.commit().await?;
 #
-// Find which local key is in this identity
-let key = user.identity_key("personal").await?;
-
-// Open the target database — delegation path is discovered automatically
-let db = user.open_database_with_key(&target_root_id, &key).await?;
+// Open the target database directly through the identity
+let db = identity.open_database(&target_root_id).await?;
 
 // Write through the delegation
 let txn = db.new_transaction().await?;
@@ -282,7 +279,9 @@ txn.commit().await?;
 # }
 ```
 
-No manual `SigKey::Delegation` construction is needed — `open_database_with_key` calls `Database::find_sigkeys` internally, which discovers both direct keys and single-hop delegation paths.
+No manual `SigKey::Delegation` construction is needed — `Identity::open_database` calls `Database::find_sigkeys` internally, which discovers both direct keys and single-hop delegation paths.
+
+The older two-step approach via `user.identity_key()` and `user.open_database_with_key()` remains available for advanced use cases where you need more control.
 
 ## Listing and Removing Identities
 

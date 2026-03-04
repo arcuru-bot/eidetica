@@ -474,6 +474,7 @@ async fn test_identity_key_no_local_key_fails() -> Result<()> {
     let tracked = TrackedIdentity {
         root_id: identity_root.clone(),
         status: IdentityStatus::Active,
+        key_id: None,
     };
     identities_store.set("alice-identity", tracked).await?;
     tx.commit().await?;
@@ -642,6 +643,150 @@ async fn test_register_identity_across_instances() -> Result<()> {
 
     // Cleanup
     server_sync.stop_server().await?;
+
+    Ok(())
+}
+
+// ===== IDENTITY OPEN DATABASE TESTS =====
+
+#[tokio::test]
+async fn test_identity_open_database_via_delegation() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+
+    // Create identity
+    let default_key = user.get_default_key()?;
+    let identity = user.create_identity("personal", &default_key).await?;
+
+    // Create target database with a separate admin key
+    let admin_signing_key = PrivateKey::generate();
+    let target_db =
+        eidetica::Database::create(&instance, admin_signing_key.clone(), Doc::new()).await?;
+    let target_root_id = target_db.root_id().clone();
+
+    // Add delegation from identity to target database
+    let delegation = identity
+        .as_delegation(PermissionBounds {
+            max: Permission::Write(10),
+            min: None,
+        })
+        .await?;
+
+    let admin_db_key = DatabaseKey::new(admin_signing_key.clone());
+    let target_db_authed =
+        eidetica::Database::open(instance.clone(), &target_root_id, admin_db_key).await?;
+    let txn = target_db_authed.new_transaction().await?;
+    txn.get_settings()?.add_delegated_tree(delegation).await?;
+    txn.commit().await?;
+
+    // Open target database directly through identity (the new API)
+    let delegated_db = identity.open_database(&target_root_id).await?;
+
+    // Write data via delegation
+    let txn = delegated_db.new_transaction().await?;
+    let store = txn.get_store::<DocStore>("data").await?;
+    store.set("hello", "world").await?;
+    txn.commit().await?;
+
+    // Verify data was written
+    let viewer = target_db_authed
+        .get_store_viewer::<DocStore>("data")
+        .await?;
+    let value = viewer.get_string("hello").await?;
+    assert_eq!(value, "world");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_identity_key_id_matches_creation_key() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+    let default_key = user.get_default_key()?;
+
+    let identity = user.create_identity("personal", &default_key).await?;
+
+    assert_eq!(identity.key_id(), &default_key);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_identity_returns_identity_with_key() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+    let default_key = user.get_default_key()?;
+
+    user.create_identity("personal", &default_key).await?;
+
+    // Round-trip through get_identity
+    let retrieved = user
+        .get_identity("personal")
+        .await?
+        .expect("Identity should exist");
+    assert_eq!(retrieved.key_id(), &default_key);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_identity_backfills_legacy_entries() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+    let default_key = user.get_default_key()?;
+
+    // Create a real identity database so the key exists in auth settings
+    let identity = user.create_identity("personal", &default_key).await?;
+    let root_id = identity.root_id().clone();
+
+    // Overwrite the tracked entry WITHOUT key_id (simulating legacy data)
+    let tx = user.user_database().new_transaction().await?;
+    let identities_store = tx.get_store::<DocStore>("identities").await?;
+    let legacy_tracked = TrackedIdentity {
+        root_id: root_id.clone(),
+        status: IdentityStatus::Active,
+        key_id: None,
+    };
+    identities_store.set("personal", legacy_tracked).await?;
+    tx.commit().await?;
+
+    // Verify the stored entry has no key_id
+    let tracked_before = TrackedIdentity::try_from(
+        &user
+            .identities()
+            .await?
+            .iter()
+            .find(|(n, _)| n.as_str() == "personal")
+            .unwrap()
+            .1
+            .clone(),
+    )?;
+    assert!(tracked_before.key_id.is_none());
+
+    // get_identity should still work — discovers key via auth settings
+    let retrieved = user
+        .get_identity("personal")
+        .await?
+        .expect("Identity should be accessible even without stored key_id");
+    assert_eq!(retrieved.root_id(), &root_id);
+    assert_eq!(retrieved.key_id(), &default_key);
+
+    // Verify the key_id was backfilled in the tracked entry
+    let tracked_after = TrackedIdentity::try_from(
+        &user
+            .identities()
+            .await?
+            .iter()
+            .find(|(n, _)| n.as_str() == "personal")
+            .unwrap()
+            .1
+            .clone(),
+    )?;
+    assert_eq!(tracked_after.key_id, Some(default_key));
 
     Ok(())
 }
