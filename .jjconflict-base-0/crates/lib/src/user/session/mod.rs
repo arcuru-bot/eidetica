@@ -10,6 +10,7 @@
 //!
 //! - **`create_database()`** - Create a new database
 //! - **`open_database()`** - Open an existing database
+//! - **`open_database_with_key()`** - Open a database with a specific key (auto-discovers SigKey)
 //! - **`find_database()`** - Search for databases by name
 //!
 //! ## Tracked Databases
@@ -31,6 +32,17 @@
 //!
 //! This explicit approach ensures predictable behavior and avoids ambiguity about which
 //! keys have access to which databases.
+//!
+//! ## Identity Management
+//!
+//! Manage named identities (Identity Databases):
+//!
+//! - **`create_identity()`** - Create a new identity database
+//! - **`get_identity()`** - Get a named identity
+//! - **`identity_id()`** - Get the root ID of a named identity
+//! - **`identity_key()`** - Find the local key that exists in a named identity
+//! - **`identities()`** - List all tracked identities
+//! - **`remove_identity()`** - Remove an identity from tracking
 
 use handle_trait::Handle;
 use std::collections::HashMap;
@@ -1131,6 +1143,88 @@ impl User {
             .get_store_viewer::<DocStore>("identities")
             .await?;
         identities_store.get_all().await
+    }
+
+    /// Open a database using a specific key, auto-discovering the SigKey (direct or delegation).
+    ///
+    /// This method:
+    /// 1. Retrieves the signing key from the user's key manager
+    /// 2. Calls `Database::find_sigkeys` to discover available SigKeys for that key
+    /// 3. Opens the database with the highest-permission SigKey found
+    ///
+    /// This is the primary way to open a database when the key has delegation access
+    /// (e.g., through an Identity Database) rather than a pre-cached SigKey mapping.
+    ///
+    /// # Arguments
+    /// * `root_id` - The root entry ID of the target database
+    /// * `key_id` - The public key to use
+    ///
+    /// # Errors
+    /// - Returns `KeyNotFound` if the key is not in the user's key manager
+    /// - Returns `NoSigKeyFound` if no SigKey (direct or delegation) is found for the key
+    pub async fn open_database_with_key(
+        &self,
+        root_id: &ID,
+        key_id: &PublicKey,
+    ) -> Result<Database> {
+        let signing_key =
+            self.key_manager
+                .get_signing_key(key_id)
+                .ok_or_else(|| UserError::KeyNotFound {
+                    key_id: key_id.to_string(),
+                })?;
+
+        let available = Database::find_sigkeys(&self.instance, root_id, key_id).await?;
+        let (sigkey, _perm) =
+            available
+                .into_iter()
+                .next()
+                .ok_or_else(|| UserError::NoSigKeyFound {
+                    key_id: key_id.to_string(),
+                    database_id: root_id.clone(),
+                })?;
+
+        let key = DatabaseKey::with_identity(signing_key.clone(), sigkey);
+        Database::open(self.instance.handle(), root_id, key).await
+    }
+
+    /// Find the user's local key that exists in a named identity's auth settings.
+    ///
+    /// Opens the identity database (unauthenticated, since identities have global read)
+    /// and checks which of the user's local keys appear in its auth settings.
+    ///
+    /// # Arguments
+    /// * `name` - The name of the tracked identity
+    ///
+    /// # Returns
+    /// The `PublicKey` of the first local key found in the identity's auth settings
+    ///
+    /// # Errors
+    /// - Returns `IdentityNotFound` if the name is not tracked
+    /// - Returns `NoKeyInIdentity` if none of the user's local keys are in the identity
+    pub async fn identity_key(&self, name: &str) -> Result<PublicKey> {
+        let tracked =
+            self.identity_tracking(name)
+                .await?
+                .ok_or_else(|| UserError::IdentityNotFound {
+                    name: name.to_string(),
+                })?;
+
+        let identity_db = Database::open_unauthenticated(tracked.root_id.clone(), &self.instance)?;
+        let settings = identity_db.get_settings().await?;
+        let auth = settings.auth_snapshot().await?;
+
+        for key_id in self.key_manager.list_key_ids() {
+            if auth.get_key_by_pubkey(&key_id).is_ok() {
+                return Ok(key_id);
+            }
+        }
+
+        Err(UserError::NoKeyInIdentity {
+            name: name.to_string(),
+            identity_id: tracked.root_id,
+        }
+        .into())
     }
 
     /// Remove a named identity from tracking.

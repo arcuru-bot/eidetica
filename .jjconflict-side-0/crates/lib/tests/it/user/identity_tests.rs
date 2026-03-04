@@ -4,9 +4,7 @@ use eidetica::{
     Result,
     auth::{
         crypto::{PrivateKey, PublicKey},
-        types::{
-            AuthKey, DelegationStep, KeyHint, KeyStatus, Permission, PermissionBounds, SigKey,
-        },
+        types::{AuthKey, KeyStatus, Permission, PermissionBounds},
     },
     crdt::Doc,
     database::DatabaseKey,
@@ -218,20 +216,11 @@ async fn test_identity_delegation_enables_writes_to_target_db() -> Result<()> {
     txn.get_settings()?.add_delegated_tree(delegation).await?;
     txn.commit().await?;
 
-    // Now open target database via delegation identity
-    let user_key_id = user.get_default_key()?;
-    let user_signing_key = user.get_signing_key(&user_key_id)?;
-    let identity_tips = identity.get_tips().await?;
-    let delegation_sigkey = SigKey::Delegation {
-        path: vec![DelegationStep {
-            tree: identity.root_id().to_string(),
-            tips: identity_tips,
-        }],
-        hint: KeyHint::from_pubkey(&user_key_id),
-    };
-    let db_key = DatabaseKey::with_identity(user_signing_key, delegation_sigkey);
-    let delegated_db =
-        eidetica::Database::open(instance.clone(), target_db.root_id(), db_key).await?;
+    // Open target database via delegation using the streamlined API
+    let key = user.identity_key("personal").await?;
+    let delegated_db = user
+        .open_database_with_key(target_db.root_id(), &key)
+        .await?;
 
     // Write data via delegation
     let txn = delegated_db.new_transaction().await?;
@@ -364,6 +353,139 @@ async fn test_create_multiple_identities() -> Result<()> {
 
     // Different root IDs
     assert_ne!(personal.root_id(), work.root_id());
+
+    Ok(())
+}
+
+// ===== OPEN DATABASE WITH KEY TESTS =====
+
+#[tokio::test]
+async fn test_open_database_with_key_direct_access() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+
+    // Create a database (user's key is directly in auth settings)
+    let default_key = user.get_default_key()?;
+    let db = user.create_database(Doc::new(), &default_key).await?;
+
+    // open_database_with_key should work for direct keys too
+    let opened = user
+        .open_database_with_key(db.root_id(), &default_key)
+        .await?;
+
+    // Write to verify it works
+    let txn = opened.new_transaction().await?;
+    let store = txn.get_store::<DocStore>("data").await?;
+    store.set("key", "value").await?;
+    txn.commit().await?;
+
+    let viewer = db.get_store_viewer::<DocStore>("data").await?;
+    let value = viewer.get_string("key").await?;
+    assert_eq!(value, "value");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_open_database_with_key_no_access_fails() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let user = login_user(&instance, "alice", None).await;
+
+    // Create a database with a separate admin key (alice has no access)
+    let admin_key = PrivateKey::generate();
+    let db = eidetica::Database::create(&instance, admin_key, Doc::new()).await?;
+
+    let default_key = user.get_default_key()?;
+    let result = user
+        .open_database_with_key(db.root_id(), &default_key)
+        .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, eidetica::Error::User(UserError::NoSigKeyFound { .. })),
+        "Expected NoSigKeyFound, got: {err:?}"
+    );
+
+    Ok(())
+}
+
+// ===== IDENTITY KEY TESTS =====
+
+#[tokio::test]
+async fn test_identity_key_returns_correct_key() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+    let default_key = user.get_default_key()?;
+
+    user.create_identity("personal", &default_key).await?;
+
+    let found_key = user.identity_key("personal").await?;
+    assert_eq!(found_key, default_key);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_identity_key_unknown_name_fails() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let user = login_user(&instance, "alice", None).await;
+
+    let result = user.identity_key("nonexistent").await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            eidetica::Error::User(UserError::IdentityNotFound { .. })
+        ),
+        "Expected IdentityNotFound, got: {err:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_identity_key_no_local_key_fails() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+
+    // Create identity with a key that won't be in bob's key manager
+    let alice_key = user.get_default_key()?;
+    let identity = user.create_identity("personal", &alice_key).await?;
+    let identity_root = identity.root_id().clone();
+
+    // Create a different user (bob) and manually track alice's identity
+    instance.create_user("bob", None).await?;
+    let bob = login_user(&instance, "bob", None).await;
+
+    // Manually track Alice's identity in Bob's user database
+    let tx = bob.user_database().new_transaction().await?;
+    let identities_store = tx.get_store::<DocStore>("identities").await?;
+    let tracked = TrackedIdentity {
+        root_id: identity_root.clone(),
+        status: IdentityStatus::Active,
+    };
+    identities_store.set("alice-identity", tracked).await?;
+    tx.commit().await?;
+
+    // Bob has no key in Alice's identity
+    let result = bob.identity_key("alice-identity").await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            eidetica::Error::User(UserError::NoKeyInIdentity { .. })
+        ),
+        "Expected NoKeyInIdentity, got: {err:?}"
+    );
 
     Ok(())
 }

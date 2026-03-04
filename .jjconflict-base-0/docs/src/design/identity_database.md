@@ -178,6 +178,22 @@ let target_settings = target_db.get_settings().await?;
 target_settings.add_delegated_tree(delegation).await?;
 ```
 
+### Opening a Database Through Identity
+
+Once delegation is set up, `identity_key` and `open_database_with_key` provide a streamlined way to open the target database:
+
+<!-- Code block ignored: Requires full Instance and User setup with delegation -->
+
+```rust,ignore
+// Find which local key is in this identity
+let key = user.identity_key("personal").await?;
+
+// Open the target database — auto-discovers the delegation SigKey
+let db = user.open_database_with_key(&target_root_id, &key).await?;
+```
+
+`open_database_with_key` calls `Database::find_sigkeys` internally, which discovers both direct keys and single-hop delegation paths. No manual `SigKey::Delegation` construction is needed.
+
 ## API Surface
 
 ### User Methods (Identity Lifecycle)
@@ -186,11 +202,12 @@ target_settings.add_delegated_tree(delegation).await?;
 
 | Method                                                 | Description                                                                                                                                                                                                                                                                |
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `User::create_identity(name, key_id)`                   | Creates a new Identity Database with global read access and registers it locally under `name`. The given key is added as `Admin(0)`. Returns an `Identity`.                                                                                                                |
+| `User::create_identity(name, key_id)`                  | Creates a new Identity Database with global read access and registers it locally under `name`. The given key is added as `Admin(0)`. Returns an `Identity`.                                                                                                                |
 | `User::register_identity(name, ticket, key, auth_key)` | Registers a named identity from a `DatabaseTicket` and sends a bootstrap request for the given key with the requested `AuthKey` permissions. Uses the Instance's sync system internally. The identity is tracked locally in a pending state until the request is approved. |
 | `User::get_identity(name)`                             | Returns `Some(Identity)` if the name is registered and access has been granted, `None` if the name is unknown or the bootstrap request is still pending.                                                                                                                   |
 | `User::identity_id(name)`                              | Returns the root ID of the named identity (the shareable address). Available immediately after `register_identity`, even before approval.                                                                                                                                  |
-| `User::identities()`                                   | Returns a `Doc` containing all locally registered identity names mapped to their tracking data (root ID and status).                                                                                                                                                        |
+| `User::identity_key(name)`                             | Returns the user's local key that exists in the named identity's auth settings. Useful for finding which key to pass to `open_database_with_key`.                                                                                                                          |
+| `User::identities()`                                   | Returns a `Doc` containing all locally registered identity names mapped to their tracking data (root ID and status).                                                                                                                                                       |
 | `User::remove_identity(name)`                          | Removes a named identity from the user's local tracking. Does not delete the underlying database.                                                                                                                                                                          |
 
 ### Identity Type

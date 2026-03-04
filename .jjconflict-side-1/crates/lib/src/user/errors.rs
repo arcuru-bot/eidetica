@@ -75,6 +75,9 @@ pub enum UserError {
 
     #[error("Identity already exists: {name}")]
     IdentityAlreadyExists { name: String },
+
+    #[error("No local key found in identity '{name}' ({identity_id})")]
+    NoKeyInIdentity { name: String, identity_id: ID },
 }
 
 impl UserError {
