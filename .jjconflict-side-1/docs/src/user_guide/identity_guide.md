@@ -322,6 +322,48 @@ assert!(work_id.is_none());
 # }
 ```
 
+## Key Rotation
+
+To rotate which device key an identity uses:
+
+```rust
+# extern crate eidetica;
+# extern crate tokio;
+# use eidetica::{Instance, Database, backend::database::Sqlite};
+# use eidetica::auth::crypto::PrivateKey;
+# use eidetica::auth::types::{Permission, PermissionBounds};
+# use eidetica::crdt::Doc;
+# use eidetica::database::DatabaseKey;
+# use eidetica::store::{DocStore, SettingsStore};
+# use eidetica::auth::types::AuthKey;
+#
+# #[tokio::main]
+# async fn main() -> eidetica::Result<()> {
+# let backend = Sqlite::in_memory().await?;
+# let instance = Instance::open(Box::new(backend)).await?;
+# instance.create_user("alice", None).await?;
+# let mut user = instance.login_user("alice", None).await?;
+# let default_key = user.get_default_key()?;
+# let mut identity = user.create_identity("personal", &default_key).await?;
+#
+// 1. Add the new key to the identity's auth settings
+let new_key = PrivateKey::generate();
+let new_key_id = new_key.public_key();
+identity
+    .add_key(&new_key_id, AuthKey::active(Some("new-device"), Permission::Admin(0)))
+    .await?;
+
+// 2. Switch the identity to use the new key
+identity.set_key(new_key_id, new_key).await?;
+
+// 3. Optionally revoke the old key
+identity.revoke_key(&default_key).await?;
+# Ok(())
+# }
+```
+
+`set_key` updates both the in-memory `Identity` and the persisted tracking entry in the user database, so subsequent `get_identity` calls return an `Identity` with the new key.
+
 ## Troubleshooting
 
 **`get_identity` returns `None`**: The bootstrap request has not been approved yet, or the approval has not synced to this device. Sync the identity database and try again.

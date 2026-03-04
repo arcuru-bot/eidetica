@@ -119,7 +119,7 @@ async fn test_get_identity_returns_some_for_active() -> Result<()> {
 async fn test_get_identity_returns_none_for_unknown() -> Result<()> {
     let instance = setup_instance().await;
     instance.create_user("alice", None).await?;
-    let mut user = login_user(&instance, "alice", None).await;
+    let user = login_user(&instance, "alice", None).await;
 
     let result = user.get_identity("nonexistent").await?;
     assert!(result.is_none());
@@ -787,6 +787,127 @@ async fn test_get_identity_backfills_legacy_entries() -> Result<()> {
             .clone(),
     )?;
     assert_eq!(tracked_after.key_id, Some(default_key));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_identity_set_key_updates_stored_key() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+    let default_key = user.get_default_key()?;
+
+    let mut identity = user.create_identity("personal", &default_key).await?;
+
+    // Add a second key to the identity's auth settings
+    let new_key_id = user.add_private_key(Some("phone")).await?;
+    let new_signing_key = user.get_signing_key(&new_key_id)?;
+    identity
+        .add_key(
+            &new_key_id,
+            AuthKey::active(Some("phone"), Permission::Admin(0)),
+        )
+        .await?;
+
+    // Switch to the new key via Identity
+    identity
+        .set_key(new_key_id.clone(), new_signing_key)
+        .await?;
+    assert_eq!(identity.key_id(), &new_key_id);
+
+    // identity_key should return the new key (persisted to user DB)
+    let found_key = user.identity_key("personal").await?;
+    assert_eq!(found_key, new_key_id);
+
+    // get_identity should also pick up the new key
+    let retrieved = user
+        .get_identity("personal")
+        .await?
+        .expect("Identity should exist");
+    assert_eq!(retrieved.key_id(), &new_key_id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_identity_name_matches_creation_name() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+    let default_key = user.get_default_key()?;
+
+    let identity = user.create_identity("personal", &default_key).await?;
+    assert_eq!(identity.name(), "personal");
+
+    let retrieved = user
+        .get_identity("personal")
+        .await?
+        .expect("Identity should exist");
+    assert_eq!(retrieved.name(), "personal");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_identity_set_key_then_open_database() -> Result<()> {
+    let instance = setup_instance().await;
+    instance.create_user("alice", None).await?;
+    let mut user = login_user(&instance, "alice", None).await;
+    let default_key = user.get_default_key()?;
+
+    let mut identity = user.create_identity("personal", &default_key).await?;
+
+    // Create target database with delegation
+    let admin_signing_key = PrivateKey::generate();
+    let target_db =
+        eidetica::Database::create(&instance, admin_signing_key.clone(), Doc::new()).await?;
+    let target_root_id = target_db.root_id().clone();
+
+    let delegation = identity
+        .as_delegation(PermissionBounds {
+            max: Permission::Write(10),
+            min: None,
+        })
+        .await?;
+
+    let admin_db_key = DatabaseKey::new(admin_signing_key);
+    let target_db_authed =
+        eidetica::Database::open(instance.clone(), &target_root_id, admin_db_key).await?;
+    let txn = target_db_authed.new_transaction().await?;
+    txn.get_settings()?.add_delegated_tree(delegation).await?;
+    txn.commit().await?;
+
+    // Add a second key and add it to identity auth
+    let new_key_id = user.add_private_key(Some("phone")).await?;
+    let new_signing_key = user.get_signing_key(&new_key_id)?;
+    identity
+        .add_key(
+            &new_key_id,
+            AuthKey::active(Some("phone"), Permission::Admin(0)),
+        )
+        .await?;
+
+    // Switch to the new key directly on the Identity
+    identity
+        .set_key(new_key_id.clone(), new_signing_key)
+        .await?;
+    assert_eq!(identity.key_id(), &new_key_id);
+
+    // Open the target DB through the rotated identity
+    let delegated_db = identity.open_database(&target_root_id).await?;
+
+    // Write to verify it works
+    let txn = delegated_db.new_transaction().await?;
+    let store = txn.get_store::<DocStore>("data").await?;
+    store.set("rotated", "true").await?;
+    txn.commit().await?;
+
+    let viewer = target_db_authed
+        .get_store_viewer::<DocStore>("data")
+        .await?;
+    let value = viewer.get_string("rotated").await?;
+    assert_eq!(value, "true");
 
     Ok(())
 }

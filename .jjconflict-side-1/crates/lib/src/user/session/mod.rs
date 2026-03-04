@@ -40,7 +40,7 @@
 //! - **`create_identity()`** - Create a new identity database
 //! - **`get_identity()`** - Get a named identity
 //! - **`identity_id()`** - Get the root ID of a named identity
-//! - **`identity_key()`** - Find the local key that exists in a named identity
+//! - **`identity_key()`** - Get the local key associated with a named identity
 //! - **`identities()`** - List all tracked identities
 //! - **`remove_identity()`** - Remove an identity from tracking
 
@@ -1041,7 +1041,13 @@ impl User {
                 key_id: key_id.to_string(),
             })?;
 
-        Ok(Identity::new(database, key_id.clone(), signing_key))
+        Ok(Identity::new(
+            database,
+            key_id.clone(),
+            signing_key,
+            name.to_string(),
+            self.user_database.clone(),
+        ))
     }
 
     /// Register an identity from a `DatabaseTicket` and send a bootstrap request.
@@ -1113,8 +1119,7 @@ impl User {
     /// to active and returns `Some`; on failure, returns `None`.
     /// Returns `None` if the name is unknown.
     ///
-    /// Takes `&mut self` because a pending→active transition writes to the user database.
-    pub async fn get_identity(&mut self, name: &str) -> Result<Option<Identity>> {
+    pub async fn get_identity(&self, name: &str) -> Result<Option<Identity>> {
         let tracked = match self.identity_tracking(name).await? {
             Some(t) => t,
             None => return Ok(None),
@@ -1153,7 +1158,13 @@ impl User {
                     })?;
 
                 let db = self.open_database(&tracked.root_id).await?;
-                Ok(Some(Identity::new(db, key_id, signing_key)))
+                Ok(Some(Identity::new(
+                    db,
+                    key_id,
+                    signing_key,
+                    name.to_string(),
+                    self.user_database.clone(),
+                )))
             }
             IdentityStatus::Pending => {
                 // Resolve key_id: prefer stored, fall back to discovery
@@ -1173,13 +1184,6 @@ impl User {
                 }
                 match self.open_database_with_key(&tracked.root_id, &key_id).await {
                     Ok(db) => {
-                        // Set up tracking so open_database works in future
-                        self.track_database(
-                            tracked.root_id.clone(),
-                            &key_id,
-                            SyncSettings::disabled(),
-                        )
-                        .await?;
                         // Transition to active
                         let tx = self.user_database.new_transaction().await?;
                         let identities_store = tx.get_store::<DocStore>("identities").await?;
@@ -1199,7 +1203,13 @@ impl User {
                                 key_id: key_id.to_string(),
                             })?;
 
-                        Ok(Some(Identity::new(db, key_id, signing_key)))
+                        Ok(Some(Identity::new(
+                            db,
+                            key_id,
+                            signing_key,
+                            name.to_string(),
+                            self.user_database.clone(),
+                        )))
                     }
                     Err(_) => Ok(None),
                 }

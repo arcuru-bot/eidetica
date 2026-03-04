@@ -207,7 +207,7 @@ The older two-step approach via `identity_key` and `open_database_with_key` rema
 | `User::register_identity(name, ticket, key, auth_key)` | Registers a named identity from a `DatabaseTicket` and sends a bootstrap request for the given key with the requested `AuthKey` permissions. Uses the Instance's sync system internally. The identity is tracked locally in a pending state until the request is approved. |
 | `User::get_identity(name)`                             | Returns `Some(Identity)` if the name is registered and access has been granted, `None` if the name is unknown or the bootstrap request is still pending.                                                                                                                   |
 | `User::identity_id(name)`                              | Returns the root ID of the named identity (the shareable address). Available immediately after `register_identity`, even before approval.                                                                                                                                  |
-| `User::identity_key(name)`                             | Returns the user's local key that exists in the named identity's auth settings. Useful for finding which key to pass to `open_database_with_key`.                                                                                                                          |
+| `User::identity_key(name)`                             | Returns the local key associated with the named identity.                                                                                                                                                                                                                  |
 | `User::identities()`                                   | Returns a `Doc` containing all locally registered identity names mapped to their tracking data (root ID and status).                                                                                                                                                       |
 | `User::remove_identity(name)`                          | Removes a named identity from the user's local tracking. Does not delete the underlying database.                                                                                                                                                                          |
 
@@ -220,16 +220,19 @@ pub struct Identity {
     database: Database,
     key_id: PublicKey,
     signing_key: PrivateKey,
+    name: String,
+    user_database: Database,
 }
 ```
 
 ### Identity Methods (Key Management)
 
-| Method                                | Description                                                                                                |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `Identity::add_key(pubkey, auth_key)` | Adds a key to this identity's auth settings with the specified `AuthKey` (name, permission level, status). |
-| `Identity::revoke_key(pubkey)`        | Revokes a key in this identity's auth settings.                                                            |
-| `Identity::keys()`                    | Returns an `AuthSettings` snapshot of all keys in this identity with their status and permissions.         |
+| Method                                   | Description                                                                                                |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `Identity::add_key(pubkey, auth_key)`    | Adds a key to this identity's auth settings with the specified `AuthKey` (name, permission level, status). |
+| `Identity::revoke_key(pubkey)`           | Revokes a key in this identity's auth settings.                                                            |
+| `Identity::keys()`                       | Returns an `AuthSettings` snapshot of all keys in this identity with their status and permissions.         |
+| `Identity::set_key(key_id, signing_key)` | Changes which local key this identity uses. Persists to the user database and updates in-memory state.     |
 
 ### Identity Methods (Delegation)
 
@@ -250,6 +253,7 @@ pub struct Identity {
 | ---------------------- | -------------------------------------------------------------------- |
 | `Identity::root_id()`  | Returns the root ID of this identity (the shareable address).        |
 | `Identity::key_id()`   | Returns the public key associated with this identity on this device. |
+| `Identity::name()`     | Returns the tracking name of this identity.                          |
 | `Identity::database()` | Returns a reference to the underlying `Database`.                    |
 
 ## Storage Conventions
@@ -285,9 +289,9 @@ When a device key is revoked in the Identity Database:
 
 To rotate a device key:
 
-1. Add the new key to the Identity Database.
-2. Update the user's private key storage with the new key.
-3. Revoke the old key in the Identity Database.
+1. Add the new key to the Identity Database (`identity.add_key()`).
+2. Switch the local identity to use the new key (`user.set_identity_key()`).
+3. Revoke the old key in the Identity Database (`identity.revoke_key()`).
 4. Future entries use the new key; past entries remain valid.
 
 ### Recovery

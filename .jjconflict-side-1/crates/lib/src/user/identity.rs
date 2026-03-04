@@ -15,9 +15,9 @@ use crate::{
     },
     database::DatabaseKey,
     entry::ID,
-    store::SettingsStore,
+    store::{DocStore, SettingsStore},
     sync::DatabaseTicket,
-    user::UserError,
+    user::{IdentityStatus, TrackedIdentity, UserError},
 };
 
 /// A user identity backed by a dedicated database.
@@ -33,6 +33,8 @@ pub struct Identity {
     database: Database,
     key_id: PublicKey,
     signing_key: PrivateKey,
+    name: String,
+    user_database: Database,
 }
 
 impl Deref for Identity {
@@ -45,11 +47,19 @@ impl Deref for Identity {
 
 impl Identity {
     /// Create an Identity from an existing database with its associated key.
-    pub(crate) fn new(database: Database, key_id: PublicKey, signing_key: PrivateKey) -> Self {
+    pub(crate) fn new(
+        database: Database,
+        key_id: PublicKey,
+        signing_key: PrivateKey,
+        name: String,
+        user_database: Database,
+    ) -> Self {
         Self {
             database,
             key_id,
             signing_key,
+            name,
+            user_database,
         }
     }
 
@@ -63,9 +73,40 @@ impl Identity {
         &self.key_id
     }
 
+    /// The tracking name of this identity.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// A reference to the underlying database.
     pub fn database(&self) -> &Database {
         &self.database
+    }
+
+    /// Change which local key this identity uses.
+    ///
+    /// Updates both the in-memory identity and the persisted tracking entry
+    /// in the user's private database. Use after key rotation or adding a new
+    /// device key via `add_key`.
+    ///
+    /// # Arguments
+    /// * `key_id` - The new public key
+    /// * `signing_key` - The corresponding private key
+    pub async fn set_key(&mut self, key_id: PublicKey, signing_key: PrivateKey) -> Result<()> {
+        let tx = self.user_database.new_transaction().await?;
+        let identities_store = tx.get_store::<DocStore>("identities").await?;
+        let updated = TrackedIdentity {
+            root_id: self.database.root_id().clone(),
+            status: IdentityStatus::Active,
+            key_id: Some(key_id.clone()),
+        };
+        identities_store.set(&self.name, updated).await?;
+        tx.commit().await?;
+
+        self.key_id = key_id;
+        self.signing_key = signing_key;
+
+        Ok(())
     }
 
     /// Open a database that delegates to this identity.
