@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use rand::Rng;
 
 use super::{ENTRY_VERSION, Entry, EntryError, ID, RawData, SubTreeNode, TreeNode};
-use crate::{Result, auth::types::SigInfo, constants::ROOT, crdt::Doc, store::StoreError};
+use crate::{Result, auth::types::SigInfo, crdt::Doc, store::StoreError};
 
 /// A builder for creating `Entry` instances.
 ///
@@ -96,15 +96,13 @@ impl EntryBuilder {
 
     /// Creates a new `EntryBuilder` for a top-level (root) entry for a new tree.
     ///
-    /// Root entries have an empty string as their `root` ID and include a special ROOT subtree marker.
-    /// This method is typically used when creating a new tree.
+    /// Root entries have a default (empty) root ID and no parents, identifying them
+    /// as starting points of trees in the DAG.
     ///
     /// Note: It's generally preferred to use the static `Entry::root_builder()` method
     /// instead of calling this constructor directly.
     pub fn new_top_level() -> Self {
         let mut builder = Self::new(ID::default());
-        // Add a special subtree that identifies this as a root entry
-        builder.set_subtree_data_mut(ROOT, "");
 
         // Add random entropy to metadata to ensure unique IDs for each root entry
         let entropy: u64 = rand::thread_rng().r#gen();

@@ -5,7 +5,7 @@
 //! All entries created by these helpers must pass structural validation to prevent
 //! "no common ancestor" errors during sync operations. The validation rules are:
 //!
-//! 1. **Root entries** (containing "_root" subtree): May have empty parents
+//! 1. **Root entries** (no root reference, no parents): May have empty parents
 //! 2. **Non-root entries**: MUST have at least one parent in the main tree
 //!
 //! Most test helpers create root entries using `Entry::root_builder()` because:
@@ -20,8 +20,8 @@ use eidetica::{Entry, entry::ID};
 
 /// Create a root entry (top-level entry in the DAG)
 ///
-/// Explicitly creates a root entry with the "_root" subtree marker.
-/// These entries form the foundation of the DAG and require no parents.
+/// Root entries have no root reference and no parents, forming the
+/// foundation of the DAG.
 pub fn create_root_entry() -> Entry {
     Entry::root_builder()
         .build()

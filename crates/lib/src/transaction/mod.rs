@@ -38,7 +38,7 @@ use crate::{
         validation::AuthValidator,
     },
     backend::VerificationStatus,
-    constants::{INDEX, ROOT, SETTINGS},
+    constants::{INDEX, SETTINGS},
     crdt::{CRDT, Data, Doc, doc::Value},
     entry::{Entry, EntryBuilder, ID},
     height::HeightStrategy,
@@ -527,8 +527,7 @@ impl Transaction {
         self.init_subtree_parents(&subtree_name).await?;
 
         // Skip special system subtrees to avoid circular dependencies
-        let is_system_subtree =
-            subtree_name == INDEX || subtree_name == SETTINGS || subtree_name == ROOT;
+        let is_system_subtree = subtree_name == INDEX || subtree_name == SETTINGS;
 
         if is_system_subtree {
             // System subtrees don't use _index registration

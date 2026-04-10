@@ -212,5 +212,4 @@ fn test_entrybuilder_edge_cases() {
     assert!(empty_entry.root().is_none()); // Root entries have no root
     assert_no_parents(&empty_entry); // Root entries have no parents
     assert!(empty_entry.is_root()); // Should be a root entry
-    assert!(empty_entry.in_subtree("_root")); // Root entries have the _root subtree
 }

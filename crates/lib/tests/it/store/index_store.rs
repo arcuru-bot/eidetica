@@ -246,7 +246,6 @@ async fn test_no_auto_register_for_system_subtrees() {
     // System subtrees should NOT be auto-registered
     assert!(!index.contains("_settings").await);
     assert!(!index.contains("_index").await);
-    assert!(!index.contains("_root").await);
 }
 
 #[tokio::test]

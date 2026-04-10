@@ -18,7 +18,7 @@ use crate::{
         validation::AuthValidator,
     },
     backend::VerificationStatus,
-    constants::{ROOT, SETTINGS},
+    constants::SETTINGS,
     crdt::Doc,
     entry::{Entry, ID},
     instance::{WriteSource, backend::Backend, errors::InstanceError},
@@ -219,8 +219,6 @@ impl Database {
         // Populate the SETTINGS and ROOT subtrees for the very first entry
         txn.update_subtree(SETTINGS, &serde_json::to_string(&initial_settings)?)
             .await?;
-        txn.update_subtree(ROOT, &serde_json::to_string(&"".to_string())?)
-            .await?; // Standard practice for root entry's _root
 
         // Add entropy to the entry metadata to ensure unique database IDs even with identical settings
         txn.set_metadata_entropy(rand::thread_rng().next_u64())?;

@@ -18,7 +18,7 @@ pub use builder::EntryBuilder;
 pub use errors::EntryError;
 pub use id::ID;
 
-use crate::{Result, auth::types::SigInfo, constants::ROOT, store::StoreError};
+use crate::{Result, auth::types::SigInfo, store::StoreError};
 
 use id::IdError;
 
@@ -213,18 +213,12 @@ impl Entry {
         self.tree.root.clone()
     }
 
-    /// Check if this entry is a root entry (contains the ROOT marker and has no parents).
+    /// Check if this entry is a root entry.
     ///
-    /// Root entries are the top-level entries in the database and are distinguished by:
-    /// 1. Containing a subtree with the ROOT marker
-    /// 2. Having no parent entries (they are true tree roots)
-    ///
-    /// This ensures that root entries are actual starting points of trees in the DAG.
+    /// Root entries are the starting points of trees in the DAG, identified by having
+    /// no tree root reference (they ARE the root) and no parent entries.
     pub fn is_root(&self) -> bool {
-        // FIXME: better identification of root entries
-        self.subtrees.iter().any(|node| node.name == ROOT)
-            && self.tree.parents.is_empty()
-            && self.tree.root.is_none()
+        self.tree.root.is_none() && self.tree.parents.is_empty()
     }
 
     /// Check if this entry contains data for a specific named subtree.
@@ -370,8 +364,8 @@ impl Entry {
     /// # Validation Rules
     ///
     /// ## Critical Main Tree Parent Validation (Prevents "No Common Ancestor" Errors)
-    /// - **Root entries** (containing "_root" subtree): May have empty parents
-    /// - **Non-root entries**: MUST have at least one parent - **HARD REQUIREMENT**
+    /// - **Root entries** (no root reference, no parents): May have empty parents
+    /// - **Non-root entries**: MUST have a root reference and at least one parent - **HARD REQUIREMENT**
     /// - **Empty parent IDs**: Always rejected as invalid
     ///
     /// This strict enforcement prevents orphaned entries that cause sync failures.
@@ -390,7 +384,6 @@ impl Entry {
     /// 4. **Sync Operations**: Validation of entries received from peers
     ///
     /// # Special Cases
-    /// - The "_root" marker subtree has special handling and skips validation
     /// - The "_settings" subtree follows standard validation rules
     /// - Empty subtree parents are logged but deferred to transaction layer
     ///
@@ -427,24 +420,10 @@ impl Entry {
     }
 
     pub fn validate(&self) -> Result<()> {
-        use crate::constants::{ROOT, SETTINGS};
+        use crate::constants::SETTINGS;
         use crate::instance::errors::InstanceError;
 
-        // CRITICAL VALIDATION: Root entries (with _root marker) cannot have parents
-        // This enforces that root entries are true starting points of trees
-        let has_root_marker = self.subtrees.iter().any(|node| node.name == ROOT);
-        if has_root_marker && !self.tree.parents.is_empty() {
-            return Err(InstanceError::EntryValidationFailed {
-                reason: format!(
-                    "Entry {} has _root marker but also has parents. Root entries cannot have parent relationships as they are the starting points of trees.",
-                    self.id()
-                ),
-            }.into());
-        }
-
-        // Check if this is a root entry (will be true only if has ROOT marker AND no parents AND no root)
-        let is_root_entry =
-            has_root_marker && self.tree.parents.is_empty() && self.tree.root.is_none();
+        let is_root_entry = self.is_root();
 
         // Validate root ID format (when present)
         if let Some(root_id) = &self.tree.root {
@@ -465,11 +444,6 @@ impl Entry {
                     ),
                 }
                 .into());
-            }
-
-            // Skip validation for the special "_root" marker subtree
-            if subtree_name == ROOT {
-                continue;
             }
 
             // For non-root entries with empty subtree parents, this is only valid if:
@@ -521,6 +495,17 @@ impl Entry {
 
         // Enforce main tree parent requirements
         if !is_root_entry {
+            // Non-root entries must have a root reference
+            if self.tree.root.is_none() {
+                return Err(InstanceError::EntryValidationFailed {
+                    reason: format!(
+                        "Non-root entry {} has no tree root reference. All non-root entries must reference their tree's root entry.",
+                        self.id()
+                    ),
+                }
+                .into());
+            }
+
             let main_parents = self.tree.parents.clone();
             if main_parents.is_empty() {
                 // This is a HARD FAILURE - reject the entry completely

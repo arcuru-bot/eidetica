@@ -5,7 +5,7 @@ use crate::auth::types::{DelegationStep, KeyHint, SigInfo, SigKey};
 
 #[test]
 fn test_validate_root_entry_without_parents_succeeds() {
-    // Root entries (with "_root" subtree) should be valid without parents
+    // Root entries should be valid without parents
     let entry = Entry::root_builder()
         .build()
         .expect("Root entry should build successfully");
@@ -19,14 +19,14 @@ fn test_validate_root_entry_without_parents_succeeds() {
 }
 
 #[test]
-fn test_validate_root_entry_with_parents_fails() {
-    // Root entries with parents should fail at build time
+fn test_validate_entry_with_no_root_but_parents_fails() {
+    // Entries with parents but no root reference are invalid
     let result = Entry::root_builder()
         .add_parent(ID::from_bytes("some_parent"))
         .build();
     assert!(
         result.is_err(),
-        "Root entry with parents should fail to build"
+        "Entry with parents but no root reference should fail to build"
     );
 }
 
@@ -225,24 +225,17 @@ fn test_validate_multiple_subtrees_with_mixed_parent_scenarios() {
 }
 
 #[test]
-fn test_validate_root_subtree_marker_skipped() {
-    // The "_root" marker subtree should be skipped during validation
+fn test_validate_root_entry_with_subtree_succeeds() {
     let entry = Entry::root_builder()
         .set_subtree_data("other_subtree", "data")
         .build()
         .expect("Root entry should build successfully");
 
-    // Should pass validation - _root subtree validation is skipped
     assert!(
         entry.validate().is_ok(),
-        "Entry with _root marker subtree should pass validation"
+        "Root entry with subtree should pass validation"
     );
-
-    // Verify it has the _root marker
-    assert!(
-        entry.subtrees().contains(&"_root".to_string()),
-        "Root entry should contain _root marker"
-    );
+    assert!(entry.is_root());
 }
 
 #[test]

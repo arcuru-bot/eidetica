@@ -1,4 +1,4 @@
-use eidetica::{Entry, constants::ROOT, entry::ID};
+use eidetica::{Entry, entry::ID};
 
 use super::helpers::*;
 
@@ -19,7 +19,6 @@ fn test_entry_toplevel_creation() {
 
     assert!(entry.root().is_none());
     assert!(entry.is_root());
-    assert!(entry.in_subtree(ROOT)); // Top-level entries have a "root" subtree
 }
 
 #[test]
