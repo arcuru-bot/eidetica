@@ -126,7 +126,14 @@ cargo run -- --username alice   # no subcommand = TUI + create new room
   -u, --username <USERNAME>      Username for the chat session (default: $USER or "Anonymous")
   -v, --verbose                  Enable verbose debug output
       --transport <TRANSPORT>    Transport to use: 'http' or 'iroh' (default: iroh)
+      --data-dir <PATH>          Directory for SQLite database
+                                 (default: ~/.local/share/eidetica-chat)
 ```
+
+### Persistent Storage
+
+Data is stored in a SQLite database at `<data-dir>/chat.db`. Multiple CLI invocations
+sharing the same `--data-dir` share the same rooms and messages with no sync required.
 
 ## Connecting with Others
 

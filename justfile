@@ -157,6 +157,9 @@ test *args:
         todo)
             cd examples/todo && ./test.sh
             ;;
+        chat)
+            cd examples/chat && ./test.sh
+            ;;
         *)
             # Treat as test filter
             cargo nextest run --workspace --all-features --no-fail-fast --status-level fail $args
