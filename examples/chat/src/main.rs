@@ -185,14 +185,9 @@ async fn cmd_create(
     name: Option<String>,
     password: Option<&str>,
 ) -> Result<()> {
-    let (mut app, _) = setup_app(username, transport, data_dir).await?;
+    let mut app = setup_app(username, transport, data_dir).await?;
 
-    let room_name = name.unwrap_or_else(|| {
-        format!(
-            "Chat Room - {}",
-            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
-        )
-    });
+    let room_name = name.unwrap_or_else(app::default_room_name);
 
     app.create_room(&room_name).await?;
 
@@ -218,7 +213,7 @@ async fn cmd_send(
     message: &str,
     password: Option<&str>,
 ) -> Result<()> {
-    let (mut app, _) = setup_app(username, transport, data_dir).await?;
+    let mut app = setup_app(username, transport, data_dir).await?;
     if let Some(pw) = password {
         app.pending_password = Some(pw.to_string());
     }
@@ -246,7 +241,7 @@ async fn cmd_messages(
     json: bool,
     password: Option<&str>,
 ) -> Result<()> {
-    let (mut app, _) = setup_app(username, transport, data_dir).await?;
+    let mut app = setup_app(username, transport, data_dir).await?;
     if let Some(pw) = password {
         app.pending_password = Some(pw.to_string());
     }
@@ -306,17 +301,14 @@ async fn cmd_tui(
     data_dir: &PathBuf,
     ticket: Option<String>,
 ) -> Result<()> {
-    let (mut app, _) = setup_app(username, transport, data_dir).await?;
+    let mut app = setup_app(username, transport, data_dir).await?;
 
     if let Some(ticket) = ticket {
         eprintln!("Connecting to room...");
         app.connect_to_room(&ticket).await?;
         eprintln!("Connected!");
     } else {
-        let room_name = format!(
-            "Chat Room - {}",
-            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
-        );
+        let room_name = app::default_room_name();
         app.create_room(&room_name).await?;
 
         if let Some(addr) = app.current_room_address() {
@@ -360,8 +352,7 @@ async fn cmd_tui(
 }
 
 /// Shared setup: create instance + app
-async fn setup_app(username: &str, transport: &str, data_dir: &PathBuf) -> Result<(App, String)> {
-    // Ensure data directory exists
+async fn setup_app(username: &str, transport: &str, data_dir: &PathBuf) -> Result<App> {
     std::fs::create_dir_all(data_dir).map_err(|e| {
         eidetica::sync::SyncError::Network(format!(
             "Failed to create data directory {}: {e}",
@@ -377,8 +368,7 @@ async fn setup_app(username: &str, transport: &str, data_dir: &PathBuf) -> Resul
     let _ = instance.create_user(username, None).await;
     let user = instance.login_user(username, None).await?;
 
-    let app = App::new(instance, user, username.to_string(), transport)?;
-    Ok((app, username.to_string()))
+    App::new(instance, user, username.to_string(), transport)
 }
 
 async fn run_app(
@@ -416,22 +406,21 @@ async fn run_app(
                 }
                 Ok(Event::Mouse(mouse)) => {
                     handled_event = true;
-                    if mouse.kind == crossterm::event::MouseEventKind::Down(
-                        crossterm::event::MouseButton::Left,
-                    ) {
+                    if mouse.kind
+                        == crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Left,
+                        )
+                    {
                         let copy_ticket = app.handle_click(mouse.column, mouse.row);
                         if copy_ticket {
                             if let Some(addr) = app.current_room_address() {
                                 // OSC 52: copy to system clipboard
+                                use base64ct::{Base64, Encoding};
                                 use std::io::Write;
-                                let encoded = base64_encode(addr.as_bytes());
-                                let _ = write!(
-                                    terminal.backend_mut(),
-                                    "\x1b]52;c;{encoded}\x07"
-                                );
+                                let encoded = Base64::encode_string(addr.as_bytes());
+                                let _ = write!(terminal.backend_mut(), "\x1b]52;c;{encoded}\x07");
                                 let _ = terminal.backend_mut().flush();
-                                app.status_message =
-                                    Some("Ticket copied to clipboard".into());
+                                app.status_message = Some("Ticket copied to clipboard".into());
                             }
                         }
                     }
@@ -456,29 +445,4 @@ async fn run_app(
         }
     }
     Ok(())
-}
-
-/// Simple base64 encoder for OSC 52 clipboard
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[(n >> 18 & 63) as usize] as char);
-        result.push(CHARS[(n >> 12 & 63) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[(n >> 6 & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(n & 63) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
 }

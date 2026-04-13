@@ -14,7 +14,16 @@ use ratatui::widgets::ScrollbarState;
 use std::collections::BTreeSet;
 use tracing::{debug, info};
 
-/// Input line editor with cursor support
+const STORE_MESSAGES: &str = "messages";
+const STORE_ENCRYPTED: &str = "encrypted_messages";
+pub const SYSTEM_AUTHOR: &str = "*";
+
+pub fn default_room_name() -> String {
+    format!(
+        "Chat Room - {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+    )
+}
 pub struct InputLine {
     pub text: String,
     pub cursor: usize,
@@ -175,9 +184,9 @@ impl Room {
 
     fn message_store_name(&self) -> &str {
         if self.password.is_some() {
-            "encrypted_messages"
+            STORE_ENCRYPTED
         } else {
-            "messages"
+            STORE_MESSAGES
         }
     }
 
@@ -225,7 +234,7 @@ impl Room {
         messages.sort_by_key(|a| a.timestamp);
 
         for msg in &messages {
-            if msg.author != "*" {
+            if msg.author != SYSTEM_AUTHOR {
                 self.known_users.insert(msg.author.clone());
             }
         }
@@ -257,14 +266,6 @@ impl Room {
         if self.scroll_position >= max {
             self.pinned_to_bottom = true;
         }
-    }
-
-    pub fn unread_below(&self, visible_height: usize) -> usize {
-        if self.pinned_to_bottom || self.messages.is_empty() {
-            return 0;
-        }
-        let visible_end = (self.scroll_position + visible_height).min(self.messages.len());
-        self.messages.len().saturating_sub(visible_end)
     }
 }
 
@@ -375,13 +376,9 @@ impl App {
         self.room().map(|r| r.messages.as_slice()).unwrap_or(&[])
     }
 
-    pub fn known_users(&self) -> BTreeSet<String> {
-        let mut users = BTreeSet::new();
-        users.insert(self.username.clone());
-        if let Some(room) = self.room() {
-            users.extend(room.known_users.iter().cloned());
-        }
-        users
+    pub fn known_users(&self) -> &BTreeSet<String> {
+        static EMPTY: BTreeSet<String> = BTreeSet::new();
+        self.room().map(|r| &r.known_users).unwrap_or(&EMPTY)
     }
 
     pub fn scroll_position(&self) -> usize {
@@ -390,12 +387,6 @@ impl App {
 
     pub fn pinned_to_bottom(&self) -> bool {
         self.room().map(|r| r.pinned_to_bottom).unwrap_or(true)
-    }
-
-    pub fn scroll_state(&self) -> ScrollbarState {
-        self.room()
-            .map(|r| r.scroll_state.clone())
-            .unwrap_or_default()
     }
 
     // ── Room management ──
@@ -627,7 +618,7 @@ impl App {
 
         let txn = room.database.new_transaction().await?;
         let mut encrypted = txn
-            .get_store::<PasswordStore<Table<ChatMessage>>>("encrypted_messages")
+            .get_store::<PasswordStore<Table<ChatMessage>>>(STORE_ENCRYPTED)
             .await?;
         encrypted.initialize(password, Doc::new()).await?;
 
@@ -642,7 +633,7 @@ impl App {
         self.status_message = Some("Room encrypted. Share the password with participants.".into());
 
         let msg = ChatMessage::new(
-            "*".to_string(),
+            SYSTEM_AUTHOR.to_string(),
             format!("{} enabled encryption", self.username),
         );
         let room = self.rooms.get(self.active_room).unwrap();
@@ -722,10 +713,7 @@ impl App {
             }
             "/create" => {
                 let name = if arg.is_empty() {
-                    format!(
-                        "Chat Room - {}",
-                        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
-                    )
+                    default_room_name()
                 } else {
                     arg.to_string()
                 };
@@ -772,7 +760,7 @@ impl App {
                     self.status_message = Some(format!("Nick changed: {old} -> {}", self.username));
 
                     let msg = ChatMessage::new(
-                        "*".to_string(),
+                        SYSTEM_AUTHOR.to_string(),
                         format!("{old} is now known as {}", self.username),
                     );
                     if let Some(room) = self.rooms.get(self.active_room) {
@@ -787,7 +775,10 @@ impl App {
             }
             "/me" => {
                 if !arg.is_empty() {
-                    let msg = ChatMessage::new("*".to_string(), format!("{} {arg}", self.username));
+                    let msg = ChatMessage::new(
+                        SYSTEM_AUTHOR.to_string(),
+                        format!("{} {arg}", self.username),
+                    );
                     if let Some(room) = self.rooms.get(self.active_room) {
                         room.insert_message(&msg).await?;
                     }
@@ -842,7 +833,7 @@ impl App {
                 } else if let Some(room) = self.rooms.get(self.active_room) {
                     let txn = room.database.new_transaction().await?;
                     let mut encrypted = txn
-                        .get_store::<PasswordStore<Table<ChatMessage>>>("encrypted_messages")
+                        .get_store::<PasswordStore<Table<ChatMessage>>>(STORE_ENCRYPTED)
                         .await?;
                     match encrypted.open(arg) {
                         Ok(()) => {
@@ -877,8 +868,8 @@ impl App {
     // ── Tab completion ──
 
     pub fn tab_complete(&mut self) {
-        let known = self.known_users();
         if let Some(ref mut tc) = self.tab_completion {
+            // Cycle existing candidates
             tc.index = (tc.index + 1) % tc.candidates.len();
             let replacement = tc.candidates[tc.index].clone();
             let suffix = if tc.start == 0 { ": " } else { " " };
@@ -887,6 +878,7 @@ impl App {
             self.input.text = format!("{before}{replacement}{suffix}{after}");
             self.input.cursor = tc.start + replacement.len() + suffix.len();
         } else {
+            // Start new completion
             let before_cursor = &self.input.text[..self.input.cursor];
             let word_start = before_cursor.rfind(' ').map(|i| i + 1).unwrap_or(0);
             let prefix = before_cursor[word_start..].to_string();
@@ -896,7 +888,8 @@ impl App {
             }
 
             let prefix_lower = prefix.to_lowercase();
-            let candidates: Vec<String> = known
+            let candidates: Vec<String> = self
+                .known_users()
                 .iter()
                 .filter(|nick| nick.to_lowercase().starts_with(&prefix_lower))
                 .cloned()
@@ -1236,7 +1229,7 @@ mod tests {
 
     #[test]
     fn message_action() {
-        let msg = ChatMessage::new("*".to_string(), "waves".to_string());
+        let msg = ChatMessage::new(SYSTEM_AUTHOR.to_string(), "waves".to_string());
         assert!(msg.is_action());
 
         let msg = ChatMessage::new("alice".to_string(), "hello".to_string());

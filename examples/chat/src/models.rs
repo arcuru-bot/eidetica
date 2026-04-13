@@ -20,8 +20,7 @@ impl ChatMessage {
         }
     }
 
-    /// Returns true if this is a system/action message (from /me or similar)
     pub fn is_action(&self) -> bool {
-        self.author == "*"
+        self.author == crate::app::SYSTEM_AUTHOR
     }
 }
