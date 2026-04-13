@@ -13,7 +13,7 @@ This example showcases:
 - **Multi-transport sync**: Choose between HTTP (simple client-server) or Iroh (P2P with NAT traversal)
 - **Connection sharing**: Share room addresses to invite others
 - **Automatic sync**: Messages sync in real-time between connected peers
-- **Simple TUI**: Clean terminal interface for easy testing
+- **IRC-style TUI**: Full-featured terminal interface with nick list, slash commands, input history, and help overlay
 
 ## Quick Start
 
@@ -38,11 +38,12 @@ When you create a new room, the app will:
 Example output:
 
 ```
-🚀 Eidetica Chat Room Created!
-📍 Room Address: eidetica:?db=bafyrei...&pr=iroh:endpoint...
-👤 Username: alice
+Eidetica Chat Room Created!
 
-Share this address with others to invite them to the chat.
+Room Address: eidetica:?db=bafyrei...&pr=iroh:endpoint...
+Username: alice
+
+Share this address with others to invite them.
 Press Enter to start chatting...
 ```
 
@@ -59,15 +60,39 @@ The app will connect to the specified room and start the chat interface immediat
 
 Once in a room, you'll see:
 
-- **Room address bar**: Displays the room address at the top
-- **Messages**: Chat history in the middle
+- **Topic bar**: Room name and shareable address at the top
+- **Messages**: Chat history in the center, with timestamps and colored nicks
+- **Nick list**: Known users on the right sidebar
 - **Input field**: Type messages at the bottom
 
-Controls:
+#### Keyboard Shortcuts
 
-- **Type and Enter**: Send a message
-- **↑/↓**: Scroll through message history
-- **Q or ESC**: Quit the application
+| Key | Action |
+|---|---|
+| `Ctrl+C` / `Ctrl+Q` | Quit |
+| `Enter` | Send message |
+| `Up` / `Down` | Browse input history |
+| `Ctrl+Up` / `Ctrl+Down` | Scroll messages (one line) |
+| `PageUp` / `PageDown` | Scroll messages (fast) |
+| `Left` / `Right` | Move cursor |
+| `Ctrl+Left` / `Ctrl+Right` | Move cursor by word |
+| `Home` / `Ctrl+A` | Start of line |
+| `End` / `Ctrl+E` | End of line |
+| `Ctrl+K` | Kill to end of line |
+| `Ctrl+U` | Kill to start of line |
+| `Ctrl+W` | Kill word back |
+
+#### Slash Commands
+
+| Command | Description |
+|---|---|
+| `/nick <name>` | Change your nickname |
+| `/me <action>` | Send an action message (e.g., `/me waves`) |
+| `/clear` | Clear the message display (messages persist in DB) |
+| `/topic` | Show the current room topic |
+| `/users` / `/names` | List known users |
+| `/help` / `/?` | Toggle help overlay |
+| `/quit` / `/q` | Quit |
 
 ## CLI Options
 
@@ -104,11 +129,11 @@ cd examples/chat
 cargo run -- --username alice
 
 # App displays:
-# 🚀 Eidetica Chat Room Created!
-# 📍 Room Address: eidetica:?db=bafyrei...&pr=iroh:endpoint...
-# 👤 Username: alice
+# Eidetica Chat Room Created!
+# Room Address: eidetica:?db=bafyrei...&pr=iroh:endpoint...
+# Username: alice
 #
-# Share this address with others to invite them to the chat.
+# Share this address with others to invite them.
 # Press Enter to start chatting...
 
 # Copy the ticket URL, share it with Bob, then press Enter
