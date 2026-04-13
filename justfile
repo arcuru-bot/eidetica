@@ -145,6 +145,8 @@ test *args:
         full)
             just test
             just test doc
+            just test chat
+            just test todo
             just doc test
             ;;
         ignored)

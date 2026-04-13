@@ -186,6 +186,23 @@
       '';
       cargoNextestExtraArgs = "--workspace --all-features ${nextestCheckArgs}";
     });
+  # Example integration tests (build binary + run test.sh)
+  example-chat = craneLib.buildPackage (debugArgs
+    // {
+      pname = "example-chat-bin";
+      cargoExtraArgs = "-p example-chat --all-features";
+      doCheck = false;
+    });
+
+  # test.sh is excluded by cleanCargoSource, so reference it directly from the repo
+  chatTestScript = ../../examples/chat/test.sh;
+
+  test-check-example-chat = pkgs.runCommand "test-check-example-chat" {} ''
+    export CHAT_BIN="${example-chat}/bin/example-chat"
+    bash ${chatTestScript}
+    mkdir -p $out
+    echo "Chat integration tests passed" > $out/result
+  '';
 in {
   # Common build artifacts (compiled test binaries, shared by builds and runners)
   artifacts = testCheckArtifacts;
@@ -196,6 +213,7 @@ in {
       inmemory = test-check-inmemory;
       sqlite = test-check-sqlite;
       minimal = test-check-minimal;
+      example-chat = test-check-example-chat;
     }
     // lib.optionalAttrs pkgs.stdenv.isLinux {
       postgres = test-check-postgres;

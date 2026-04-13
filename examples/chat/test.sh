@@ -3,9 +3,16 @@ set -e
 
 # Integration test for the chat CLI
 # Exercises: create, send (multi-user), messages, messages --json
+#
+# Set CHAT_BIN to a pre-built binary to skip cargo build.
+# Otherwise falls back to `cargo run`.
 
 DATA_DIR=$(mktemp -d)
-CMD="cargo run --quiet -p example-chat -- --data-dir $DATA_DIR"
+if [ -n "${CHAT_BIN:-}" ]; then
+    CMD="$CHAT_BIN --data-dir $DATA_DIR"
+else
+    CMD="cargo run --quiet -p example-chat -- --data-dir $DATA_DIR"
+fi
 PASS=0
 FAIL=0
 
