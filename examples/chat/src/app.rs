@@ -593,3 +593,198 @@ impl App {
         self.messages.len().saturating_sub(visible_end)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── InputLine ──────────────────────────────────────────────
+
+    #[test]
+    fn input_insert_and_cursor() {
+        let mut input = InputLine::new();
+        input.insert('h');
+        input.insert('i');
+        assert_eq!(input.text, "hi");
+        assert_eq!(input.cursor, 2);
+    }
+
+    #[test]
+    fn input_backspace() {
+        let mut input = InputLine::new();
+        input.set("hello".into());
+        input.backspace();
+        assert_eq!(input.text, "hell");
+        assert_eq!(input.cursor, 4);
+    }
+
+    #[test]
+    fn input_backspace_at_start() {
+        let mut input = InputLine::new();
+        input.set("hello".into());
+        input.home();
+        input.backspace(); // should be no-op
+        assert_eq!(input.text, "hello");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn input_delete() {
+        let mut input = InputLine::new();
+        input.set("hello".into());
+        input.home();
+        input.delete();
+        assert_eq!(input.text, "ello");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn input_delete_at_end() {
+        let mut input = InputLine::new();
+        input.set("hello".into());
+        input.delete(); // should be no-op
+        assert_eq!(input.text, "hello");
+    }
+
+    #[test]
+    fn input_cursor_movement() {
+        let mut input = InputLine::new();
+        input.set("hello".into());
+        assert_eq!(input.cursor, 5);
+
+        input.move_left();
+        assert_eq!(input.cursor, 4);
+
+        input.home();
+        assert_eq!(input.cursor, 0);
+
+        input.move_right();
+        assert_eq!(input.cursor, 1);
+
+        input.end();
+        assert_eq!(input.cursor, 5);
+
+        // Boundary: left at 0
+        input.home();
+        input.move_left();
+        assert_eq!(input.cursor, 0);
+
+        // Boundary: right at end
+        input.end();
+        input.move_right();
+        assert_eq!(input.cursor, 5);
+    }
+
+    #[test]
+    fn input_insert_mid_string() {
+        let mut input = InputLine::new();
+        input.set("hllo".into());
+        input.home();
+        input.move_right(); // cursor at 1
+        input.insert('e');
+        assert_eq!(input.text, "hello");
+        assert_eq!(input.cursor, 2);
+    }
+
+    #[test]
+    fn input_word_movement() {
+        let mut input = InputLine::new();
+        input.set("hello world foo".into());
+
+        input.move_word_left();
+        assert_eq!(input.cursor, 12); // before "foo"
+
+        input.move_word_left();
+        assert_eq!(input.cursor, 6); // before "world"
+
+        input.move_word_left();
+        assert_eq!(input.cursor, 0); // before "hello"
+
+        input.move_word_left();
+        assert_eq!(input.cursor, 0); // stays at 0
+
+        input.move_word_right();
+        assert_eq!(input.cursor, 6); // after "hello "
+
+        input.move_word_right();
+        assert_eq!(input.cursor, 12); // after "world "
+
+        input.move_word_right();
+        assert_eq!(input.cursor, 15); // end
+    }
+
+    #[test]
+    fn input_kill_to_end() {
+        let mut input = InputLine::new();
+        input.set("hello world".into());
+        input.home();
+        input.move_word_right(); // cursor at 6
+        input.kill_to_end();
+        assert_eq!(input.text, "hello ");
+        assert_eq!(input.cursor, 6);
+    }
+
+    #[test]
+    fn input_kill_to_start() {
+        let mut input = InputLine::new();
+        input.set("hello world".into());
+        input.home();
+        input.move_word_right(); // cursor at 6
+        input.kill_to_start();
+        assert_eq!(input.text, "world");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn input_kill_word_back() {
+        let mut input = InputLine::new();
+        input.set("hello world".into());
+        input.kill_word_back();
+        assert_eq!(input.text, "hello ");
+        assert_eq!(input.cursor, 6);
+    }
+
+    #[test]
+    fn input_utf8() {
+        let mut input = InputLine::new();
+        input.insert('é');
+        input.insert('ñ');
+        assert_eq!(input.text, "éñ");
+        assert_eq!(input.cursor_chars(), 2);
+
+        input.move_left();
+        assert_eq!(input.cursor_chars(), 1);
+
+        input.backspace();
+        assert_eq!(input.text, "ñ");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn input_clear() {
+        let mut input = InputLine::new();
+        input.set("hello".into());
+        input.clear();
+        assert_eq!(input.text, "");
+        assert_eq!(input.cursor, 0);
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn input_is_empty_whitespace() {
+        let mut input = InputLine::new();
+        input.set("   ".into());
+        assert!(input.is_empty());
+    }
+
+    // ── ChatMessage ────────────────────────────────────────────
+
+    #[test]
+    fn message_action() {
+        let msg = ChatMessage::new("*".to_string(), "waves".to_string());
+        assert!(msg.is_action());
+
+        let msg = ChatMessage::new("alice".to_string(), "hello".to_string());
+        assert!(!msg.is_action());
+    }
+}
