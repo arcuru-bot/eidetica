@@ -114,6 +114,37 @@ else
 fi
 echo
 
+# ── Encrypted room ─────────────────────────────────────────────
+ENC_DIR=$(mktemp -d)
+if [ -n "${CHAT_BIN:-}" ]; then
+    ECMD="$CHAT_BIN --data-dir $ENC_DIR"
+else
+    ECMD="cargo run --quiet -p example-chat -- --data-dir $ENC_DIR"
+fi
+
+echo "--- Encrypted room ---"
+ENC_TICKET=$($ECMD --username alice create --password s3cret 2>/dev/null)
+assert_contains "encrypted ticket" "$ENC_TICKET" "eidetica:?db="
+
+$ECMD --username alice send "$ENC_TICKET" "secret message" --password s3cret 2>&1 | grep -q "Message sent"
+echo "  PASS: send to encrypted room"
+PASS=$((PASS + 1))
+
+ENC_MSGS=$($ECMD --username reader messages "$ENC_TICKET" --password s3cret 2>/dev/null)
+assert_contains "read encrypted messages" "$ENC_MSGS" "secret message"
+
+NO_PW=$($ECMD --username reader messages "$ENC_TICKET" 2>/dev/null)
+if [ -z "$NO_PW" ]; then
+    echo "  PASS: no messages without password"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: messages visible without password"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$ENC_DIR"
+echo
+
 # ── Summary ────────────────────────────────────────────────────
 echo "=== Results: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then

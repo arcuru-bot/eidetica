@@ -51,6 +51,10 @@ enum Command {
         /// Room name
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Encrypt the room with a password
+        #[arg(short, long)]
+        password: Option<String>,
     },
 
     /// Send a message to a chat room
@@ -60,6 +64,10 @@ enum Command {
 
         /// Message text to send
         message: String,
+
+        /// Password for encrypted rooms
+        #[arg(short, long)]
+        password: Option<String>,
     },
 
     /// List messages from a chat room
@@ -78,6 +86,10 @@ enum Command {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Password for encrypted rooms
+        #[arg(short, long)]
+        password: Option<String>,
     },
 
     /// Open the interactive TUI chat
@@ -117,18 +129,40 @@ async fn main() -> Result<()> {
     let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
 
     match cli.command {
-        Some(Command::Create { name }) => cmd_create(&username, transport, &data_dir, name).await,
-        Some(Command::Send { ticket, message }) => {
-            cmd_send(&username, transport, &data_dir, &ticket, &message).await
+        Some(Command::Create { name, password }) => {
+            cmd_create(&username, transport, &data_dir, name, password.as_deref()).await
+        }
+        Some(Command::Send {
+            ticket,
+            message,
+            password,
+        }) => {
+            cmd_send(
+                &username,
+                transport,
+                &data_dir,
+                &ticket,
+                &message,
+                password.as_deref(),
+            )
+            .await
         }
         Some(Command::Messages {
             ticket,
             follow,
             limit,
             json,
+            password,
         }) => {
             cmd_messages(
-                &username, transport, &data_dir, &ticket, follow, limit, json,
+                &username,
+                transport,
+                &data_dir,
+                &ticket,
+                follow,
+                limit,
+                json,
+                password.as_deref(),
             )
             .await
         }
@@ -149,6 +183,7 @@ async fn cmd_create(
     transport: &str,
     data_dir: &PathBuf,
     name: Option<String>,
+    password: Option<&str>,
 ) -> Result<()> {
     let (mut app, _) = setup_app(username, transport, data_dir).await?;
 
@@ -161,8 +196,12 @@ async fn cmd_create(
 
     app.create_room(&room_name).await?;
 
+    if let Some(pw) = password {
+        app.encrypt_room(pw).await?;
+        eprintln!("Room encrypted.");
+    }
+
     if let Some(addr) = &app.current_room_address {
-        // Print ticket to stdout for scripting; info to stderr
         eprintln!("Room created: {room_name}");
         println!("{addr}");
     }
@@ -177,23 +216,21 @@ async fn cmd_send(
     data_dir: &PathBuf,
     ticket: &str,
     message: &str,
+    password: Option<&str>,
 ) -> Result<()> {
     let (mut app, _) = setup_app(username, transport, data_dir).await?;
+    if let Some(pw) = password {
+        app.room_password = Some(pw.to_string());
+    }
     let local = app.open_room(ticket).await?;
 
     let msg = ChatMessage::new(username.to_string(), message.to_string());
 
     if let Some(database) = &app.current_room {
-        let txn = database.new_transaction().await?;
-        let store = txn
-            .get_store::<eidetica::store::Table<ChatMessage>>("messages")
-            .await?;
-        store.insert(msg).await?;
-        txn.commit().await?;
+        app.insert_message(database, &msg).await?;
     }
 
     if !local {
-        // Give sync a moment to propagate to remote peers
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
 
@@ -210,8 +247,12 @@ async fn cmd_messages(
     follow: bool,
     limit: usize,
     json: bool,
+    password: Option<&str>,
 ) -> Result<()> {
     let (mut app, _) = setup_app(username, transport, data_dir).await?;
+    if let Some(pw) = password {
+        app.room_password = Some(pw.to_string());
+    }
     app.open_room(ticket).await?;
 
     let msgs = if limit == 0 || limit >= app.messages.len() {

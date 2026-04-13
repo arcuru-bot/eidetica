@@ -53,7 +53,7 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
         .clone()
         .unwrap_or_else(|| "Unknown Room".to_string());
 
-    let topic_spans = vec![
+    let mut topic_spans = vec![
         Span::styled(" [", Style::default().fg(Color::DarkGray)),
         Span::styled(
             &room_name,
@@ -62,11 +62,19 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("] ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            app.current_room_address.as_deref().unwrap_or(""),
-            Style::default().fg(Color::DarkGray),
-        ),
     ];
+    if app.room_password.is_some() {
+        topic_spans.push(Span::styled(
+            "[encrypted] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    topic_spans.push(Span::styled(
+        app.current_room_address.as_deref().unwrap_or(""),
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let topic_bar =
         Paragraph::new(Line::from(topic_spans)).style(Style::default().bg(Color::Rgb(30, 30, 40)));
@@ -236,6 +244,8 @@ fn render_help_overlay(f: &mut ratatui::Frame) {
         help_line("/topic", "Show room topic"),
         help_line("/users", "List known users"),
         help_line("/timestamps", "Toggle timestamps"),
+        help_line("/encrypt <pass>", "Encrypt room"),
+        help_line("/decrypt <pass>", "Unlock encrypted room"),
         help_line("/quit", "Quit"),
         help_line("/help", "Toggle this help"),
         Line::from(""),

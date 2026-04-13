@@ -3,7 +3,7 @@ use eidetica::{
     Database, Instance, Result,
     auth::{AuthKey, Permission, types::Permission as PermissionType},
     crdt::Doc,
-    store::Table,
+    store::{PasswordStore, Table},
     sync::{
         DatabaseTicket, SyncError,
         transports::{http::HttpTransport, iroh::IrohTransport},
@@ -187,6 +187,9 @@ pub struct App {
 
     // Notification state
     pub needs_bell: bool,
+
+    // Encryption state
+    pub room_password: Option<String>,
 }
 
 /// Tracks an in-progress tab completion cycle
@@ -230,6 +233,7 @@ impl App {
             show_timestamps: true,
             tab_completion: None,
             needs_bell: false,
+            room_password: None,
         })
     }
 
@@ -430,13 +434,98 @@ impl App {
         Ok(())
     }
 
+    /// The store name to use based on encryption state
+    fn message_store_name(&self) -> &str {
+        if self.room_password.is_some() {
+            "encrypted_messages"
+        } else {
+            "messages"
+        }
+    }
+
+    /// Search all messages from the store, handling encrypted/unencrypted transparently
+    async fn search_all_messages(&self, database: &Database) -> Result<Vec<ChatMessage>> {
+        let txn = database.new_transaction().await?;
+        let store_name = self.message_store_name();
+
+        if let Some(password) = &self.room_password {
+            let mut encrypted = txn
+                .get_store::<PasswordStore<Table<ChatMessage>>>(store_name)
+                .await?;
+            encrypted.open(password)?;
+            let table = encrypted.inner().await?;
+            let entries = table.search(|_| true).await?;
+            Ok(entries.into_iter().map(|(_, msg)| msg).collect())
+        } else {
+            let store = txn.get_store::<Table<ChatMessage>>(store_name).await?;
+            let entries = store.search(|_| true).await?;
+            Ok(entries.into_iter().map(|(_, msg)| msg).collect())
+        }
+    }
+
+    /// Insert a message, handling encrypted/unencrypted transparently
+    pub async fn insert_message(&self, database: &Database, message: &ChatMessage) -> Result<()> {
+        let txn = database.new_transaction().await?;
+        let store_name = self.message_store_name();
+
+        if let Some(password) = &self.room_password {
+            let mut encrypted = txn
+                .get_store::<PasswordStore<Table<ChatMessage>>>(store_name)
+                .await?;
+            encrypted.open(password)?;
+            let table = encrypted.inner().await?;
+            table.insert(message.clone()).await?;
+        } else {
+            let store = txn.get_store::<Table<ChatMessage>>(store_name).await?;
+            store.insert(message.clone()).await?;
+        }
+
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Encrypt the room's message store with a password.
+    /// This creates a new PasswordStore, migrates existing messages, and switches over.
+    pub async fn encrypt_room(&mut self, password: &str) -> Result<()> {
+        let database = self
+            .current_room
+            .as_ref()
+            .ok_or_else(|| SyncError::Network("No room open".into()))?;
+
+        // Load existing messages from the unencrypted store
+        let existing = self.search_all_messages(database).await?;
+
+        // Initialize encrypted store
+        let txn = database.new_transaction().await?;
+        let mut encrypted = txn
+            .get_store::<PasswordStore<Table<ChatMessage>>>("encrypted_messages")
+            .await?;
+        encrypted.initialize(password, Doc::new()).await?;
+
+        // Migrate existing messages
+        let table = encrypted.inner().await?;
+        for msg in &existing {
+            table.insert(msg.clone()).await?;
+        }
+        txn.commit().await?;
+
+        self.room_password = Some(password.to_string());
+        self.status_message = Some("Room encrypted. Share the password with participants.".into());
+
+        // Add system message
+        let msg = ChatMessage::new(
+            "*".to_string(),
+            format!("{} enabled encryption", self.username),
+        );
+        self.insert_message(database, &msg).await?;
+        self.messages.push(msg);
+
+        Ok(())
+    }
+
     pub async fn load_messages(&mut self) -> Result<()> {
         if let Some(database) = &self.current_room {
-            let txn = database.new_transaction().await?;
-            let store = txn.get_store::<Table<ChatMessage>>("messages").await?;
-
-            let entries = store.search(|_| true).await?;
-            let mut messages: Vec<ChatMessage> = entries.into_iter().map(|(_, msg)| msg).collect();
+            let mut messages = self.search_all_messages(database).await?;
             messages.sort_by_key(|a| a.timestamp);
 
             // Update known users
@@ -463,7 +552,6 @@ impl App {
 
         // Save to input history
         if !text.is_empty() {
-            // Don't duplicate the last history entry
             if self.input_history.last().map(|s| s.as_str()) != Some(&text) {
                 self.input_history.push(text.clone());
             }
@@ -478,11 +566,7 @@ impl App {
         let message = ChatMessage::new(self.username.clone(), text);
 
         if let Some(database) = &self.current_room {
-            let txn = database.new_transaction().await?;
-            let store = txn.get_store::<Table<ChatMessage>>("messages").await?;
-            store.insert(message.clone()).await?;
-            txn.commit().await?;
-
+            self.insert_message(database, &message).await?;
             self.messages.push(message);
             self.input.clear();
             self.pinned_to_bottom = true;
@@ -511,16 +595,12 @@ impl App {
                     self.known_users.insert(self.username.clone());
                     self.status_message = Some(format!("Nick changed: {old} -> {}", self.username));
 
-                    // Send a system message about the nick change
                     let msg = ChatMessage::new(
                         "*".to_string(),
                         format!("{old} is now known as {}", self.username),
                     );
                     if let Some(database) = &self.current_room {
-                        let txn = database.new_transaction().await?;
-                        let store = txn.get_store::<Table<ChatMessage>>("messages").await?;
-                        store.insert(msg.clone()).await?;
-                        txn.commit().await?;
+                        self.insert_message(database, &msg).await?;
                         self.messages.push(msg);
                     }
                 }
@@ -529,10 +609,7 @@ impl App {
                 if !arg.is_empty() {
                     let msg = ChatMessage::new("*".to_string(), format!("{} {arg}", self.username));
                     if let Some(database) = &self.current_room {
-                        let txn = database.new_transaction().await?;
-                        let store = txn.get_store::<Table<ChatMessage>>("messages").await?;
-                        store.insert(msg.clone()).await?;
-                        txn.commit().await?;
+                        self.insert_message(database, &msg).await?;
                         self.messages.push(msg);
                         self.pinned_to_bottom = true;
                         self.scroll_to_bottom();
@@ -562,6 +639,49 @@ impl App {
                     "Timestamps {}",
                     if self.show_timestamps { "on" } else { "off" }
                 ));
+            }
+            "/encrypt" => {
+                if arg.is_empty() {
+                    if self.room_password.is_some() {
+                        self.status_message = Some("Room is encrypted".into());
+                    } else {
+                        self.status_message =
+                            Some("Usage: /encrypt <password> — encrypt the room".into());
+                    }
+                } else if self.room_password.is_some() {
+                    self.status_message = Some("Room is already encrypted".into());
+                } else {
+                    match self.encrypt_room(arg).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            self.status_message = Some(format!("Encryption failed: {e}"));
+                        }
+                    }
+                }
+            }
+            "/decrypt" => {
+                if arg.is_empty() {
+                    self.status_message =
+                        Some("Usage: /decrypt <password> — unlock an encrypted room".into());
+                } else {
+                    // Try opening the encrypted store with the given password
+                    if let Some(database) = &self.current_room {
+                        let txn = database.new_transaction().await?;
+                        let mut encrypted = txn
+                            .get_store::<PasswordStore<Table<ChatMessage>>>("encrypted_messages")
+                            .await?;
+                        match encrypted.open(arg) {
+                            Ok(()) => {
+                                self.room_password = Some(arg.to_string());
+                                self.status_message = Some("Room decrypted".into());
+                                self.load_messages().await?;
+                            }
+                            Err(e) => {
+                                self.status_message = Some(format!("Decryption failed: {e}"));
+                            }
+                        }
+                    }
+                }
             }
             "/help" | "/?" => {
                 self.show_help = !self.show_help;
