@@ -29,9 +29,14 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
     let nick_area = horiz[1];
 
     // Vertical layout for chat area
-    let mut constraints = vec![
-        Constraint::Length(1), // Topic bar (compact)
-    ];
+    let mut constraints = Vec::new();
+
+    // Room tab bar (only if multiple rooms)
+    if app.rooms.len() > 1 {
+        constraints.push(Constraint::Length(1));
+    }
+
+    constraints.push(Constraint::Length(1)); // Topic bar
 
     if app.status_message.is_some() {
         constraints.push(Constraint::Length(1)); // Status line
@@ -47,23 +52,66 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
 
     let mut chunk_idx = 0;
 
-    // Topic bar — compact, no borders
+    // Room tab bar
+    if app.rooms.len() > 1 {
+        let mut tab_spans: Vec<Span> = Vec::new();
+        for (i, room) in app.rooms.iter().enumerate() {
+            let is_active = i == app.active_room;
+            let short_name = if room.name.len() > 15 {
+                format!("{}...", &room.name[..12])
+            } else {
+                room.name.clone()
+            };
+
+            let label = format!(" {}{} ", short_name, if room.has_unread { "*" } else { "" });
+
+            let style = if is_active {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Rgb(50, 50, 70))
+                    .add_modifier(Modifier::BOLD)
+            } else if room.has_unread {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::Rgb(30, 30, 40))
+            } else {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .bg(Color::Rgb(30, 30, 40))
+            };
+
+            tab_spans.push(Span::styled(label, style));
+            tab_spans.push(Span::styled(
+                "|",
+                Style::default()
+                    .fg(Color::Rgb(60, 60, 60))
+                    .bg(Color::Rgb(30, 30, 40)),
+            ));
+        }
+
+        let tab_bar = Paragraph::new(Line::from(tab_spans))
+            .style(Style::default().bg(Color::Rgb(30, 30, 40)));
+        f.render_widget(tab_bar, chunks[chunk_idx]);
+        chunk_idx += 1;
+    }
+
+    // Topic bar
     let room_name = app
-        .current_room_name
-        .clone()
-        .unwrap_or_else(|| "Unknown Room".to_string());
+        .current_room_name()
+        .unwrap_or("Unknown Room")
+        .to_string();
 
     let mut topic_spans = vec![
         Span::styled(" [", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            &room_name,
+            room_name,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("] ", Style::default().fg(Color::DarkGray)),
     ];
-    if app.room_password.is_some() {
+    if app.room_password().is_some() {
         topic_spans.push(Span::styled(
             "[encrypted] ",
             Style::default()
@@ -72,7 +120,7 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
         ));
     }
     topic_spans.push(Span::styled(
-        app.current_room_address.as_deref().unwrap_or(""),
+        app.current_room_address().unwrap_or("").to_string(),
         Style::default().fg(Color::DarkGray),
     ));
 
@@ -94,41 +142,37 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
 
     // Messages area
     let msg_chunk = chunks[chunk_idx];
-    let inner_width = msg_chunk.width.saturating_sub(2) as usize; // subtract borders
+    let inner_width = msg_chunk.width.saturating_sub(2) as usize;
     let inner_height = msg_chunk.height.saturating_sub(2) as usize;
     chunk_idx += 1;
 
-    let lines: Vec<Line> = app
-        .messages
+    let messages = app.messages();
+    let lines: Vec<Line> = messages
         .iter()
         .map(|m| format_message(m, &app.username, app.show_timestamps))
         .collect();
 
-    // Calculate total wrapped lines for scroll math
     let total_wrapped = lines
         .iter()
         .map(|line| wrapped_line_count(line, inner_width).max(1))
         .sum::<usize>();
 
-    // Scroll position: show the bottom when pinned, otherwise use scroll_position
-    let scroll_row = if app.pinned_to_bottom {
+    let scroll_row = if app.pinned_to_bottom() {
         total_wrapped.saturating_sub(inner_height)
     } else {
-        // Convert message-index scroll position to wrapped-line position
         let mut row = 0usize;
-        for line in lines.iter().take(app.scroll_position) {
+        for line in lines.iter().take(app.scroll_position()) {
             row += wrapped_line_count(line, inner_width).max(1);
         }
         row
     };
 
-    // Unread: count wrapped lines below the viewport
     let visible_end = scroll_row + inner_height;
     let unread_lines = total_wrapped.saturating_sub(visible_end);
-    let title = if unread_lines > 0 && !app.pinned_to_bottom {
-        format!(" Messages ({}) -- more below \u{2193} ", app.messages.len())
+    let title = if unread_lines > 0 && !app.pinned_to_bottom() {
+        format!(" Messages ({}) -- more below \u{2193} ", messages.len())
     } else {
-        format!(" Messages ({}) ", app.messages.len())
+        format!(" Messages ({}) ", messages.len())
     };
 
     let messages_paragraph = Paragraph::new(lines)
@@ -136,7 +180,7 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(
-                    Style::default().fg(if unread_lines > 0 && !app.pinned_to_bottom {
+                    Style::default().fg(if unread_lines > 0 && !app.pinned_to_bottom() {
                         Color::Yellow
                     } else {
                         Color::DarkGray
@@ -168,7 +212,6 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
         );
     f.render_widget(input, input_chunk);
 
-    // Cursor position (byte-aware)
     f.set_cursor_position((
         input_chunk.x + app.input.cursor_chars() as u16 + 1,
         input_chunk.y + 1,
@@ -179,8 +222,8 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
 }
 
 fn render_nick_list(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let nicks: Vec<ListItem> = app
-        .known_users
+    let users = app.known_users();
+    let nicks: Vec<ListItem> = users
         .iter()
         .map(|nick| {
             let style = if nick == &app.username {
@@ -198,14 +241,14 @@ fn render_nick_list(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(format!(" Users ({}) ", app.known_users.len())),
+            .title(format!(" Users ({}) ", users.len())),
     );
 
     f.render_widget(nick_list, area);
 }
 
 fn render_help_overlay(f: &mut ratatui::Frame) {
-    let area = centered_rect(60, 70, f.area());
+    let area = centered_rect(60, 80, f.area());
 
     f.render_widget(Clear, area);
 
@@ -230,6 +273,8 @@ fn render_help_overlay(f: &mut ratatui::Frame) {
         help_line("Ctrl+U", "Kill to start of line"),
         help_line("Ctrl+W", "Kill word back"),
         help_line("Tab", "Nick completion (cycle)"),
+        help_line("Alt+1..9", "Switch to room 1-9"),
+        help_line("Ctrl+N / Ctrl+P", "Next / previous room"),
         Line::from(""),
         Line::from(Span::styled(
             "Commands",
@@ -238,14 +283,18 @@ fn render_help_overlay(f: &mut ratatui::Frame) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
+        help_line("/join <ticket>", "Join a room"),
+        help_line("/create [name]", "Create a new room"),
+        help_line("/part", "Leave current room"),
+        help_line("/rooms", "List all rooms"),
         help_line("/nick <name>", "Change nickname"),
         help_line("/me <action>", "Send action message"),
         help_line("/clear", "Clear message display"),
         help_line("/topic", "Show room topic"),
         help_line("/users", "List known users"),
         help_line("/timestamps", "Toggle timestamps"),
-        help_line("/encrypt <pass>", "Encrypt room"),
-        help_line("/decrypt <pass>", "Unlock encrypted room"),
+        help_line("/encrypt <password>", "Encrypt room"),
+        help_line("/decrypt <password>", "Unlock encrypted room"),
         help_line("/quit", "Quit"),
         help_line("/help", "Toggle this help"),
         Line::from(""),
@@ -320,7 +369,6 @@ fn format_message<'a>(m: &'a ChatMessage, username: &str, show_timestamps: bool)
 /// Apply both mention highlighting and URL detection to text
 fn style_content(text: &str, username: &str, base_style: Style) -> Vec<Span<'static>> {
     let mention_spans = highlight_mentions(text, username, base_style);
-    // Apply URL highlighting within each span
     let mut result = Vec::new();
     for span in mention_spans {
         result.extend(highlight_urls(&span.content, span.style));
@@ -344,7 +392,6 @@ fn highlight_mentions(text: &str, username: &str, base_style: Style) -> Vec<Span
     let mut last = 0;
 
     for (start, _) in lower_text.match_indices(&lower_nick) {
-        // Check word boundaries: mention should not be part of a larger word
         let before_ok = start == 0 || !text.as_bytes()[start - 1].is_ascii_alphanumeric();
         let end = start + username.len();
         let after_ok = end >= text.len() || !text.as_bytes()[end].is_ascii_alphanumeric();
@@ -377,13 +424,11 @@ fn highlight_urls(text: &str, base_style: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut last = 0;
 
-    // Simple URL detection: find http:// or https:// and extend to whitespace
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let rest = &text[i..];
         if rest.starts_with("http://") || rest.starts_with("https://") {
-            // Found URL start — extend to next whitespace or end
             let url_end = rest
                 .find(|c: char| c.is_whitespace())
                 .map(|j| i + j)
@@ -497,7 +542,6 @@ mod tests {
     #[test]
     fn highlight_mentions_word_boundary() {
         let base = Style::default();
-        // "alice" inside "malice" should NOT match
         let spans = highlight_mentions("malice aforethought", "alice", base);
         assert_eq!(span_texts(&spans), vec!["malice aforethought"]);
     }
@@ -531,28 +575,23 @@ mod tests {
         let c1 = nick_color("alice");
         let c2 = nick_color("alice");
         assert_eq!(c1, c2);
-
-        // Different nicks should (usually) get different colors
         let c3 = nick_color("bob");
-        // Not guaranteed different, but should be for these short strings
         assert_ne!(c1, c3);
     }
 
     #[test]
     fn wrapped_line_count_basic() {
-        let line = Line::from("hello world"); // 11 chars
+        let line = Line::from("hello world");
         assert_eq!(wrapped_line_count(&line, 80), 1);
-        assert_eq!(wrapped_line_count(&line, 5), 3); // 11/5 = 3
+        assert_eq!(wrapped_line_count(&line, 5), 3);
         assert_eq!(wrapped_line_count(&line, 11), 1);
     }
 
     #[test]
     fn wrapped_line_count_empty() {
         let line = Line::from("");
-        assert_eq!(wrapped_line_count(&line, 80), 1); // empty = 1 line
+        assert_eq!(wrapped_line_count(&line, 80), 1);
     }
-
-    // ── URL highlighting ──────────────────────────────────────
 
     #[test]
     fn highlight_urls_basic() {

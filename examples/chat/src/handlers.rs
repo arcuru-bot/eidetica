@@ -22,6 +22,16 @@ pub async fn handle_key_event(app: &mut App, key: KeyCode, modifiers: KeyModifie
             app.should_quit = true;
         }
 
+        // Room switching: Alt+1..9
+        KeyCode::Char(c @ '1'..='9') if alt => {
+            let idx = (c as usize) - ('1' as usize);
+            app.switch_room(idx);
+        }
+
+        // Room switching: Ctrl+N/P
+        KeyCode::Char('n') if ctrl => app.next_room(),
+        KeyCode::Char('p') if ctrl => app.prev_room(),
+
         // Send message
         KeyCode::Enter => {
             app.clear_status_message();

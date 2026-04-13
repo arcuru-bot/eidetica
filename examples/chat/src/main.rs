@@ -201,7 +201,7 @@ async fn cmd_create(
         eprintln!("Room encrypted.");
     }
 
-    if let Some(addr) = &app.current_room_address {
+    if let Some(addr) = app.current_room_address() {
         eprintln!("Room created: {room_name}");
         println!("{addr}");
     }
@@ -220,15 +220,12 @@ async fn cmd_send(
 ) -> Result<()> {
     let (mut app, _) = setup_app(username, transport, data_dir).await?;
     if let Some(pw) = password {
-        app.room_password = Some(pw.to_string());
+        app.pending_password = Some(pw.to_string());
     }
     let local = app.open_room(ticket).await?;
 
     let msg = ChatMessage::new(username.to_string(), message.to_string());
-
-    if let Some(database) = &app.current_room {
-        app.insert_message(database, &msg).await?;
-    }
+    app.insert_message_active(&msg).await?;
 
     if !local {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -251,14 +248,15 @@ async fn cmd_messages(
 ) -> Result<()> {
     let (mut app, _) = setup_app(username, transport, data_dir).await?;
     if let Some(pw) = password {
-        app.room_password = Some(pw.to_string());
+        app.pending_password = Some(pw.to_string());
     }
     app.open_room(ticket).await?;
 
-    let msgs = if limit == 0 || limit >= app.messages.len() {
-        &app.messages[..]
+    let messages = app.messages();
+    let msgs = if limit == 0 || limit >= messages.len() {
+        &messages[..]
     } else {
-        &app.messages[app.messages.len() - limit..]
+        &messages[messages.len() - limit..]
     };
 
     for msg in msgs {
@@ -266,15 +264,16 @@ async fn cmd_messages(
     }
 
     if follow {
-        let mut seen = app.messages.len();
+        let mut seen = app.messages().len();
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             app.load_messages().await?;
-            if app.messages.len() > seen {
-                for msg in &app.messages[seen..] {
+            let messages = app.messages();
+            if messages.len() > seen {
+                for msg in &messages[seen..] {
                     print_message(msg, json);
                 }
-                seen = app.messages.len();
+                seen = messages.len();
             }
         }
     }
@@ -320,7 +319,7 @@ async fn cmd_tui(
         );
         app.create_room(&room_name).await?;
 
-        if let Some(addr) = &app.current_room_address {
+        if let Some(addr) = app.current_room_address() {
             eprintln!("Eidetica Chat Room Created!");
             eprintln!();
             eprintln!("Room Address: {addr}");
@@ -398,7 +397,7 @@ async fn run_app(
                 terminal.backend_mut(),
                 crossterm::terminal::SetTitle(format!(
                     "* eidetica-chat ({})",
-                    app.current_room_name.as_deref().unwrap_or("chat")
+                    app.current_room_name().unwrap_or("chat")
                 ))
             )?;
             // Terminal bell

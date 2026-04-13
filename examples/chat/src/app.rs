@@ -35,7 +35,6 @@ impl InputLine {
 
     pub fn backspace(&mut self) {
         if self.cursor > 0 {
-            // Find the previous char boundary
             let prev = self.text[..self.cursor]
                 .char_indices()
                 .last()
@@ -78,14 +77,12 @@ impl InputLine {
     }
 
     pub fn move_word_left(&mut self) {
-        // Skip whitespace, then skip word chars
         let before = &self.text[..self.cursor];
         let trimmed = before.trim_end();
         if trimmed.is_empty() {
             self.cursor = 0;
             return;
         }
-        // Find last space in trimmed portion
         self.cursor = trimmed
             .rfind(|c: char| c.is_whitespace())
             .map(|i| i + 1)
@@ -94,7 +91,6 @@ impl InputLine {
 
     pub fn move_word_right(&mut self) {
         let after = &self.text[self.cursor..];
-        // Skip current word chars, then skip whitespace
         let skip_word = after
             .find(|c: char| c.is_whitespace())
             .unwrap_or(after.len());
@@ -142,9 +138,133 @@ impl InputLine {
         self.text.trim().is_empty()
     }
 
-    /// Cursor position in characters (for display)
     pub fn cursor_chars(&self) -> usize {
         self.text[..self.cursor].chars().count()
+    }
+}
+
+/// Per-room state
+pub struct Room {
+    pub database: Database,
+    pub address: String,
+    pub name: String,
+    pub messages: Vec<ChatMessage>,
+    pub scroll_state: ScrollbarState,
+    pub scroll_position: usize,
+    pub pinned_to_bottom: bool,
+    pub known_users: BTreeSet<String>,
+    pub password: Option<String>,
+    pub has_unread: bool,
+}
+
+impl Room {
+    pub fn new(database: Database, address: String, name: String) -> Self {
+        Self {
+            database,
+            address,
+            name,
+            messages: Vec::new(),
+            scroll_state: ScrollbarState::default(),
+            scroll_position: 0,
+            pinned_to_bottom: true,
+            known_users: BTreeSet::new(),
+            password: None,
+            has_unread: false,
+        }
+    }
+
+    fn message_store_name(&self) -> &str {
+        if self.password.is_some() {
+            "encrypted_messages"
+        } else {
+            "messages"
+        }
+    }
+
+    pub async fn search_all_messages(&self) -> Result<Vec<ChatMessage>> {
+        let txn = self.database.new_transaction().await?;
+        let store_name = self.message_store_name();
+
+        if let Some(password) = &self.password {
+            let mut encrypted = txn
+                .get_store::<PasswordStore<Table<ChatMessage>>>(store_name)
+                .await?;
+            encrypted.open(password)?;
+            let table = encrypted.inner().await?;
+            let entries = table.search(|_| true).await?;
+            Ok(entries.into_iter().map(|(_, msg)| msg).collect())
+        } else {
+            let store = txn.get_store::<Table<ChatMessage>>(store_name).await?;
+            let entries = store.search(|_| true).await?;
+            Ok(entries.into_iter().map(|(_, msg)| msg).collect())
+        }
+    }
+
+    pub async fn insert_message(&self, message: &ChatMessage) -> Result<()> {
+        let txn = self.database.new_transaction().await?;
+        let store_name = self.message_store_name();
+
+        if let Some(password) = &self.password {
+            let mut encrypted = txn
+                .get_store::<PasswordStore<Table<ChatMessage>>>(store_name)
+                .await?;
+            encrypted.open(password)?;
+            let table = encrypted.inner().await?;
+            table.insert(message.clone()).await?;
+        } else {
+            let store = txn.get_store::<Table<ChatMessage>>(store_name).await?;
+            store.insert(message.clone()).await?;
+        }
+
+        txn.commit().await?;
+        Ok(())
+    }
+
+    pub async fn load_messages(&mut self) -> Result<()> {
+        let mut messages = self.search_all_messages().await?;
+        messages.sort_by_key(|a| a.timestamp);
+
+        for msg in &messages {
+            if msg.author != "*" {
+                self.known_users.insert(msg.author.clone());
+            }
+        }
+
+        self.messages = messages;
+        if self.pinned_to_bottom {
+            self.scroll_to_bottom();
+        }
+        Ok(())
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        if !self.messages.is_empty() {
+            self.scroll_position = self.messages.len().saturating_sub(1);
+            self.scroll_state = self.scroll_state.position(self.scroll_position);
+        }
+    }
+
+    pub fn scroll_up(&mut self, amount: usize) {
+        self.scroll_position = self.scroll_position.saturating_sub(amount);
+        self.scroll_state = self.scroll_state.position(self.scroll_position);
+        self.pinned_to_bottom = false;
+    }
+
+    pub fn scroll_down(&mut self, amount: usize) {
+        let max = self.messages.len().saturating_sub(1);
+        self.scroll_position = (self.scroll_position + amount).min(max);
+        self.scroll_state = self.scroll_state.position(self.scroll_position);
+        if self.scroll_position >= max {
+            self.pinned_to_bottom = true;
+        }
+    }
+
+    pub fn unread_below(&self, visible_height: usize) -> usize {
+        if self.pinned_to_bottom || self.messages.is_empty() {
+            return 0;
+        }
+        let visible_end = (self.scroll_position + visible_height).min(self.messages.len());
+        self.messages.len().saturating_sub(visible_end)
     }
 }
 
@@ -152,26 +272,18 @@ pub struct App {
     pub user: User,
     pub instance: Instance,
 
-    // Current room state
-    pub current_room: Option<Database>,
-    pub current_room_address: Option<String>,
-    pub current_room_name: Option<String>,
+    // Rooms
+    pub rooms: Vec<Room>,
+    pub active_room: usize,
 
-    // Chat state
+    // Chat state (global)
     pub input: InputLine,
     pub input_history: Vec<String>,
-    pub history_index: Option<usize>, // None = not browsing history
-    pub history_stash: String,        // saves current input when browsing history
-    pub messages: Vec<ChatMessage>,
-    pub scroll_state: ScrollbarState,
-    pub scroll_position: usize,
-    pub pinned_to_bottom: bool, // auto-scroll only when pinned
+    pub history_index: Option<usize>,
+    pub history_stash: String,
 
     // User info
     pub username: String,
-
-    // Known users (extracted from messages)
-    pub known_users: BTreeSet<String>,
 
     // Sync state
     pub server_running: bool,
@@ -188,43 +300,30 @@ pub struct App {
     // Notification state
     pub needs_bell: bool,
 
-    // Encryption state
-    pub room_password: Option<String>,
+    // CLI: pending password to apply to next room opened
+    pub pending_password: Option<String>,
 }
 
 /// Tracks an in-progress tab completion cycle
 pub struct TabCompletion {
-    /// The partial text being completed
     pub prefix: String,
-    /// Position in input where the prefix starts
     pub start: usize,
-    /// Matching candidates
     pub candidates: Vec<String>,
-    /// Current index into candidates
     pub index: usize,
 }
 
 impl App {
     pub fn new(instance: Instance, user: User, username: String, transport: &str) -> Result<Self> {
-        let mut known_users = BTreeSet::new();
-        known_users.insert(username.clone());
-
         Ok(Self {
             user,
             instance,
-            current_room: None,
-            current_room_address: None,
-            current_room_name: None,
+            rooms: Vec::new(),
+            active_room: 0,
             input: InputLine::new(),
             input_history: Vec::new(),
             history_index: None,
             history_stash: String::new(),
-            messages: Vec::new(),
-            scroll_state: ScrollbarState::default(),
-            scroll_position: 0,
-            pinned_to_bottom: true,
             username,
-            known_users,
             server_running: false,
             transport: transport.to_string(),
             status_message: None,
@@ -233,9 +332,62 @@ impl App {
             show_timestamps: true,
             tab_completion: None,
             needs_bell: false,
-            room_password: None,
+            pending_password: None,
         })
     }
+
+    /// Get a reference to the active room, if any
+    pub fn room(&self) -> Option<&Room> {
+        self.rooms.get(self.active_room)
+    }
+
+    /// Get a mutable reference to the active room, if any
+    pub fn room_mut(&mut self) -> Option<&mut Room> {
+        self.rooms.get_mut(self.active_room)
+    }
+
+    // ── Convenience accessors for backwards compat with UI ──
+
+    pub fn current_room_name(&self) -> Option<&str> {
+        self.room().map(|r| r.name.as_str())
+    }
+
+    pub fn current_room_address(&self) -> Option<&str> {
+        self.room().map(|r| r.address.as_str())
+    }
+
+    pub fn room_password(&self) -> Option<&str> {
+        self.room().and_then(|r| r.password.as_deref())
+    }
+
+    pub fn messages(&self) -> &[ChatMessage] {
+        self.room().map(|r| r.messages.as_slice()).unwrap_or(&[])
+    }
+
+    pub fn known_users(&self) -> BTreeSet<String> {
+        let mut users = BTreeSet::new();
+        users.insert(self.username.clone());
+        if let Some(room) = self.room() {
+            users.extend(room.known_users.iter().cloned());
+        }
+        users
+    }
+
+    pub fn scroll_position(&self) -> usize {
+        self.room().map(|r| r.scroll_position).unwrap_or(0)
+    }
+
+    pub fn pinned_to_bottom(&self) -> bool {
+        self.room().map(|r| r.pinned_to_bottom).unwrap_or(true)
+    }
+
+    pub fn scroll_state(&self) -> ScrollbarState {
+        self.room()
+            .map(|r| r.scroll_state.clone())
+            .unwrap_or_default()
+    }
+
+    // ── Room management ──
 
     pub async fn create_room(&mut self, name: &str) -> Result<()> {
         let mut settings = Doc::new();
@@ -244,14 +396,12 @@ impl App {
         let key_id = self.user.get_default_key()?;
         let database = self.user.create_database(settings, &key_id).await?;
 
-        // Add global write permission
         let tx = database.new_transaction().await?;
         let settings_store = tx.get_settings()?;
         let global_key = AuthKey::active(None, Permission::Write(0));
         settings_store.set_global_auth_key(global_key).await?;
         tx.commit().await?;
 
-        // Enable sync
         let database_id = database.root_id().clone();
         self.user
             .track_database(
@@ -263,7 +413,8 @@ impl App {
 
         self.enter_room(database).await?;
 
-        if let Some(addr) = &self.current_room_address {
+        if let Some(room) = self.room() {
+            let addr = room.address.clone();
             self.status_message = Some(format!("Room created! Share this address: {addr}"));
         }
 
@@ -287,12 +438,18 @@ impl App {
             DatabaseTicket::new(database.root_id().clone()).to_string()
         };
 
-        let room_name = database.get_name().await.ok();
+        let room_name = database
+            .get_name()
+            .await
+            .ok()
+            .unwrap_or_else(|| "Unknown Room".to_string());
 
-        self.current_room = Some(database);
-        self.current_room_address = Some(room_address);
-        self.current_room_name = room_name;
-        self.load_messages().await?;
+        let mut room = Room::new(database, room_address, room_name);
+        room.known_users.insert(self.username.clone());
+        room.load_messages().await?;
+
+        self.rooms.push(room);
+        self.active_room = self.rooms.len() - 1;
 
         Ok(())
     }
@@ -323,15 +480,14 @@ impl App {
         Ok(())
     }
 
-    /// Open a room from a ticket, preferring local DB if available (no sync).
-    /// Returns true if opened locally, false if it needed remote sync.
+    /// Open a room from a ticket, preferring local DB if available.
+    /// Returns true if opened locally.
     pub async fn open_room(&mut self, room_address: &str) -> Result<bool> {
         let ticket: DatabaseTicket = room_address
             .parse()
             .map_err(|e| SyncError::Network(format!("Invalid ticket URL: {e}")))?;
         let room_id = ticket.database_id().clone();
 
-        // Check if the database exists locally in the backend
         let exists_locally = match self.user.backend().get(&room_id).await {
             Ok(_) => true,
             Err(e) if e.is_not_found() => false,
@@ -339,9 +495,7 @@ impl App {
         };
 
         if exists_locally {
-            // Ensure this user has a key tracking the database
             let key_id = self.user.get_default_key()?;
-            // track_database is idempotent — safe to call if already tracked
             let _ = self
                 .user
                 .track_database(
@@ -353,9 +507,18 @@ impl App {
 
             match self.user.open_database(&room_id).await {
                 Ok(database) => {
-                    self.current_room = Some(database);
-                    self.current_room_address = Some(room_address.to_string());
-                    self.load_messages().await?;
+                    let room_name = database
+                        .get_name()
+                        .await
+                        .ok()
+                        .unwrap_or_else(|| "Unknown Room".to_string());
+                    let mut room = Room::new(database, room_address.to_string(), room_name);
+                    room.known_users.insert(self.username.clone());
+                    // Inherit password if set on app (CLI --password)
+                    room.password = self.pending_password.take();
+                    room.load_messages().await?;
+                    self.rooms.push(room);
+                    self.active_room = self.rooms.len() - 1;
                     return Ok(true);
                 }
                 Err(e) => {
@@ -364,7 +527,6 @@ impl App {
             }
         }
 
-        // Not local or local open failed — do full remote connect
         self.connect_to_room(room_address).await?;
         Ok(false)
     }
@@ -427,130 +589,75 @@ impl App {
             }
         };
 
-        self.current_room = Some(database);
-        self.current_room_address = Some(room_address.to_string());
-        self.load_messages().await?;
+        let room_name = database
+            .get_name()
+            .await
+            .ok()
+            .unwrap_or_else(|| "Unknown Room".to_string());
+        let mut room = Room::new(database, room_address.to_string(), room_name);
+        room.known_users.insert(self.username.clone());
+        room.password = self.pending_password.take();
+        room.load_messages().await?;
+        self.rooms.push(room);
+        self.active_room = self.rooms.len() - 1;
 
         Ok(())
     }
 
-    /// The store name to use based on encryption state
-    fn message_store_name(&self) -> &str {
-        if self.room_password.is_some() {
-            "encrypted_messages"
-        } else {
-            "messages"
-        }
-    }
+    // ── Encryption ──
 
-    /// Search all messages from the store, handling encrypted/unencrypted transparently
-    async fn search_all_messages(&self, database: &Database) -> Result<Vec<ChatMessage>> {
-        let txn = database.new_transaction().await?;
-        let store_name = self.message_store_name();
-
-        if let Some(password) = &self.room_password {
-            let mut encrypted = txn
-                .get_store::<PasswordStore<Table<ChatMessage>>>(store_name)
-                .await?;
-            encrypted.open(password)?;
-            let table = encrypted.inner().await?;
-            let entries = table.search(|_| true).await?;
-            Ok(entries.into_iter().map(|(_, msg)| msg).collect())
-        } else {
-            let store = txn.get_store::<Table<ChatMessage>>(store_name).await?;
-            let entries = store.search(|_| true).await?;
-            Ok(entries.into_iter().map(|(_, msg)| msg).collect())
-        }
-    }
-
-    /// Insert a message, handling encrypted/unencrypted transparently
-    pub async fn insert_message(&self, database: &Database, message: &ChatMessage) -> Result<()> {
-        let txn = database.new_transaction().await?;
-        let store_name = self.message_store_name();
-
-        if let Some(password) = &self.room_password {
-            let mut encrypted = txn
-                .get_store::<PasswordStore<Table<ChatMessage>>>(store_name)
-                .await?;
-            encrypted.open(password)?;
-            let table = encrypted.inner().await?;
-            table.insert(message.clone()).await?;
-        } else {
-            let store = txn.get_store::<Table<ChatMessage>>(store_name).await?;
-            store.insert(message.clone()).await?;
-        }
-
-        txn.commit().await?;
-        Ok(())
-    }
-
-    /// Encrypt the room's message store with a password.
-    /// This creates a new PasswordStore, migrates existing messages, and switches over.
     pub async fn encrypt_room(&mut self, password: &str) -> Result<()> {
-        let database = self
-            .current_room
-            .as_ref()
+        let room = self
+            .rooms
+            .get(self.active_room)
             .ok_or_else(|| SyncError::Network("No room open".into()))?;
 
-        // Load existing messages from the unencrypted store
-        let existing = self.search_all_messages(database).await?;
+        let existing = room.search_all_messages().await?;
 
-        // Initialize encrypted store
-        let txn = database.new_transaction().await?;
+        let txn = room.database.new_transaction().await?;
         let mut encrypted = txn
             .get_store::<PasswordStore<Table<ChatMessage>>>("encrypted_messages")
             .await?;
         encrypted.initialize(password, Doc::new()).await?;
 
-        // Migrate existing messages
         let table = encrypted.inner().await?;
         for msg in &existing {
             table.insert(msg.clone()).await?;
         }
         txn.commit().await?;
 
-        self.room_password = Some(password.to_string());
+        let room = self.rooms.get_mut(self.active_room).unwrap();
+        room.password = Some(password.to_string());
         self.status_message = Some("Room encrypted. Share the password with participants.".into());
 
-        // Add system message
         let msg = ChatMessage::new(
             "*".to_string(),
             format!("{} enabled encryption", self.username),
         );
-        self.insert_message(database, &msg).await?;
-        self.messages.push(msg);
+        let room = self.rooms.get(self.active_room).unwrap();
+        room.insert_message(&msg).await?;
+        let room = self.rooms.get_mut(self.active_room).unwrap();
+        room.messages.push(msg);
 
         Ok(())
     }
 
+    // ── Message operations (delegate to active room) ──
+
     pub async fn load_messages(&mut self) -> Result<()> {
-        if let Some(database) = &self.current_room {
-            let mut messages = self.search_all_messages(database).await?;
-            messages.sort_by_key(|a| a.timestamp);
-
-            // Update known users
-            for msg in &messages {
-                if msg.author != "*" {
-                    self.known_users.insert(msg.author.clone());
-                }
-            }
-
-            self.messages = messages;
-            if self.pinned_to_bottom {
-                self.scroll_to_bottom();
-            }
+        if let Some(room) = self.rooms.get_mut(self.active_room) {
+            room.load_messages().await?;
         }
         Ok(())
     }
 
     pub async fn send_message(&mut self) -> Result<()> {
-        if self.input.is_empty() || self.current_room.is_none() {
+        if self.input.is_empty() || self.rooms.is_empty() {
             return Ok(());
         }
 
         let text = self.input.text.trim().to_string();
 
-        // Save to input history
         if !text.is_empty() {
             if self.input_history.last().map(|s| s.as_str()) != Some(&text) {
                 self.input_history.push(text.clone());
@@ -558,20 +665,21 @@ impl App {
         }
         self.history_index = None;
 
-        // Handle slash commands
         if text.starts_with('/') {
             return self.handle_command(&text).await;
         }
 
         let message = ChatMessage::new(self.username.clone(), text);
 
-        if let Some(database) = &self.current_room {
-            self.insert_message(database, &message).await?;
-            self.messages.push(message);
-            self.input.clear();
-            self.pinned_to_bottom = true;
-            self.scroll_to_bottom();
+        if let Some(room) = self.rooms.get(self.active_room) {
+            room.insert_message(&message).await?;
         }
+        if let Some(room) = self.rooms.get_mut(self.active_room) {
+            room.messages.push(message);
+            room.pinned_to_bottom = true;
+            room.scroll_to_bottom();
+        }
+        self.input.clear();
 
         Ok(())
     }
@@ -585,53 +693,110 @@ impl App {
             "/quit" | "/q" => {
                 self.should_quit = true;
             }
+            "/join" => {
+                if arg.is_empty() {
+                    self.status_message = Some("Usage: /join <ticket>".into());
+                } else {
+                    let ticket = arg.to_string();
+                    match self.open_room(&ticket).await {
+                        Ok(_) => {
+                            let name = self.current_room_name().unwrap_or("room").to_string();
+                            self.status_message = Some(format!("Joined: {name}"));
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Join failed: {e}"));
+                        }
+                    }
+                }
+            }
+            "/create" => {
+                let name = if arg.is_empty() {
+                    format!(
+                        "Chat Room - {}",
+                        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+                    )
+                } else {
+                    arg.to_string()
+                };
+                match self.create_room(&name).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.status_message = Some(format!("Create failed: {e}"));
+                    }
+                }
+            }
+            "/part" | "/leave" => {
+                if self.rooms.len() <= 1 {
+                    self.status_message = Some("Can't leave the only room".into());
+                } else {
+                    let name = self.current_room_name().unwrap_or("room").to_string();
+                    self.rooms.remove(self.active_room);
+                    if self.active_room >= self.rooms.len() {
+                        self.active_room = self.rooms.len() - 1;
+                    }
+                    self.status_message = Some(format!("Left: {name}"));
+                }
+            }
+            "/rooms" | "/list" => {
+                let list: Vec<String> = self
+                    .rooms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        if i == self.active_room {
+                            format!("[{}]*", r.name)
+                        } else {
+                            format!("[{}]", r.name)
+                        }
+                    })
+                    .collect();
+                self.status_message = Some(format!("Rooms: {}", list.join(" ")));
+            }
             "/nick" => {
                 if arg.is_empty() {
                     self.status_message = Some(format!("Current nick: {}", self.username));
                 } else {
                     let old = self.username.clone();
                     self.username = arg.to_string();
-                    self.known_users.remove(&old);
-                    self.known_users.insert(self.username.clone());
                     self.status_message = Some(format!("Nick changed: {old} -> {}", self.username));
 
                     let msg = ChatMessage::new(
                         "*".to_string(),
                         format!("{old} is now known as {}", self.username),
                     );
-                    if let Some(database) = &self.current_room {
-                        self.insert_message(database, &msg).await?;
-                        self.messages.push(msg);
+                    if let Some(room) = self.rooms.get(self.active_room) {
+                        room.insert_message(&msg).await?;
+                    }
+                    if let Some(room) = self.rooms.get_mut(self.active_room) {
+                        room.known_users.remove(&old);
+                        room.known_users.insert(self.username.clone());
+                        room.messages.push(msg);
                     }
                 }
             }
             "/me" => {
                 if !arg.is_empty() {
                     let msg = ChatMessage::new("*".to_string(), format!("{} {arg}", self.username));
-                    if let Some(database) = &self.current_room {
-                        self.insert_message(database, &msg).await?;
-                        self.messages.push(msg);
-                        self.pinned_to_bottom = true;
-                        self.scroll_to_bottom();
+                    if let Some(room) = self.rooms.get(self.active_room) {
+                        room.insert_message(&msg).await?;
+                    }
+                    if let Some(room) = self.rooms.get_mut(self.active_room) {
+                        room.messages.push(msg);
+                        room.pinned_to_bottom = true;
+                        room.scroll_to_bottom();
                     }
                 }
             }
             "/clear" => {
-                // Clear local display only (messages persist in DB)
-                self.messages.clear();
-                self.scroll_position = 0;
+                if let Some(room) = self.rooms.get_mut(self.active_room) {
+                    room.messages.clear();
+                    room.scroll_position = 0;
+                }
                 self.status_message = Some("Display cleared (messages persist in database)".into());
             }
             "/topic" => {
-                if arg.is_empty() {
-                    let name = self
-                        .current_room_name
-                        .as_deref()
-                        .unwrap_or("(no topic set)");
-                    self.status_message = Some(format!("Topic: {name}"));
-                } else {
-                    self.status_message = Some("Changing topic not yet supported".into());
-                }
+                let name = self.current_room_name().unwrap_or("(no topic set)");
+                self.status_message = Some(format!("Topic: {name}"));
             }
             "/timestamps" | "/ts" => {
                 self.show_timestamps = !self.show_timestamps;
@@ -642,13 +807,13 @@ impl App {
             }
             "/encrypt" => {
                 if arg.is_empty() {
-                    if self.room_password.is_some() {
+                    if self.room_password().is_some() {
                         self.status_message = Some("Room is encrypted".into());
                     } else {
                         self.status_message =
                             Some("Usage: /encrypt <password> — encrypt the room".into());
                     }
-                } else if self.room_password.is_some() {
+                } else if self.room_password().is_some() {
                     self.status_message = Some("Room is already encrypted".into());
                 } else {
                     match self.encrypt_room(arg).await {
@@ -663,22 +828,20 @@ impl App {
                 if arg.is_empty() {
                     self.status_message =
                         Some("Usage: /decrypt <password> — unlock an encrypted room".into());
-                } else {
-                    // Try opening the encrypted store with the given password
-                    if let Some(database) = &self.current_room {
-                        let txn = database.new_transaction().await?;
-                        let mut encrypted = txn
-                            .get_store::<PasswordStore<Table<ChatMessage>>>("encrypted_messages")
-                            .await?;
-                        match encrypted.open(arg) {
-                            Ok(()) => {
-                                self.room_password = Some(arg.to_string());
-                                self.status_message = Some("Room decrypted".into());
-                                self.load_messages().await?;
-                            }
-                            Err(e) => {
-                                self.status_message = Some(format!("Decryption failed: {e}"));
-                            }
+                } else if let Some(room) = self.rooms.get(self.active_room) {
+                    let txn = room.database.new_transaction().await?;
+                    let mut encrypted = txn
+                        .get_store::<PasswordStore<Table<ChatMessage>>>("encrypted_messages")
+                        .await?;
+                    match encrypted.open(arg) {
+                        Ok(()) => {
+                            let room = self.rooms.get_mut(self.active_room).unwrap();
+                            room.password = Some(arg.to_string());
+                            self.status_message = Some("Room decrypted".into());
+                            self.load_messages().await?;
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Decryption failed: {e}"));
                         }
                     }
                 }
@@ -687,7 +850,8 @@ impl App {
                 self.show_help = !self.show_help;
             }
             "/users" | "/names" => {
-                let names: Vec<&str> = self.known_users.iter().map(|s| s.as_str()).collect();
+                let users = self.known_users();
+                let names: Vec<&str> = users.iter().map(|s| s.as_str()).collect();
                 self.status_message = Some(format!("Users: {}", names.join(", ")));
             }
             _ => {
@@ -699,20 +863,19 @@ impl App {
         Ok(())
     }
 
-    /// Start or cycle tab completion at the current cursor position
+    // ── Tab completion ──
+
     pub fn tab_complete(&mut self) {
+        let known = self.known_users();
         if let Some(ref mut tc) = self.tab_completion {
-            // Cycle to next candidate
             tc.index = (tc.index + 1) % tc.candidates.len();
             let replacement = tc.candidates[tc.index].clone();
             let suffix = if tc.start == 0 { ": " } else { " " };
-            // Everything after cursor is preserved; replace start..cursor
             let before = self.input.text[..tc.start].to_string();
             let after = self.input.text[self.input.cursor..].to_string();
             self.input.text = format!("{before}{replacement}{suffix}{after}");
             self.input.cursor = tc.start + replacement.len() + suffix.len();
         } else {
-            // Start new completion — find the word at cursor
             let before_cursor = &self.input.text[..self.input.cursor];
             let word_start = before_cursor.rfind(' ').map(|i| i + 1).unwrap_or(0);
             let prefix = before_cursor[word_start..].to_string();
@@ -722,8 +885,7 @@ impl App {
             }
 
             let prefix_lower = prefix.to_lowercase();
-            let candidates: Vec<String> = self
-                .known_users
+            let candidates: Vec<String> = known
                 .iter()
                 .filter(|nick| nick.to_lowercase().starts_with(&prefix_lower))
                 .cloned()
@@ -749,34 +911,55 @@ impl App {
         }
     }
 
-    /// Reset tab completion state (call on any non-Tab input)
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion = None;
     }
 
-    pub fn scroll_to_bottom(&mut self) {
-        if !self.messages.is_empty() {
-            self.scroll_position = self.messages.len().saturating_sub(1);
-            self.scroll_state = self.scroll_state.position(self.scroll_position);
-        }
-    }
+    // ── Scroll (delegate to active room) ──
 
     pub fn scroll_up(&mut self, amount: usize) {
-        self.scroll_position = self.scroll_position.saturating_sub(amount);
-        self.scroll_state = self.scroll_state.position(self.scroll_position);
-        self.pinned_to_bottom = false;
+        if let Some(room) = self.room_mut() {
+            room.scroll_up(amount);
+        }
     }
 
     pub fn scroll_down(&mut self, amount: usize) {
-        let max = self.messages.len().saturating_sub(1);
-        self.scroll_position = (self.scroll_position + amount).min(max);
-        self.scroll_state = self.scroll_state.position(self.scroll_position);
-
-        // Re-pin if we've scrolled back to the bottom
-        if self.scroll_position >= max {
-            self.pinned_to_bottom = true;
+        if let Some(room) = self.room_mut() {
+            room.scroll_down(amount);
         }
     }
+
+    pub fn scroll_to_bottom(&mut self) {
+        if let Some(room) = self.room_mut() {
+            room.scroll_to_bottom();
+        }
+    }
+
+    // ── Room switching ──
+
+    pub fn switch_room(&mut self, index: usize) {
+        if index < self.rooms.len() && index != self.active_room {
+            self.active_room = index;
+            if let Some(room) = self.rooms.get_mut(index) {
+                room.has_unread = false;
+            }
+            self.status_message = Some(format!("Switched to: {}", self.rooms[index].name));
+        }
+    }
+
+    pub fn next_room(&mut self) {
+        if !self.rooms.is_empty() {
+            self.switch_room((self.active_room + 1) % self.rooms.len());
+        }
+    }
+
+    pub fn prev_room(&mut self) {
+        if !self.rooms.is_empty() {
+            self.switch_room((self.active_room + self.rooms.len() - 1) % self.rooms.len());
+        }
+    }
+
+    // ── History ──
 
     pub fn history_prev(&mut self) {
         if self.input_history.is_empty() {
@@ -784,15 +967,12 @@ impl App {
         }
         match self.history_index {
             None => {
-                // Save current input and start browsing
                 self.history_stash = self.input.text.clone();
                 self.history_index = Some(self.input_history.len() - 1);
                 let text = self.input_history.last().unwrap().clone();
                 self.input.set(text);
             }
-            Some(0) => {
-                // Already at oldest entry
-            }
+            Some(0) => {}
             Some(i) => {
                 self.history_index = Some(i - 1);
                 let text = self.input_history[i - 1].clone();
@@ -806,7 +986,6 @@ impl App {
             None => {}
             Some(i) => {
                 if i + 1 >= self.input_history.len() {
-                    // Back to current input
                     self.history_index = None;
                     let stash = self.history_stash.clone();
                     self.input.set(stash);
@@ -819,17 +998,22 @@ impl App {
         }
     }
 
-    pub async fn refresh_messages(&mut self) -> Result<()> {
-        let current_count = self.messages.len();
-        self.load_messages().await?;
+    // ── Refresh ──
 
-        if self.messages.len() > current_count {
-            self.needs_bell = true;
-            if self.pinned_to_bottom {
-                self.scroll_to_bottom();
+    pub async fn refresh_messages(&mut self) -> Result<()> {
+        for (i, room) in self.rooms.iter_mut().enumerate() {
+            let current_count = room.messages.len();
+            room.load_messages().await?;
+
+            if room.messages.len() > current_count {
+                if i == self.active_room {
+                    self.needs_bell = true;
+                } else {
+                    room.has_unread = true;
+                    self.needs_bell = true;
+                }
             }
         }
-
         Ok(())
     }
 
@@ -837,13 +1021,12 @@ impl App {
         self.status_message = None;
     }
 
-    /// Number of new messages below the current scroll view
-    pub fn unread_below(&self, visible_height: usize) -> usize {
-        if self.pinned_to_bottom || self.messages.is_empty() {
-            return 0;
+    // insert_message for CLI use (operates on active room)
+    pub async fn insert_message_active(&self, message: &ChatMessage) -> Result<()> {
+        if let Some(room) = self.rooms.get(self.active_room) {
+            room.insert_message(message).await?;
         }
-        let visible_end = (self.scroll_position + visible_height).min(self.messages.len());
-        self.messages.len().saturating_sub(visible_end)
+        Ok(())
     }
 }
 
@@ -876,7 +1059,7 @@ mod tests {
         let mut input = InputLine::new();
         input.set("hello".into());
         input.home();
-        input.backspace(); // should be no-op
+        input.backspace();
         assert_eq!(input.text, "hello");
         assert_eq!(input.cursor, 0);
     }
@@ -895,7 +1078,7 @@ mod tests {
     fn input_delete_at_end() {
         let mut input = InputLine::new();
         input.set("hello".into());
-        input.delete(); // should be no-op
+        input.delete();
         assert_eq!(input.text, "hello");
     }
 
@@ -904,25 +1087,17 @@ mod tests {
         let mut input = InputLine::new();
         input.set("hello".into());
         assert_eq!(input.cursor, 5);
-
         input.move_left();
         assert_eq!(input.cursor, 4);
-
         input.home();
         assert_eq!(input.cursor, 0);
-
         input.move_right();
         assert_eq!(input.cursor, 1);
-
         input.end();
         assert_eq!(input.cursor, 5);
-
-        // Boundary: left at 0
         input.home();
         input.move_left();
         assert_eq!(input.cursor, 0);
-
-        // Boundary: right at end
         input.end();
         input.move_right();
         assert_eq!(input.cursor, 5);
@@ -933,7 +1108,7 @@ mod tests {
         let mut input = InputLine::new();
         input.set("hllo".into());
         input.home();
-        input.move_right(); // cursor at 1
+        input.move_right();
         input.insert('e');
         assert_eq!(input.text, "hello");
         assert_eq!(input.cursor, 2);
@@ -943,27 +1118,20 @@ mod tests {
     fn input_word_movement() {
         let mut input = InputLine::new();
         input.set("hello world foo".into());
-
         input.move_word_left();
-        assert_eq!(input.cursor, 12); // before "foo"
-
+        assert_eq!(input.cursor, 12);
         input.move_word_left();
-        assert_eq!(input.cursor, 6); // before "world"
-
+        assert_eq!(input.cursor, 6);
         input.move_word_left();
-        assert_eq!(input.cursor, 0); // before "hello"
-
+        assert_eq!(input.cursor, 0);
         input.move_word_left();
-        assert_eq!(input.cursor, 0); // stays at 0
-
+        assert_eq!(input.cursor, 0);
         input.move_word_right();
-        assert_eq!(input.cursor, 6); // after "hello "
-
+        assert_eq!(input.cursor, 6);
         input.move_word_right();
-        assert_eq!(input.cursor, 12); // after "world "
-
+        assert_eq!(input.cursor, 12);
         input.move_word_right();
-        assert_eq!(input.cursor, 15); // end
+        assert_eq!(input.cursor, 15);
     }
 
     #[test]
@@ -971,7 +1139,7 @@ mod tests {
         let mut input = InputLine::new();
         input.set("hello world".into());
         input.home();
-        input.move_word_right(); // cursor at 6
+        input.move_word_right();
         input.kill_to_end();
         assert_eq!(input.text, "hello ");
         assert_eq!(input.cursor, 6);
@@ -982,7 +1150,7 @@ mod tests {
         let mut input = InputLine::new();
         input.set("hello world".into());
         input.home();
-        input.move_word_right(); // cursor at 6
+        input.move_word_right();
         input.kill_to_start();
         assert_eq!(input.text, "world");
         assert_eq!(input.cursor, 0);
@@ -1004,10 +1172,8 @@ mod tests {
         input.insert('ñ');
         assert_eq!(input.text, "éñ");
         assert_eq!(input.cursor_chars(), 2);
-
         input.move_left();
         assert_eq!(input.cursor_chars(), 1);
-
         input.backspace();
         assert_eq!(input.text, "ñ");
         assert_eq!(input.cursor, 0);
