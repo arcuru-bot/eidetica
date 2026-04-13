@@ -93,7 +93,7 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
     let lines: Vec<Line> = app
         .messages
         .iter()
-        .map(|m| format_message(m, &app.username))
+        .map(|m| format_message(m, &app.username, app.show_timestamps))
         .collect();
 
     // Calculate total wrapped lines for scroll math
@@ -235,6 +235,7 @@ fn render_help_overlay(f: &mut ratatui::Frame) {
         help_line("/clear", "Clear message display"),
         help_line("/topic", "Show room topic"),
         help_line("/users", "List known users"),
+        help_line("/timestamps", "Toggle timestamps"),
         help_line("/quit", "Quit"),
         help_line("/help", "Toggle this help"),
         Line::from(""),
@@ -269,21 +270,24 @@ fn help_line<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
     ])
 }
 
-/// Format a chat message into a styled Line, highlighting mentions of username
-fn format_message<'a>(m: &'a ChatMessage, username: &str) -> Line<'a> {
-    let timestamp = m.timestamp.format("%H:%M:%S");
+/// Format a chat message into a styled Line
+fn format_message<'a>(m: &'a ChatMessage, username: &str, show_timestamps: bool) -> Line<'a> {
+    let mut spans = Vec::new();
 
-    if m.is_action() {
-        let mut spans = vec![Span::styled(
+    if show_timestamps {
+        let timestamp = m.timestamp.format("%H:%M:%S");
+        spans.push(Span::styled(
             format!("[{timestamp}] "),
             Style::default().fg(Color::DarkGray),
-        )];
+        ));
+    }
+
+    if m.is_action() {
         let action_text = format!("* {}", m.content);
         let base_style = Style::default()
             .fg(Color::Magenta)
             .add_modifier(Modifier::ITALIC);
-        spans.extend(highlight_mentions(&action_text, username, base_style));
-        Line::from(spans)
+        spans.extend(style_content(&action_text, username, base_style));
     } else {
         let is_own = m.author == username;
         let color = if is_own {
@@ -292,20 +296,26 @@ fn format_message<'a>(m: &'a ChatMessage, username: &str) -> Line<'a> {
             nick_color(&m.author)
         };
 
-        let mut spans = vec![
-            Span::styled(
-                format!("[{timestamp}] "),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                format!("{}: ", m.author),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-        ];
+        spans.push(Span::styled(
+            format!("{}: ", m.author),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
         let base_style = Style::default();
-        spans.extend(highlight_mentions(&m.content, username, base_style));
-        Line::from(spans)
+        spans.extend(style_content(&m.content, username, base_style));
     }
+
+    Line::from(spans)
+}
+
+/// Apply both mention highlighting and URL detection to text
+fn style_content(text: &str, username: &str, base_style: Style) -> Vec<Span<'static>> {
+    let mention_spans = highlight_mentions(text, username, base_style);
+    // Apply URL highlighting within each span
+    let mut result = Vec::new();
+    for span in mention_spans {
+        result.extend(highlight_urls(&span.content, span.style));
+    }
+    result
 }
 
 /// Split text into spans, highlighting occurrences of `username` with a bold yellow style
@@ -335,6 +345,48 @@ fn highlight_mentions(text: &str, username: &str, base_style: Style) -> Vec<Span
             }
             spans.push(Span::styled(text[start..end].to_string(), mention_style));
             last = end;
+        }
+    }
+
+    if last < text.len() {
+        spans.push(Span::styled(text[last..].to_string(), base_style));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(text.to_string(), base_style));
+    }
+
+    spans
+}
+
+/// Split text into spans, highlighting URLs with underlined blue
+fn highlight_urls(text: &str, base_style: Style) -> Vec<Span<'static>> {
+    let url_style = Style::default()
+        .fg(Color::Blue)
+        .add_modifier(Modifier::UNDERLINED);
+
+    let mut spans = Vec::new();
+    let mut last = 0;
+
+    // Simple URL detection: find http:// or https:// and extend to whitespace
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &text[i..];
+        if rest.starts_with("http://") || rest.starts_with("https://") {
+            // Found URL start — extend to next whitespace or end
+            let url_end = rest
+                .find(|c: char| c.is_whitespace())
+                .map(|j| i + j)
+                .unwrap_or(text.len());
+
+            if i > last {
+                spans.push(Span::styled(text[last..i].to_string(), base_style));
+            }
+            spans.push(Span::styled(text[i..url_end].to_string(), url_style));
+            last = url_end;
+            i = url_end;
+        } else {
+            i += 1;
         }
     }
 
@@ -488,5 +540,54 @@ mod tests {
     fn wrapped_line_count_empty() {
         let line = Line::from("");
         assert_eq!(wrapped_line_count(&line, 80), 1); // empty = 1 line
+    }
+
+    // ── URL highlighting ──────────────────────────────────────
+
+    #[test]
+    fn highlight_urls_basic() {
+        let base = Style::default();
+        let spans = highlight_urls("check https://example.com for info", base);
+        assert_eq!(
+            span_texts(&spans),
+            vec!["check ", "https://example.com", " for info"]
+        );
+    }
+
+    #[test]
+    fn highlight_urls_http() {
+        let base = Style::default();
+        let spans = highlight_urls("see http://foo.bar/baz", base);
+        assert_eq!(span_texts(&spans), vec!["see ", "http://foo.bar/baz"]);
+    }
+
+    #[test]
+    fn highlight_urls_no_url() {
+        let base = Style::default();
+        let spans = highlight_urls("no urls here", base);
+        assert_eq!(span_texts(&spans), vec!["no urls here"]);
+    }
+
+    #[test]
+    fn highlight_urls_multiple() {
+        let base = Style::default();
+        let spans = highlight_urls("visit https://a.com and https://b.com today", base);
+        assert_eq!(
+            span_texts(&spans),
+            vec![
+                "visit ",
+                "https://a.com",
+                " and ",
+                "https://b.com",
+                " today"
+            ]
+        );
+    }
+
+    #[test]
+    fn highlight_urls_at_start() {
+        let base = Style::default();
+        let spans = highlight_urls("https://start.com is cool", base);
+        assert_eq!(span_texts(&spans), vec!["https://start.com", " is cool"]);
     }
 }

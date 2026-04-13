@@ -350,6 +350,20 @@ async fn run_app(
     loop {
         terminal.draw(|f| ui(f, app))?;
 
+        // Ring bell and update title on new messages
+        if app.needs_bell {
+            app.needs_bell = false;
+            execute!(
+                terminal.backend_mut(),
+                crossterm::terminal::SetTitle(format!(
+                    "* eidetica-chat ({})",
+                    app.current_room_name.as_deref().unwrap_or("chat")
+                ))
+            )?;
+            // Terminal bell
+            print!("\x07");
+        }
+
         let mut handled_event = false;
 
         while event::poll(std::time::Duration::from_millis(0))? {

@@ -180,9 +180,13 @@ pub struct App {
     pub status_message: Option<String>,
     pub should_quit: bool,
     pub show_help: bool,
+    pub show_timestamps: bool,
 
     // Tab completion state
     pub tab_completion: Option<TabCompletion>,
+
+    // Notification state
+    pub needs_bell: bool,
 }
 
 /// Tracks an in-progress tab completion cycle
@@ -223,7 +227,9 @@ impl App {
             status_message: None,
             should_quit: false,
             show_help: false,
+            show_timestamps: true,
             tab_completion: None,
+            needs_bell: false,
         })
     }
 
@@ -550,6 +556,13 @@ impl App {
                     self.status_message = Some("Changing topic not yet supported".into());
                 }
             }
+            "/timestamps" | "/ts" => {
+                self.show_timestamps = !self.show_timestamps;
+                self.status_message = Some(format!(
+                    "Timestamps {}",
+                    if self.show_timestamps { "on" } else { "off" }
+                ));
+            }
             "/help" | "/?" => {
                 self.show_help = !self.show_help;
             }
@@ -690,8 +703,11 @@ impl App {
         let current_count = self.messages.len();
         self.load_messages().await?;
 
-        if self.messages.len() > current_count && self.pinned_to_bottom {
-            self.scroll_to_bottom();
+        if self.messages.len() > current_count {
+            self.needs_bell = true;
+            if self.pinned_to_bottom {
+                self.scroll_to_bottom();
+            }
         }
 
         Ok(())
