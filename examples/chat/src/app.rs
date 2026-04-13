@@ -297,6 +297,52 @@ impl App {
         Ok(())
     }
 
+    /// Open a room from a ticket, preferring local DB if available (no sync).
+    /// Returns true if opened locally, false if it needed remote sync.
+    pub async fn open_room(&mut self, room_address: &str) -> Result<bool> {
+        let ticket: DatabaseTicket = room_address
+            .parse()
+            .map_err(|e| SyncError::Network(format!("Invalid ticket URL: {e}")))?;
+        let room_id = ticket.database_id().clone();
+
+        // Check if the database exists locally in the backend
+        let exists_locally = match self.user.backend().get(&room_id).await {
+            Ok(_) => true,
+            Err(e) if e.is_not_found() => false,
+            Err(e) => return Err(e),
+        };
+
+        if exists_locally {
+            // Ensure this user has a key tracking the database
+            let key_id = self.user.get_default_key()?;
+            // track_database is idempotent — safe to call if already tracked
+            let _ = self
+                .user
+                .track_database(
+                    room_id.clone(),
+                    &key_id,
+                    SyncSettings::on_commit().with_interval(2),
+                )
+                .await;
+
+            match self.user.open_database(&room_id).await {
+                Ok(database) => {
+                    self.current_room = Some(database);
+                    self.current_room_address = Some(room_address.to_string());
+                    self.load_messages().await?;
+                    return Ok(true);
+                }
+                Err(e) => {
+                    debug!("Local open failed, falling back to remote: {e}");
+                }
+            }
+        }
+
+        // Not local or local open failed — do full remote connect
+        self.connect_to_room(room_address).await?;
+        Ok(false)
+    }
+
     pub async fn connect_to_room(&mut self, room_address: &str) -> Result<()> {
         if !self.server_running {
             self.start_server().await?;

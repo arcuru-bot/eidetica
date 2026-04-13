@@ -19,3 +19,4 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+dirs = "6"

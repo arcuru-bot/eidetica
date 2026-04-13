@@ -10,11 +10,12 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use eidetica::{Instance, Result, backend::database::InMemory};
+use eidetica::{Instance, Result, backend::database::Sqlite};
 use handlers::handle_key_event;
 use models::ChatMessage;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
+use std::path::PathBuf;
 use ui::ui;
 
 #[derive(Parser)]
@@ -36,6 +37,11 @@ struct Cli {
     /// Transport to use for sync (http or iroh)
     #[arg(long, default_value = "iroh", global = true)]
     transport: String,
+
+    /// Directory for persistent data (SQLite database).
+    /// Defaults to ~/.local/share/eidetica-chat
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -108,25 +114,43 @@ async fn main() -> Result<()> {
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "Anonymous".to_string());
 
+    let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
+
     match cli.command {
-        Some(Command::Create { name }) => cmd_create(&username, transport, name).await,
+        Some(Command::Create { name }) => cmd_create(&username, transport, &data_dir, name).await,
         Some(Command::Send { ticket, message }) => {
-            cmd_send(&username, transport, &ticket, &message).await
+            cmd_send(&username, transport, &data_dir, &ticket, &message).await
         }
         Some(Command::Messages {
             ticket,
             follow,
             limit,
             json,
-        }) => cmd_messages(&username, transport, &ticket, follow, limit, json).await,
-        Some(Command::Tui { ticket }) => cmd_tui(&username, transport, ticket).await,
-        None => cmd_tui(&username, transport, None).await,
+        }) => {
+            cmd_messages(
+                &username, transport, &data_dir, &ticket, follow, limit, json,
+            )
+            .await
+        }
+        Some(Command::Tui { ticket }) => cmd_tui(&username, transport, &data_dir, ticket).await,
+        None => cmd_tui(&username, transport, &data_dir, None).await,
     }
 }
 
+fn default_data_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("eidetica-chat")
+}
+
 /// Create a new room and print the ticket URL
-async fn cmd_create(username: &str, transport: &str, name: Option<String>) -> Result<()> {
-    let (mut app, _) = setup_app(username, transport).await?;
+async fn cmd_create(
+    username: &str,
+    transport: &str,
+    data_dir: &PathBuf,
+    name: Option<String>,
+) -> Result<()> {
+    let (mut app, _) = setup_app(username, transport, data_dir).await?;
 
     let room_name = name.unwrap_or_else(|| {
         format!(
@@ -147,9 +171,15 @@ async fn cmd_create(username: &str, transport: &str, name: Option<String>) -> Re
 }
 
 /// Send a single message to a room
-async fn cmd_send(username: &str, transport: &str, ticket: &str, message: &str) -> Result<()> {
-    let (mut app, _) = setup_app(username, transport).await?;
-    app.connect_to_room(ticket).await?;
+async fn cmd_send(
+    username: &str,
+    transport: &str,
+    data_dir: &PathBuf,
+    ticket: &str,
+    message: &str,
+) -> Result<()> {
+    let (mut app, _) = setup_app(username, transport, data_dir).await?;
+    let local = app.open_room(ticket).await?;
 
     let msg = ChatMessage::new(username.to_string(), message.to_string());
 
@@ -162,8 +192,10 @@ async fn cmd_send(username: &str, transport: &str, ticket: &str, message: &str) 
         txn.commit().await?;
     }
 
-    // Give sync a moment to propagate
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    if !local {
+        // Give sync a moment to propagate to remote peers
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
 
     eprintln!("Message sent.");
     Ok(())
@@ -173,14 +205,14 @@ async fn cmd_send(username: &str, transport: &str, ticket: &str, message: &str) 
 async fn cmd_messages(
     username: &str,
     transport: &str,
+    data_dir: &PathBuf,
     ticket: &str,
     follow: bool,
     limit: usize,
     json: bool,
 ) -> Result<()> {
-    let (mut app, _) = setup_app(username, transport).await?;
-    app.connect_to_room(ticket).await?;
-    app.load_messages().await?;
+    let (mut app, _) = setup_app(username, transport, data_dir).await?;
+    app.open_room(ticket).await?;
 
     let msgs = if limit == 0 || limit >= app.messages.len() {
         &app.messages[..]
@@ -228,8 +260,13 @@ fn print_message(msg: &ChatMessage, json: bool) {
 }
 
 /// Run the interactive TUI
-async fn cmd_tui(username: &str, transport: &str, ticket: Option<String>) -> Result<()> {
-    let (mut app, _) = setup_app(username, transport).await?;
+async fn cmd_tui(
+    username: &str,
+    transport: &str,
+    data_dir: &PathBuf,
+    ticket: Option<String>,
+) -> Result<()> {
+    let (mut app, _) = setup_app(username, transport, data_dir).await?;
 
     if let Some(ticket) = ticket {
         eprintln!("Connecting to room...");
@@ -283,8 +320,17 @@ async fn cmd_tui(username: &str, transport: &str, ticket: Option<String>) -> Res
 }
 
 /// Shared setup: create instance + app
-async fn setup_app(username: &str, transport: &str) -> Result<(App, String)> {
-    let backend = InMemory::new();
+async fn setup_app(username: &str, transport: &str, data_dir: &PathBuf) -> Result<(App, String)> {
+    // Ensure data directory exists
+    std::fs::create_dir_all(data_dir).map_err(|e| {
+        eidetica::sync::SyncError::Network(format!(
+            "Failed to create data directory {}: {e}",
+            data_dir.display()
+        ))
+    })?;
+
+    let db_path = data_dir.join("chat.db");
+    let backend = Sqlite::open(&db_path).await?;
     let instance = Instance::open(Box::new(backend)).await?;
     instance.enable_sync().await?;
 
