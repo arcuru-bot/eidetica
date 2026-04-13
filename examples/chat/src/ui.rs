@@ -1,12 +1,10 @@
 use crate::app::App;
 use crate::models::ChatMessage;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Margin, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, Wrap,
-    },
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
 pub fn ui(f: &mut ratatui::Frame, app: &App) {
@@ -271,23 +269,21 @@ fn help_line<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
     ])
 }
 
-/// Format a chat message into a styled Line
+/// Format a chat message into a styled Line, highlighting mentions of username
 fn format_message<'a>(m: &'a ChatMessage, username: &str) -> Line<'a> {
     let timestamp = m.timestamp.format("%H:%M:%S");
 
     if m.is_action() {
-        Line::from(vec![
-            Span::styled(
-                format!("[{timestamp}] "),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                format!("* {}", m.content),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        ])
+        let mut spans = vec![Span::styled(
+            format!("[{timestamp}] "),
+            Style::default().fg(Color::DarkGray),
+        )];
+        let action_text = format!("* {}", m.content);
+        let base_style = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::ITALIC);
+        spans.extend(highlight_mentions(&action_text, username, base_style));
+        Line::from(spans)
     } else {
         let is_own = m.author == username;
         let color = if is_own {
@@ -296,7 +292,7 @@ fn format_message<'a>(m: &'a ChatMessage, username: &str) -> Line<'a> {
             nick_color(&m.author)
         };
 
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 format!("[{timestamp}] "),
                 Style::default().fg(Color::DarkGray),
@@ -305,9 +301,51 @@ fn format_message<'a>(m: &'a ChatMessage, username: &str) -> Line<'a> {
                 format!("{}: ", m.author),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(&m.content),
-        ])
+        ];
+        let base_style = Style::default();
+        spans.extend(highlight_mentions(&m.content, username, base_style));
+        Line::from(spans)
     }
+}
+
+/// Split text into spans, highlighting occurrences of `username` with a bold yellow style
+fn highlight_mentions(text: &str, username: &str, base_style: Style) -> Vec<Span<'static>> {
+    if username.is_empty() {
+        return vec![Span::styled(text.to_string(), base_style)];
+    }
+
+    let mention_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let lower_text = text.to_lowercase();
+    let lower_nick = username.to_lowercase();
+    let mut spans = Vec::new();
+    let mut last = 0;
+
+    for (start, _) in lower_text.match_indices(&lower_nick) {
+        // Check word boundaries: mention should not be part of a larger word
+        let before_ok = start == 0 || !text.as_bytes()[start - 1].is_ascii_alphanumeric();
+        let end = start + username.len();
+        let after_ok = end >= text.len() || !text.as_bytes()[end].is_ascii_alphanumeric();
+
+        if before_ok && after_ok {
+            if start > last {
+                spans.push(Span::styled(text[last..start].to_string(), base_style));
+            }
+            spans.push(Span::styled(text[start..end].to_string(), mention_style));
+            last = end;
+        }
+    }
+
+    if last < text.len() {
+        spans.push(Span::styled(text[last..].to_string(), base_style));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(text.to_string(), base_style));
+    }
+
+    spans
 }
 
 /// Estimate the number of wrapped lines a Line will occupy at a given width
@@ -363,4 +401,92 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span_texts<'a>(spans: &'a [Span]) -> Vec<&'a str> {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn highlight_mentions_basic() {
+        let base = Style::default();
+        let spans = highlight_mentions("hey alice how are you", "alice", base);
+        assert_eq!(span_texts(&spans), vec!["hey ", "alice", " how are you"]);
+    }
+
+    #[test]
+    fn highlight_mentions_case_insensitive() {
+        let base = Style::default();
+        let spans = highlight_mentions("hey Alice!", "alice", base);
+        assert_eq!(span_texts(&spans), vec!["hey ", "Alice", "!"]);
+    }
+
+    #[test]
+    fn highlight_mentions_no_match() {
+        let base = Style::default();
+        let spans = highlight_mentions("hey bob", "alice", base);
+        assert_eq!(span_texts(&spans), vec!["hey bob"]);
+    }
+
+    #[test]
+    fn highlight_mentions_word_boundary() {
+        let base = Style::default();
+        // "alice" inside "malice" should NOT match
+        let spans = highlight_mentions("malice aforethought", "alice", base);
+        assert_eq!(span_texts(&spans), vec!["malice aforethought"]);
+    }
+
+    #[test]
+    fn highlight_mentions_at_start() {
+        let base = Style::default();
+        let spans = highlight_mentions("alice: hello", "alice", base);
+        assert_eq!(span_texts(&spans), vec!["alice", ": hello"]);
+    }
+
+    #[test]
+    fn highlight_mentions_at_end() {
+        let base = Style::default();
+        let spans = highlight_mentions("hello alice", "alice", base);
+        assert_eq!(span_texts(&spans), vec!["hello ", "alice"]);
+    }
+
+    #[test]
+    fn highlight_mentions_multiple() {
+        let base = Style::default();
+        let spans = highlight_mentions("alice and alice again", "alice", base);
+        assert_eq!(
+            span_texts(&spans),
+            vec!["alice", " and ", "alice", " again"]
+        );
+    }
+
+    #[test]
+    fn nick_color_consistent() {
+        let c1 = nick_color("alice");
+        let c2 = nick_color("alice");
+        assert_eq!(c1, c2);
+
+        // Different nicks should (usually) get different colors
+        let c3 = nick_color("bob");
+        // Not guaranteed different, but should be for these short strings
+        assert_ne!(c1, c3);
+    }
+
+    #[test]
+    fn wrapped_line_count_basic() {
+        let line = Line::from("hello world"); // 11 chars
+        assert_eq!(wrapped_line_count(&line, 80), 1);
+        assert_eq!(wrapped_line_count(&line, 5), 3); // 11/5 = 3
+        assert_eq!(wrapped_line_count(&line, 11), 1);
+    }
+
+    #[test]
+    fn wrapped_line_count_empty() {
+        let line = Line::from("");
+        assert_eq!(wrapped_line_count(&line, 80), 1); // empty = 1 line
+    }
 }
