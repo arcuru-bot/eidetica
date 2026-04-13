@@ -94,21 +94,38 @@ Once in a room, you'll see:
 | `/help` / `/?` | Toggle help overlay |
 | `/quit` / `/q` | Quit |
 
-## CLI Options
+## CLI Subcommands
+
+The chat app supports both interactive (TUI) and non-interactive (CLI) usage:
 
 ```bash
-Usage: eidetica-chat [ROOM_ADDRESS] [OPTIONS]
+# Create a room, print the ticket to stdout
+cargo run -- create --username alice
+# => eidetica:?db=bafyrei...&pr=iroh:endpoint...
 
-Arguments:
-  [TICKET]        Ticket URL to connect to (eidetica:?db=...&pr=...).
-                  If not provided, creates a new room.
+# Send a message to a room
+cargo run -- send <TICKET> "hello from the CLI" --username alice
 
-Options:
+# List messages (last 50 by default)
+cargo run -- messages <TICKET>
+
+# Tail messages continuously
+cargo run -- messages <TICKET> --follow
+
+# Output messages as JSON
+cargo run -- messages <TICKET> --json
+
+# Open the interactive TUI (default when no subcommand)
+cargo run -- tui <TICKET> --username alice
+cargo run -- --username alice   # no subcommand = TUI + create new room
+```
+
+### Global Options
+
+```
   -u, --username <USERNAME>      Username for the chat session (default: $USER or "Anonymous")
   -v, --verbose                  Enable verbose debug output
       --transport <TRANSPORT>    Transport to use: 'http' or 'iroh' (default: iroh)
-  -h, --help                     Print help
-  -V, --version                  Print version
 ```
 
 ## Connecting with Others

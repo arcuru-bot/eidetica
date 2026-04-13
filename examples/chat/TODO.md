@@ -13,12 +13,14 @@ Tracked improvements for the eidetica chat TUI, roughly in priority order.
 - [x] Smart auto-scroll (pin-to-bottom, unread indicator)
 - [x] PageUp/PageDown, Ctrl+Up/Down scroll
 - [x] Action messages (/me) and system messages
+- [x] CLI subcommands (create, send, messages, tui) for scripting
+- [x] Unit tests for InputLine and ChatMessage
 
 ## High Priority
 
 - [ ] **Tab-completion for nicks** — `@bo<Tab>` → `@bob`, cycle through matches
 - [ ] **Message wrapping** — long messages overflow; wrap and fix scroll math for wrapped lines
-- [ ] **Persistent storage** — switch from InMemory to Sqlite backend so history survives restarts
+- [ ] **Persistent storage** — switch from InMemory to Sqlite backend so history survives restarts and CLI commands can interact with the same room across invocations
 - [ ] **Notifications** — terminal bell or title update on new messages when unfocused
 
 ## Medium Priority
