@@ -407,11 +407,36 @@ async fn run_app(
         let mut handled_event = false;
 
         while event::poll(std::time::Duration::from_millis(0))? {
-            if let Ok(Event::Key(key)) = event::read() {
-                handled_event = true;
-                if key.kind == KeyEventKind::Press {
-                    handle_key_event(app, key.code, key.modifiers).await;
+            match event::read() {
+                Ok(Event::Key(key)) => {
+                    handled_event = true;
+                    if key.kind == KeyEventKind::Press {
+                        handle_key_event(app, key.code, key.modifiers).await;
+                    }
                 }
+                Ok(Event::Mouse(mouse)) => {
+                    handled_event = true;
+                    if mouse.kind == crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ) {
+                        let copy_ticket = app.handle_click(mouse.column, mouse.row);
+                        if copy_ticket {
+                            if let Some(addr) = app.current_room_address() {
+                                // OSC 52: copy to system clipboard
+                                use std::io::Write;
+                                let encoded = base64_encode(addr.as_bytes());
+                                let _ = write!(
+                                    terminal.backend_mut(),
+                                    "\x1b]52;c;{encoded}\x07"
+                                );
+                                let _ = terminal.backend_mut().flush();
+                                app.status_message =
+                                    Some("Ticket copied to clipboard".into());
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -431,4 +456,29 @@ async fn run_app(
         }
     }
     Ok(())
+}
+
+/// Simple base64 encoder for OSC 52 clipboard
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[(n >> 18 & 63) as usize] as char);
+        result.push(CHARS[(n >> 12 & 63) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARS[(n >> 6 & 63) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(n & 63) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
 }

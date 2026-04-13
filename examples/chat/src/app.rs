@@ -302,6 +302,14 @@ pub struct App {
 
     // CLI: pending password to apply to next room opened
     pub pending_password: Option<String>,
+
+    // Mouse hit regions (updated each render)
+    /// (x_start, x_end) for each room tab
+    pub tab_regions: Vec<(u16, u16)>,
+    /// Row of the tab bar (if visible)
+    pub tab_bar_row: Option<u16>,
+    /// Region of the topic bar
+    pub topic_bar_row: Option<u16>,
 }
 
 /// Tracks an in-progress tab completion cycle
@@ -333,6 +341,9 @@ impl App {
             tab_completion: None,
             needs_bell: false,
             pending_password: None,
+            tab_regions: Vec::new(),
+            tab_bar_row: None,
+            topic_bar_row: None,
         })
     }
 
@@ -1019,6 +1030,31 @@ impl App {
 
     pub fn clear_status_message(&mut self) {
         self.status_message = None;
+    }
+
+    /// Handle a mouse click at (col, row). Returns true if the click
+    /// was on the topic bar (caller should copy ticket to clipboard).
+    pub fn handle_click(&mut self, col: u16, row: u16) -> bool {
+        // Check tab bar clicks
+        if let Some(tab_row) = self.tab_bar_row {
+            if row == tab_row {
+                for (i, (x_start, x_end)) in self.tab_regions.iter().enumerate() {
+                    if col >= *x_start && col < *x_end {
+                        self.switch_room(i);
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Check topic bar click (copy ticket)
+        if let Some(topic_row) = self.topic_bar_row {
+            if row == topic_row {
+                return true; // Signal caller to copy ticket
+            }
+        }
+
+        false
     }
 
     // insert_message for CLI use (operates on active room)

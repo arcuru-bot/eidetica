@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
-pub fn ui(f: &mut ratatui::Frame, app: &App) {
+pub fn ui(f: &mut ratatui::Frame, app: &mut App) {
     render_chat(f, app);
 
     if app.show_help {
@@ -15,7 +15,7 @@ pub fn ui(f: &mut ratatui::Frame, app: &App) {
     }
 }
 
-fn render_chat(f: &mut ratatui::Frame, app: &App) {
+fn render_chat(f: &mut ratatui::Frame, app: &mut App) {
     // Main horizontal split: chat area | nick list
     let horiz = Layout::default()
         .direction(Direction::Horizontal)
@@ -54,7 +54,11 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
 
     // Room tab bar
     if app.rooms.len() > 1 {
+        let tab_area = chunks[chunk_idx];
         let mut tab_spans: Vec<Span> = Vec::new();
+        let mut tab_regions = Vec::new();
+        let mut x_pos = tab_area.x;
+
         for (i, room) in app.rooms.iter().enumerate() {
             let is_active = i == app.active_room;
             let short_name = if room.name.len() > 15 {
@@ -64,6 +68,7 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
             };
 
             let label = format!(" {}{} ", short_name, if room.has_unread { "*" } else { "" });
+            let label_len = label.len() as u16;
 
             let style = if is_active {
                 Style::default()
@@ -80,6 +85,9 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
                     .bg(Color::Rgb(30, 30, 40))
             };
 
+            tab_regions.push((x_pos, x_pos + label_len));
+            x_pos += label_len;
+
             tab_spans.push(Span::styled(label, style));
             tab_spans.push(Span::styled(
                 "|",
@@ -87,15 +95,23 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
                     .fg(Color::Rgb(60, 60, 60))
                     .bg(Color::Rgb(30, 30, 40)),
             ));
+            x_pos += 1; // separator
         }
+
+        app.tab_regions = tab_regions;
+        app.tab_bar_row = Some(tab_area.y);
 
         let tab_bar = Paragraph::new(Line::from(tab_spans))
             .style(Style::default().bg(Color::Rgb(30, 30, 40)));
-        f.render_widget(tab_bar, chunks[chunk_idx]);
+        f.render_widget(tab_bar, tab_area);
         chunk_idx += 1;
+    } else {
+        app.tab_regions.clear();
+        app.tab_bar_row = None;
     }
 
     // Topic bar
+    app.topic_bar_row = Some(chunks[chunk_idx].y);
     let room_name = app
         .current_room_name()
         .unwrap_or("Unknown Room")
