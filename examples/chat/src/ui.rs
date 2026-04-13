@@ -249,6 +249,7 @@ fn render_help_overlay(f: &mut ratatui::Frame) {
         help_line("Ctrl+K", "Kill to end of line"),
         help_line("Ctrl+U", "Kill to start of line"),
         help_line("Ctrl+W", "Kill word back"),
+        help_line("Tab", "Nick completion (cycle)"),
         Line::from(""),
         Line::from(Span::styled(
             "Commands",

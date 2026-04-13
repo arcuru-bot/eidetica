@@ -11,6 +11,11 @@ pub async fn handle_key_event(app: &mut App, key: KeyCode, modifiers: KeyModifie
         return;
     }
 
+    // Reset tab completion on any key except Tab
+    if key != KeyCode::Tab {
+        app.reset_tab_completion();
+    }
+
     match key {
         // Quit: Ctrl+C or Ctrl+Q
         KeyCode::Char('c') | KeyCode::Char('q') if ctrl => {
@@ -52,10 +57,8 @@ pub async fn handle_key_event(app: &mut App, key: KeyCode, modifiers: KeyModifie
         KeyCode::Up => app.history_prev(),
         KeyCode::Down => app.history_next(),
 
-        // Tab completion placeholder (could be expanded)
-        KeyCode::Tab => {
-            // TODO: nick completion
-        }
+        // Tab completion
+        KeyCode::Tab => app.tab_complete(),
 
         // Regular character input
         KeyCode::Char(c) => {

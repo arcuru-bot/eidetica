@@ -180,6 +180,21 @@ pub struct App {
     pub status_message: Option<String>,
     pub should_quit: bool,
     pub show_help: bool,
+
+    // Tab completion state
+    pub tab_completion: Option<TabCompletion>,
+}
+
+/// Tracks an in-progress tab completion cycle
+pub struct TabCompletion {
+    /// The partial text being completed
+    pub prefix: String,
+    /// Position in input where the prefix starts
+    pub start: usize,
+    /// Matching candidates
+    pub candidates: Vec<String>,
+    /// Current index into candidates
+    pub index: usize,
 }
 
 impl App {
@@ -208,6 +223,7 @@ impl App {
             status_message: None,
             should_quit: false,
             show_help: false,
+            tab_completion: None,
         })
     }
 
@@ -548,6 +564,61 @@ impl App {
 
         self.input.clear();
         Ok(())
+    }
+
+    /// Start or cycle tab completion at the current cursor position
+    pub fn tab_complete(&mut self) {
+        if let Some(ref mut tc) = self.tab_completion {
+            // Cycle to next candidate
+            tc.index = (tc.index + 1) % tc.candidates.len();
+            let replacement = tc.candidates[tc.index].clone();
+            let suffix = if tc.start == 0 { ": " } else { " " };
+            // Everything after cursor is preserved; replace start..cursor
+            let before = self.input.text[..tc.start].to_string();
+            let after = self.input.text[self.input.cursor..].to_string();
+            self.input.text = format!("{before}{replacement}{suffix}{after}");
+            self.input.cursor = tc.start + replacement.len() + suffix.len();
+        } else {
+            // Start new completion — find the word at cursor
+            let before_cursor = &self.input.text[..self.input.cursor];
+            let word_start = before_cursor.rfind(' ').map(|i| i + 1).unwrap_or(0);
+            let prefix = before_cursor[word_start..].to_string();
+
+            if prefix.is_empty() {
+                return;
+            }
+
+            let prefix_lower = prefix.to_lowercase();
+            let candidates: Vec<String> = self
+                .known_users
+                .iter()
+                .filter(|nick| nick.to_lowercase().starts_with(&prefix_lower))
+                .cloned()
+                .collect();
+
+            if candidates.is_empty() {
+                return;
+            }
+
+            let replacement = candidates[0].clone();
+            let after = self.input.text[self.input.cursor..].to_string();
+            let before = self.input.text[..word_start].to_string();
+            let suffix = if word_start == 0 { ": " } else { " " };
+            self.input.text = format!("{before}{replacement}{suffix}{after}");
+            self.input.cursor = word_start + replacement.len() + suffix.len();
+
+            self.tab_completion = Some(TabCompletion {
+                prefix,
+                start: word_start,
+                candidates,
+                index: 0,
+            });
+        }
+    }
+
+    /// Reset tab completion state (call on any non-Tab input)
+    pub fn reset_tab_completion(&mut self) {
+        self.tab_completion = None;
     }
 
     pub fn scroll_to_bottom(&mut self) {
