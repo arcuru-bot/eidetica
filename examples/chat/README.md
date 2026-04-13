@@ -81,11 +81,17 @@ Once in a room, you'll see:
 | `Ctrl+K` | Kill to end of line |
 | `Ctrl+U` | Kill to start of line |
 | `Ctrl+W` | Kill word back |
+| `Alt+1..9` | Switch to room 1-9 |
+| `Ctrl+N` / `Ctrl+P` | Next / previous room |
 
 #### Slash Commands
 
 | Command | Description |
 |---|---|
+| `/join <ticket>` | Join a room |
+| `/create [name]` | Create a new room |
+| `/part` / `/leave` | Leave current room |
+| `/rooms` / `/list` | List all rooms |
 | `/nick <name>` | Change your nickname |
 | `/me <action>` | Send an action message (e.g., `/me waves`) |
 | `/clear` | Clear the message display (messages persist in DB) |
