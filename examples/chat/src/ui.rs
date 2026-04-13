@@ -1,4 +1,4 @@
-use crate::app::App;
+use crate::app::{App, COMMANDS};
 use crate::models::ChatMessage;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -233,8 +233,71 @@ fn render_chat(f: &mut ratatui::Frame, app: &mut App) {
         input_chunk.y + 1,
     ));
 
+    // Command completion popup
+    if app.has_cmd_completions() {
+        render_cmd_popup(f, app, input_chunk);
+    }
+
     // Nick list
     render_nick_list(f, app, nick_area);
+}
+
+fn render_cmd_popup(f: &mut ratatui::Frame, app: &App, input_area: Rect) {
+    let items: Vec<ListItem> = app
+        .cmd_completions
+        .iter()
+        .enumerate()
+        .map(|(i, &cmd_idx)| {
+            let cmd = &COMMANDS[cmd_idx];
+            let is_selected = i == app.cmd_selected;
+
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Rgb(50, 50, 80))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            let line = if cmd.args.is_empty() {
+                Line::from(vec![
+                    Span::styled(format!(" {} ", cmd.name), style),
+                    Span::styled(
+                        format!(" {}", cmd.desc),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(format!(" {} ", cmd.name), style),
+                    Span::styled(format!("{} ", cmd.args), Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!(" {}", cmd.desc),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])
+            };
+
+            ListItem::new(line)
+        })
+        .collect();
+
+    let height = (items.len() as u16).min(10).max(1);
+    let width = 45u16.min(input_area.width);
+
+    // Position above the input area
+    let popup_area = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(height + 1),
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, popup_area);
+    let popup =
+        List::new(items).block(Block::default().style(Style::default().bg(Color::Rgb(30, 30, 50))));
+    f.render_widget(popup, popup_area);
 }
 
 fn render_nick_list(f: &mut ratatui::Frame, app: &App, area: Rect) {

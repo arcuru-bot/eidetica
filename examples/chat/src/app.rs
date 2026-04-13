@@ -18,6 +18,85 @@ const STORE_MESSAGES: &str = "messages";
 const STORE_ENCRYPTED: &str = "encrypted_messages";
 pub const SYSTEM_AUTHOR: &str = "*";
 
+pub struct CommandDef {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub desc: &'static str,
+}
+
+pub const COMMANDS: &[CommandDef] = &[
+    CommandDef {
+        name: "/join",
+        args: "<ticket>",
+        desc: "Join a room",
+    },
+    CommandDef {
+        name: "/create",
+        args: "[name]",
+        desc: "Create a new room",
+    },
+    CommandDef {
+        name: "/part",
+        args: "",
+        desc: "Leave current room",
+    },
+    CommandDef {
+        name: "/rooms",
+        args: "",
+        desc: "List rooms",
+    },
+    CommandDef {
+        name: "/nick",
+        args: "<name>",
+        desc: "Change nickname",
+    },
+    CommandDef {
+        name: "/me",
+        args: "<action>",
+        desc: "Action message",
+    },
+    CommandDef {
+        name: "/clear",
+        args: "",
+        desc: "Clear display",
+    },
+    CommandDef {
+        name: "/topic",
+        args: "",
+        desc: "Show topic",
+    },
+    CommandDef {
+        name: "/users",
+        args: "",
+        desc: "List users",
+    },
+    CommandDef {
+        name: "/timestamps",
+        args: "",
+        desc: "Toggle timestamps",
+    },
+    CommandDef {
+        name: "/encrypt",
+        args: "<password>",
+        desc: "Encrypt room",
+    },
+    CommandDef {
+        name: "/decrypt",
+        args: "<password>",
+        desc: "Unlock room",
+    },
+    CommandDef {
+        name: "/help",
+        args: "",
+        desc: "Show help",
+    },
+    CommandDef {
+        name: "/quit",
+        args: "",
+        desc: "Quit",
+    },
+];
+
 pub fn default_room_name() -> String {
     format!(
         "Chat Room - {}",
@@ -298,6 +377,10 @@ pub struct App {
     // Tab completion state
     pub tab_completion: Option<TabCompletion>,
 
+    // Command autocomplete
+    pub cmd_completions: Vec<usize>, // indices into COMMANDS
+    pub cmd_selected: usize,
+
     // Notification state
     pub needs_bell: bool,
 
@@ -340,6 +423,8 @@ impl App {
             show_help: false,
             show_timestamps: true,
             tab_completion: None,
+            cmd_completions: Vec::new(),
+            cmd_selected: 0,
             needs_bell: false,
             pending_password: None,
             tab_regions: Vec::new(),
@@ -917,6 +1002,61 @@ impl App {
 
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion = None;
+    }
+
+    /// Update the command completion popup based on current input
+    pub fn update_cmd_completions(&mut self) {
+        let text = &self.input.text;
+        if text.starts_with('/') && !text.contains(' ') {
+            let prefix = text.to_lowercase();
+            self.cmd_completions = COMMANDS
+                .iter()
+                .enumerate()
+                .filter(|(_, cmd)| cmd.name.starts_with(&prefix))
+                .map(|(i, _)| i)
+                .collect();
+            // Clamp selection
+            if self.cmd_selected >= self.cmd_completions.len() {
+                self.cmd_selected = 0;
+            }
+        } else {
+            self.cmd_completions.clear();
+            self.cmd_selected = 0;
+        }
+    }
+
+    /// Accept the currently selected command completion
+    pub fn accept_cmd_completion(&mut self) {
+        if let Some(&idx) = self.cmd_completions.get(self.cmd_selected) {
+            let cmd = &COMMANDS[idx];
+            if cmd.args.is_empty() {
+                self.input.set(cmd.name.to_string());
+            } else {
+                self.input.set(format!("{} ", cmd.name));
+            }
+            self.cmd_completions.clear();
+            self.cmd_selected = 0;
+        }
+    }
+
+    pub fn cmd_completion_up(&mut self) {
+        if !self.cmd_completions.is_empty() {
+            self.cmd_selected = if self.cmd_selected == 0 {
+                self.cmd_completions.len() - 1
+            } else {
+                self.cmd_selected - 1
+            };
+        }
+    }
+
+    pub fn cmd_completion_down(&mut self) {
+        if !self.cmd_completions.is_empty() {
+            self.cmd_selected = (self.cmd_selected + 1) % self.cmd_completions.len();
+        }
+    }
+
+    pub fn has_cmd_completions(&self) -> bool {
+        !self.cmd_completions.is_empty()
     }
 
     // ── Scroll (delegate to active room) ──

@@ -11,6 +11,30 @@ pub async fn handle_key_event(app: &mut App, key: KeyCode, modifiers: KeyModifie
         return;
     }
 
+    // Command completion popup intercepts some keys
+    if app.has_cmd_completions() {
+        match key {
+            KeyCode::Up => {
+                app.cmd_completion_up();
+                return;
+            }
+            KeyCode::Down => {
+                app.cmd_completion_down();
+                return;
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                app.accept_cmd_completion();
+                return;
+            }
+            KeyCode::Esc => {
+                app.cmd_completions.clear();
+                app.cmd_selected = 0;
+                return;
+            }
+            _ => {} // fall through to normal handling
+        }
+    }
+
     // Reset tab completion on any key except Tab
     if key != KeyCode::Tab {
         app.reset_tab_completion();
@@ -78,6 +102,11 @@ pub async fn handle_key_event(app: &mut App, key: KeyCode, modifiers: KeyModifie
             app.input.insert(c);
         }
 
+        KeyCode::Esc => {}
+
         _ => {}
     }
+
+    // Update command completions after any input change
+    app.update_cmd_completions();
 }
