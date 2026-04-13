@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::models::ChatMessage;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
@@ -87,87 +88,60 @@ fn render_chat(f: &mut ratatui::Frame, app: &App) {
 
     // Messages area
     let msg_chunk = chunks[chunk_idx];
-    let inner_height = msg_chunk.height.saturating_sub(2) as usize; // subtract borders
+    let inner_width = msg_chunk.width.saturating_sub(2) as usize; // subtract borders
+    let inner_height = msg_chunk.height.saturating_sub(2) as usize;
     chunk_idx += 1;
 
-    let messages: Vec<ListItem> = app
+    let lines: Vec<Line> = app
         .messages
         .iter()
-        .map(|m| {
-            let timestamp = m.timestamp.format("%H:%M:%S");
-            let is_own = m.author == app.username;
-
-            if m.is_action() {
-                // Action messages: * user does something
-                Line::from(vec![
-                    Span::styled(
-                        format!("[{timestamp}] "),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("* {}", m.content),
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ])
-            } else {
-                let nick_color = if is_own {
-                    Color::White
-                } else {
-                    nick_color(&m.author)
-                };
-
-                Line::from(vec![
-                    Span::styled(
-                        format!("[{timestamp}] "),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("{}: ", m.author),
-                        Style::default().fg(nick_color).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(&m.content),
-                ])
-            }
-        })
-        .map(ListItem::new)
+        .map(|m| format_message(m, &app.username))
         .collect();
 
-    // Unread indicator in title
-    let unread = app.unread_below(inner_height);
-    let title = if unread > 0 {
-        format!(
-            " Messages ({}) -- {unread} new below \u{2193} ",
-            app.messages.len()
-        )
+    // Calculate total wrapped lines for scroll math
+    let total_wrapped = lines
+        .iter()
+        .map(|line| wrapped_line_count(line, inner_width).max(1))
+        .sum::<usize>();
+
+    // Scroll position: show the bottom when pinned, otherwise use scroll_position
+    let scroll_row = if app.pinned_to_bottom {
+        total_wrapped.saturating_sub(inner_height)
+    } else {
+        // Convert message-index scroll position to wrapped-line position
+        let mut row = 0usize;
+        for line in lines.iter().take(app.scroll_position) {
+            row += wrapped_line_count(line, inner_width).max(1);
+        }
+        row
+    };
+
+    // Unread: count wrapped lines below the viewport
+    let visible_end = scroll_row + inner_height;
+    let unread_lines = total_wrapped.saturating_sub(visible_end);
+    let title = if unread_lines > 0 && !app.pinned_to_bottom {
+        format!(" Messages ({}) -- more below \u{2193} ", app.messages.len())
     } else {
         format!(" Messages ({}) ", app.messages.len())
     };
 
-    let messages_list = List::new(messages).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if unread > 0 {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            }))
-            .title(title),
-    );
+    let messages_paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default().fg(if unread_lines > 0 && !app.pinned_to_bottom {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    }),
+                )
+                .title(title),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_row as u16, 0));
 
-    f.render_widget(messages_list, msg_chunk);
-
-    // Scrollbar
-    let scrollbar = Scrollbar::default()
-        .orientation(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(None)
-        .end_symbol(None);
-    let scrollbar_area = msg_chunk.inner(Margin {
-        horizontal: 0,
-        vertical: 1,
-    });
-    f.render_stateful_widget(scrollbar, scrollbar_area, &mut app.scroll_state.clone());
+    f.render_widget(messages_paragraph, msg_chunk);
 
     // Input area
     let input_chunk = chunks[chunk_idx];
@@ -295,6 +269,57 @@ fn help_line<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
         ),
         Span::raw(desc),
     ])
+}
+
+/// Format a chat message into a styled Line
+fn format_message<'a>(m: &'a ChatMessage, username: &str) -> Line<'a> {
+    let timestamp = m.timestamp.format("%H:%M:%S");
+
+    if m.is_action() {
+        Line::from(vec![
+            Span::styled(
+                format!("[{timestamp}] "),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("* {}", m.content),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ])
+    } else {
+        let is_own = m.author == username;
+        let color = if is_own {
+            Color::White
+        } else {
+            nick_color(&m.author)
+        };
+
+        Line::from(vec![
+            Span::styled(
+                format!("[{timestamp}] "),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{}: ", m.author),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(&m.content),
+        ])
+    }
+}
+
+/// Estimate the number of wrapped lines a Line will occupy at a given width
+fn wrapped_line_count(line: &Line, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let total_chars: usize = line.spans.iter().map(|s| s.content.len()).sum();
+    if total_chars == 0 {
+        return 1;
+    }
+    (total_chars + width - 1) / width
 }
 
 /// Generate a consistent color for a nick
