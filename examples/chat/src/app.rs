@@ -62,8 +62,8 @@ pub const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "/topic",
-        args: "",
-        desc: "Show topic",
+        args: "[name]",
+        desc: "Show/set room name",
     },
     CommandDef {
         name: "/users",
@@ -852,7 +852,6 @@ impl App {
                         room.insert_message(&msg).await?;
                     }
                     if let Some(room) = self.rooms.get_mut(self.active_room) {
-                        room.known_users.remove(&old);
                         room.known_users.insert(self.username.clone());
                         room.messages.push(msg);
                     }
@@ -882,8 +881,17 @@ impl App {
                 self.status_message = Some("Display cleared (messages persist in database)".into());
             }
             "/topic" => {
-                let name = self.current_room_name().unwrap_or("(no topic set)");
-                self.status_message = Some(format!("Topic: {name}"));
+                if arg.is_empty() {
+                    let name = self.current_room_name().unwrap_or("(no topic set)");
+                    self.status_message = Some(format!("Topic: {name}"));
+                } else if let Some(room) = self.rooms.get_mut(self.active_room) {
+                    let txn = room.database.new_transaction().await?;
+                    let settings = txn.get_settings()?;
+                    settings.set_name(arg).await?;
+                    txn.commit().await?;
+                    room.name = arg.to_string();
+                    self.status_message = Some(format!("Topic set: {arg}"));
+                }
             }
             "/timestamps" | "/ts" => {
                 self.show_timestamps = !self.show_timestamps;
@@ -1148,6 +1156,8 @@ impl App {
         for (i, room) in self.rooms.iter_mut().enumerate() {
             let current_count = room.messages.len();
             room.load_messages().await?;
+            // Ensure current username is always in known_users
+            room.known_users.insert(self.username.clone());
 
             if room.messages.len() > current_count {
                 if i == self.active_room {
