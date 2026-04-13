@@ -1,30 +1,70 @@
 use crate::app::App;
 use crossterm::event::{KeyCode, KeyModifiers};
 
-pub async fn handle_key_event(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
+pub async fn handle_key_event(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let alt = modifiers.contains(KeyModifiers::ALT);
+
+    // Help overlay toggle
+    if app.show_help {
+        app.show_help = false;
+        return;
+    }
+
     match key {
-        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+        // Quit: Ctrl+C or Ctrl+Q
+        KeyCode::Char('c') | KeyCode::Char('q') if ctrl => {
             app.should_quit = true;
         }
+
+        // Send message
         KeyCode::Enter => {
-            // Clear status message when sending a message
             app.clear_status_message();
             if let Err(e) = app.send_message().await {
-                eprintln!("Error sending message: {e}");
+                app.status_message = Some(format!("Error: {e}"));
             }
         }
+
+        // Input editing
+        KeyCode::Backspace => app.input.backspace(),
+        KeyCode::Delete => app.input.delete(),
+        KeyCode::Left if ctrl || alt => app.input.move_word_left(),
+        KeyCode::Right if ctrl || alt => app.input.move_word_right(),
+        KeyCode::Left => app.input.move_left(),
+        KeyCode::Right => app.input.move_right(),
+        KeyCode::Home => app.input.home(),
+        KeyCode::End => app.input.end(),
+
+        // Emacs-style line editing
+        KeyCode::Char('a') if ctrl => app.input.home(),
+        KeyCode::Char('e') if ctrl => app.input.end(),
+        KeyCode::Char('k') if ctrl => app.input.kill_to_end(),
+        KeyCode::Char('u') if ctrl => app.input.kill_to_start(),
+        KeyCode::Char('w') if ctrl => app.input.kill_word_back(),
+
+        // Scrolling
+        KeyCode::PageUp => app.scroll_up(20),
+        KeyCode::PageDown => app.scroll_down(20),
+
+        // History / scroll with Up/Down
+        KeyCode::Up if ctrl => app.scroll_up(1),
+        KeyCode::Down if ctrl => app.scroll_down(1),
+        KeyCode::Up => app.history_prev(),
+        KeyCode::Down => app.history_next(),
+
+        // Tab completion placeholder (could be expanded)
+        KeyCode::Tab => {
+            // TODO: nick completion
+        }
+
+        // Regular character input
         KeyCode::Char(c) => {
-            // Clear status message when typing
             if app.status_message.is_some() {
                 app.clear_status_message();
             }
-            app.input.push(c);
+            app.input.insert(c);
         }
-        KeyCode::Backspace => {
-            app.input.pop();
-        }
-        KeyCode::Up => app.scroll_up(),
-        KeyCode::Down => app.scroll_down(),
+
         _ => {}
     }
 }

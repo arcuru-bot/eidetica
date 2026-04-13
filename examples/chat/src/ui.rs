@@ -1,131 +1,340 @@
 use crate::app::App;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Margin},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, Wrap,
+    },
 };
 
 pub fn ui(f: &mut ratatui::Frame, app: &App) {
     render_chat(f, app);
+
+    if app.show_help {
+        render_help_overlay(f);
+    }
 }
 
 fn render_chat(f: &mut ratatui::Frame, app: &App) {
+    // Main horizontal split: chat area | nick list
+    let horiz = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),     // Chat area
+            Constraint::Length(20), // Nick list
+        ])
+        .split(f.area());
+
+    let chat_area = horiz[0];
+    let nick_area = horiz[1];
+
+    // Vertical layout for chat area
     let mut constraints = vec![
-        Constraint::Length(3), // Room address bar
-        Constraint::Min(0),    // Messages
-        Constraint::Length(3), // Input
+        Constraint::Length(1), // Topic bar (compact)
     ];
 
-    // Add space for status message if present
     if app.status_message.is_some() {
-        constraints.insert(1, Constraint::Length(2)); // Status message
+        constraints.push(Constraint::Length(1)); // Status line
     }
+
+    constraints.push(Constraint::Min(0)); // Messages
+    constraints.push(Constraint::Length(3)); // Input
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(f.area());
+        .split(chat_area);
 
-    // Room address bar (for sharing) - use cached name
+    let mut chunk_idx = 0;
+
+    // Topic bar — compact, no borders
     let room_name = app
         .current_room_name
         .clone()
         .unwrap_or_else(|| "Unknown Room".to_string());
 
-    let address_text = if let Some(addr) = &app.current_room_address {
-        format!("{room_name} | Share this room: {addr}")
-    } else {
-        room_name
-    };
-
-    let address_bar = Paragraph::new(address_text)
-        .style(
+    let topic_spans = vec![
+        Span::styled(" [", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            &room_name,
             Style::default()
-                .fg(Color::Green)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        )
-        .alignment(ratatui::layout::Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Room Address")
-                .style(Style::default().fg(Color::Yellow)),
-        );
-    f.render_widget(address_bar, chunks[0]);
+        ),
+        Span::styled("] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            app.current_room_address.as_deref().unwrap_or(""),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
 
-    let mut message_chunk_index = 1;
+    let topic_bar =
+        Paragraph::new(Line::from(topic_spans)).style(Style::default().bg(Color::Rgb(30, 30, 40)));
+    f.render_widget(topic_bar, chunks[chunk_idx]);
+    chunk_idx += 1;
 
-    // Status message (if present)
+    // Status message
     if let Some(status_msg) = &app.status_message {
-        let status = Paragraph::new(status_msg.as_str())
-            .style(Style::default().fg(Color::Cyan))
-            .alignment(ratatui::layout::Alignment::Center)
-            .block(Block::default().borders(Borders::NONE));
-        f.render_widget(status, chunks[1]);
-        message_chunk_index = 2;
+        let status = Paragraph::new(Span::styled(
+            format!(" {status_msg}"),
+            Style::default().fg(Color::Yellow),
+        ))
+        .style(Style::default().bg(Color::Rgb(40, 40, 20)));
+        f.render_widget(status, chunks[chunk_idx]);
+        chunk_idx += 1;
     }
 
     // Messages area
+    let msg_chunk = chunks[chunk_idx];
+    let inner_height = msg_chunk.height.saturating_sub(2) as usize; // subtract borders
+    chunk_idx += 1;
+
     let messages: Vec<ListItem> = app
         .messages
         .iter()
         .map(|m| {
             let timestamp = m.timestamp.format("%H:%M:%S");
-            let content = Line::from(vec![
-                Span::styled(
-                    format!("[{timestamp}] "),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(
-                    format!("{}: ", m.author),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(&m.content),
-            ]);
-            ListItem::new(content)
+            let is_own = m.author == app.username;
+
+            if m.is_action() {
+                // Action messages: * user does something
+                Line::from(vec![
+                    Span::styled(
+                        format!("[{timestamp}] "),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("* {}", m.content),
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ])
+            } else {
+                let nick_color = if is_own {
+                    Color::White
+                } else {
+                    nick_color(&m.author)
+                };
+
+                Line::from(vec![
+                    Span::styled(
+                        format!("[{timestamp}] "),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("{}: ", m.author),
+                        Style::default().fg(nick_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(&m.content),
+                ])
+            }
         })
+        .map(ListItem::new)
         .collect();
+
+    // Unread indicator in title
+    let unread = app.unread_below(inner_height);
+    let title = if unread > 0 {
+        format!(
+            " Messages ({}) -- {unread} new below \u{2193} ",
+            app.messages.len()
+        )
+    } else {
+        format!(" Messages ({}) ", app.messages.len())
+    };
 
     let messages_list = List::new(messages).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(
-                "Messages ({}) - ESC to leave room",
-                app.messages.len()
-            ))
-            .style(Style::default().fg(Color::White)),
+            .border_style(Style::default().fg(if unread > 0 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            }))
+            .title(title),
     );
 
-    f.render_widget(messages_list, chunks[message_chunk_index]);
+    f.render_widget(messages_list, msg_chunk);
 
-    // Render scrollbar
+    // Scrollbar
     let scrollbar = Scrollbar::default()
         .orientation(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
         .end_symbol(None);
-    let scrollbar_area = chunks[message_chunk_index].inner(Margin {
+    let scrollbar_area = msg_chunk.inner(Margin {
         horizontal: 0,
         vertical: 1,
     });
     f.render_stateful_widget(scrollbar, scrollbar_area, &mut app.scroll_state.clone());
 
     // Input area
-    let input_chunk_index = if app.status_message.is_some() { 3 } else { 2 };
-    let input = Paragraph::new(app.input.as_str())
-        .style(Style::default().fg(Color::Yellow))
+    let input_chunk = chunks[chunk_idx];
+
+    let input_title = if let Some(idx) = app.history_index {
+        format!(" [{}/{}] ", idx + 1, app.input_history.len())
+    } else {
+        " > ".to_string()
+    };
+
+    let input = Paragraph::new(app.input.text.as_str())
+        .style(Style::default().fg(Color::White))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Type your message (Enter to send)"),
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(input_title),
         );
-    f.render_widget(input, chunks[input_chunk_index]);
+    f.render_widget(input, input_chunk);
 
-    // Set cursor position
+    // Cursor position (byte-aware)
     f.set_cursor_position((
-        chunks[input_chunk_index].x + app.input.len() as u16 + 1,
-        chunks[input_chunk_index].y + 1,
+        input_chunk.x + app.input.cursor_chars() as u16 + 1,
+        input_chunk.y + 1,
     ));
+
+    // Nick list
+    render_nick_list(f, app, nick_area);
+}
+
+fn render_nick_list(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let nicks: Vec<ListItem> = app
+        .known_users
+        .iter()
+        .map(|nick| {
+            let style = if nick == &app.username {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(nick_color(nick))
+            };
+            ListItem::new(Span::styled(format!(" {nick}"), style))
+        })
+        .collect();
+
+    let nick_list = List::new(nicks).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(format!(" Users ({}) ", app.known_users.len())),
+    );
+
+    f.render_widget(nick_list, area);
+}
+
+fn render_help_overlay(f: &mut ratatui::Frame) {
+    let area = centered_rect(60, 70, f.area());
+
+    f.render_widget(Clear, area);
+
+    let help_text = vec![
+        Line::from(Span::styled(
+            "Keyboard Shortcuts",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        help_line("Ctrl+C / Ctrl+Q", "Quit"),
+        help_line("Enter", "Send message"),
+        help_line("Up / Down", "Input history"),
+        help_line("Ctrl+Up / Ctrl+Down", "Scroll messages"),
+        help_line("PageUp / PageDown", "Scroll messages (fast)"),
+        help_line("Left / Right", "Move cursor"),
+        help_line("Ctrl+Left / Ctrl+Right", "Move by word"),
+        help_line("Home / Ctrl+A", "Start of line"),
+        help_line("End / Ctrl+E", "End of line"),
+        help_line("Ctrl+K", "Kill to end of line"),
+        help_line("Ctrl+U", "Kill to start of line"),
+        help_line("Ctrl+W", "Kill word back"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Commands",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        help_line("/nick <name>", "Change nickname"),
+        help_line("/me <action>", "Send action message"),
+        help_line("/clear", "Clear message display"),
+        help_line("/topic", "Show room topic"),
+        help_line("/users", "List known users"),
+        help_line("/quit", "Quit"),
+        help_line("/help", "Toggle this help"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press any key to close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let help = Paragraph::new(help_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Help ")
+                .style(Style::default().bg(Color::Rgb(20, 20, 30))),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(help, area);
+}
+
+fn help_line<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(
+            format!("  {key:<28}"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(desc),
+    ])
+}
+
+/// Generate a consistent color for a nick
+fn nick_color(nick: &str) -> Color {
+    let colors = [
+        Color::Red,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Magenta,
+        Color::Cyan,
+        Color::LightRed,
+        Color::LightGreen,
+        Color::LightYellow,
+        Color::LightBlue,
+        Color::LightMagenta,
+        Color::LightCyan,
+    ];
+    let hash: u32 = nick
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    colors[(hash as usize) % colors.len()]
+}
+
+/// Create a centered rectangle
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

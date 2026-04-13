@@ -2,8 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// AppMode removed - app only has one mode: Chat
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: String,
@@ -20,5 +18,10 @@ impl ChatMessage {
             content,
             timestamp: Utc::now(),
         }
+    }
+
+    /// Returns true if this is a system/action message (from /me or similar)
+    pub fn is_action(&self) -> bool {
+        self.author == "*"
     }
 }

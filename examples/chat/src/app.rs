@@ -11,7 +11,142 @@ use eidetica::{
     user::{User, types::SyncSettings},
 };
 use ratatui::widgets::ScrollbarState;
+use std::collections::BTreeSet;
 use tracing::{debug, info};
+
+/// Input line editor with cursor support
+pub struct InputLine {
+    pub text: String,
+    pub cursor: usize,
+}
+
+impl InputLine {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+        }
+    }
+
+    pub fn insert(&mut self, c: char) {
+        self.text.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            // Find the previous char boundary
+            let prev = self.text[..self.cursor]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.text.drain(prev..self.cursor);
+            self.cursor = prev;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.cursor < self.text.len() {
+            let next = self.text[self.cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor + i)
+                .unwrap_or(self.text.len());
+            self.text.drain(self.cursor..next);
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor = self.text[..self.cursor]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if self.cursor < self.text.len() {
+            self.cursor = self.text[self.cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor + i)
+                .unwrap_or(self.text.len());
+        }
+    }
+
+    pub fn move_word_left(&mut self) {
+        // Skip whitespace, then skip word chars
+        let before = &self.text[..self.cursor];
+        let trimmed = before.trim_end();
+        if trimmed.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+        // Find last space in trimmed portion
+        self.cursor = trimmed
+            .rfind(|c: char| c.is_whitespace())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+    }
+
+    pub fn move_word_right(&mut self) {
+        let after = &self.text[self.cursor..];
+        // Skip current word chars, then skip whitespace
+        let skip_word = after
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(after.len());
+        let rest = &after[skip_word..];
+        let skip_space = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        self.cursor += skip_word + skip_space;
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.text.len();
+    }
+
+    pub fn kill_to_end(&mut self) {
+        self.text.truncate(self.cursor);
+    }
+
+    pub fn kill_to_start(&mut self) {
+        self.text.drain(..self.cursor);
+        self.cursor = 0;
+    }
+
+    pub fn kill_word_back(&mut self) {
+        let old_cursor = self.cursor;
+        self.move_word_left();
+        self.text.drain(self.cursor..old_cursor);
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+
+    pub fn set(&mut self, text: String) {
+        self.cursor = text.len();
+        self.text = text;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty()
+    }
+
+    /// Cursor position in characters (for display)
+    pub fn cursor_chars(&self) -> usize {
+        self.text[..self.cursor].chars().count()
+    }
+}
 
 pub struct App {
     pub user: User,
@@ -23,62 +158,74 @@ pub struct App {
     pub current_room_name: Option<String>,
 
     // Chat state
-    pub input: String,
+    pub input: InputLine,
+    pub input_history: Vec<String>,
+    pub history_index: Option<usize>, // None = not browsing history
+    pub history_stash: String,        // saves current input when browsing history
     pub messages: Vec<ChatMessage>,
     pub scroll_state: ScrollbarState,
     pub scroll_position: usize,
+    pub pinned_to_bottom: bool, // auto-scroll only when pinned
 
     // User info
     pub username: String,
 
+    // Known users (extracted from messages)
+    pub known_users: BTreeSet<String>,
+
     // Sync state
     pub server_running: bool,
-    pub transport: String, // "http" or "iroh"
+    pub transport: String,
 
     pub status_message: Option<String>,
-
     pub should_quit: bool,
+    pub show_help: bool,
 }
 
 impl App {
     pub fn new(instance: Instance, user: User, username: String, transport: &str) -> Result<Self> {
+        let mut known_users = BTreeSet::new();
+        known_users.insert(username.clone());
+
         Ok(Self {
             user,
             instance,
             current_room: None,
             current_room_address: None,
             current_room_name: None,
-            input: String::new(),
+            input: InputLine::new(),
+            input_history: Vec::new(),
+            history_index: None,
+            history_stash: String::new(),
             messages: Vec::new(),
             scroll_state: ScrollbarState::default(),
             scroll_position: 0,
+            pinned_to_bottom: true,
             username,
+            known_users,
             server_running: false,
             transport: transport.to_string(),
             status_message: None,
             should_quit: false,
+            show_help: false,
         })
     }
 
     pub async fn create_room(&mut self, name: &str) -> Result<()> {
-        // Create new database with the given name
         let mut settings = Doc::new();
         settings.set("name", name);
 
-        // Get the user's default key
         let key_id = self.user.get_default_key()?;
-
-        // User API automatically configures auth with the creating key as admin
         let database = self.user.create_database(settings, &key_id).await?;
 
-        // Add global permission so anyone with the room ID can write
+        // Add global write permission
         let tx = database.new_transaction().await?;
         let settings_store = tx.get_settings()?;
         let global_key = AuthKey::active(None, Permission::Write(0));
         settings_store.set_global_auth_key(global_key).await?;
         tx.commit().await?;
 
-        // Enable sync for this database with periodic sync every 2 seconds
+        // Enable sync
         let database_id = database.root_id().clone();
         self.user
             .track_database(
@@ -88,10 +235,8 @@ impl App {
             )
             .await?;
 
-        // Open the new room
         self.enter_room(database).await?;
 
-        // Set a status message with the room address for sharing
         if let Some(addr) = &self.current_room_address {
             self.status_message = Some(format!("Room created! Share this address: {addr}"));
         }
@@ -100,14 +245,10 @@ impl App {
     }
 
     pub async fn enter_room(&mut self, database: Database) -> Result<()> {
-        // Start server if not running
         if !self.server_running {
             self.start_server().await?;
         }
 
-        // Database from User API already has auth key configured
-
-        // Generate a shareable ticket URL for this room
         let room_address = if let Some(sync) = self.instance.sync() {
             match sync.create_ticket(database.root_id()).await {
                 Ok(ticket) => ticket.to_string(),
@@ -120,7 +261,6 @@ impl App {
             DatabaseTicket::new(database.root_id().clone()).to_string()
         };
 
-        // Cache the room name for the UI (since get_name is async)
         let room_name = database.get_name().await.ok();
 
         self.current_room = Some(database);
@@ -135,17 +275,13 @@ impl App {
         if let Some(sync) = self.instance.sync() {
             match self.transport.as_str() {
                 "http" => {
-                    // Enable HTTP transport with simple client-server communication
                     sync.register_transport("http", HttpTransport::builder().bind("127.0.0.1:0"))
                         .await?;
-                    // Start server
                     sync.accept_connections().await?;
                 }
                 "iroh" => {
-                    // Enable Iroh transport for P2P communication with NAT traversal
                     sync.register_transport("iroh", IrohTransport::builder())
                         .await?;
-                    // Start server
                     sync.accept_connections().await?;
                 }
                 _ => {
@@ -156,26 +292,22 @@ impl App {
                     .into());
                 }
             }
-
             self.server_running = true;
         }
         Ok(())
     }
 
     pub async fn connect_to_room(&mut self, room_address: &str) -> Result<()> {
-        // Ensure transport is enabled before syncing
         if !self.server_running {
             self.start_server().await?;
         }
 
-        // Parse the ticket URL
         let ticket: DatabaseTicket = room_address
             .parse()
             .map_err(|e| SyncError::Network(format!("Invalid ticket URL: {e}")))?;
         let room_id = ticket.database_id().clone();
         debug!(room_id = %room_id, addresses = ?ticket.addresses(), "Parsed ticket");
 
-        // Check if this is a bootstrap scenario (we don't have the room locally)
         let is_bootstrap = match self.user.backend().get(&room_id).await {
             Ok(_) => false,
             Err(e) if e.is_not_found() => true,
@@ -195,7 +327,6 @@ impl App {
                 .request_database_access(&sync, &ticket, &key_id, PermissionType::Write(5))
                 .await?;
 
-            // Register the database with the User so it knows which key to use
             self.user
                 .track_database(
                     room_id.clone(),
@@ -207,7 +338,6 @@ impl App {
             sync.sync_with_ticket(&ticket).await?;
         }
 
-        // Wait for the database to become available (sync may still be flushing)
         let mut attempts = 0;
         let database = loop {
             attempts += 1;
@@ -238,73 +368,213 @@ impl App {
             let store = txn.get_store::<Table<ChatMessage>>("messages").await?;
 
             let entries = store.search(|_| true).await?;
-            let mut messages = Vec::new();
-
-            for (_, msg) in entries {
-                messages.push(msg);
-            }
-
-            // Sort by timestamp
+            let mut messages: Vec<ChatMessage> = entries.into_iter().map(|(_, msg)| msg).collect();
             messages.sort_by_key(|a| a.timestamp);
 
-            self.messages = messages;
-            self.update_scroll();
-        }
+            // Update known users
+            for msg in &messages {
+                if msg.author != "*" {
+                    self.known_users.insert(msg.author.clone());
+                }
+            }
 
+            self.messages = messages;
+            if self.pinned_to_bottom {
+                self.scroll_to_bottom();
+            }
+        }
         Ok(())
     }
 
     pub async fn send_message(&mut self) -> Result<()> {
-        if self.input.trim().is_empty() || self.current_room.is_none() {
+        if self.input.is_empty() || self.current_room.is_none() {
             return Ok(());
         }
 
-        let message = ChatMessage::new(self.username.clone(), self.input.trim().to_string());
+        let text = self.input.text.trim().to_string();
+
+        // Save to input history
+        if !text.is_empty() {
+            // Don't duplicate the last history entry
+            if self.input_history.last().map(|s| s.as_str()) != Some(&text) {
+                self.input_history.push(text.clone());
+            }
+        }
+        self.history_index = None;
+
+        // Handle slash commands
+        if text.starts_with('/') {
+            return self.handle_command(&text).await;
+        }
+
+        let message = ChatMessage::new(self.username.clone(), text);
 
         if let Some(database) = &self.current_room {
-            // Database from User API has auth configured automatically
             let txn = database.new_transaction().await?;
             let store = txn.get_store::<Table<ChatMessage>>("messages").await?;
             store.insert(message.clone()).await?;
             txn.commit().await?;
-            // Note: commit() triggers sync callbacks which queue entries in background
 
             self.messages.push(message);
             self.input.clear();
-            self.update_scroll();
+            self.pinned_to_bottom = true;
+            self.scroll_to_bottom();
         }
 
         Ok(())
     }
 
-    pub fn update_scroll(&mut self) {
+    async fn handle_command(&mut self, text: &str) -> Result<()> {
+        let parts: Vec<&str> = text.splitn(2, ' ').collect();
+        let cmd = parts[0].to_lowercase();
+        let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+        match cmd.as_str() {
+            "/quit" | "/q" => {
+                self.should_quit = true;
+            }
+            "/nick" => {
+                if arg.is_empty() {
+                    self.status_message = Some(format!("Current nick: {}", self.username));
+                } else {
+                    let old = self.username.clone();
+                    self.username = arg.to_string();
+                    self.known_users.remove(&old);
+                    self.known_users.insert(self.username.clone());
+                    self.status_message = Some(format!("Nick changed: {old} -> {}", self.username));
+
+                    // Send a system message about the nick change
+                    let msg = ChatMessage::new(
+                        "*".to_string(),
+                        format!("{old} is now known as {}", self.username),
+                    );
+                    if let Some(database) = &self.current_room {
+                        let txn = database.new_transaction().await?;
+                        let store = txn.get_store::<Table<ChatMessage>>("messages").await?;
+                        store.insert(msg.clone()).await?;
+                        txn.commit().await?;
+                        self.messages.push(msg);
+                    }
+                }
+            }
+            "/me" => {
+                if !arg.is_empty() {
+                    let msg = ChatMessage::new("*".to_string(), format!("{} {arg}", self.username));
+                    if let Some(database) = &self.current_room {
+                        let txn = database.new_transaction().await?;
+                        let store = txn.get_store::<Table<ChatMessage>>("messages").await?;
+                        store.insert(msg.clone()).await?;
+                        txn.commit().await?;
+                        self.messages.push(msg);
+                        self.pinned_to_bottom = true;
+                        self.scroll_to_bottom();
+                    }
+                }
+            }
+            "/clear" => {
+                // Clear local display only (messages persist in DB)
+                self.messages.clear();
+                self.scroll_position = 0;
+                self.status_message = Some("Display cleared (messages persist in database)".into());
+            }
+            "/topic" => {
+                if arg.is_empty() {
+                    let name = self
+                        .current_room_name
+                        .as_deref()
+                        .unwrap_or("(no topic set)");
+                    self.status_message = Some(format!("Topic: {name}"));
+                } else {
+                    self.status_message = Some("Changing topic not yet supported".into());
+                }
+            }
+            "/help" | "/?" => {
+                self.show_help = !self.show_help;
+            }
+            "/users" | "/names" => {
+                let names: Vec<&str> = self.known_users.iter().map(|s| s.as_str()).collect();
+                self.status_message = Some(format!("Users: {}", names.join(", ")));
+            }
+            _ => {
+                self.status_message = Some(format!("Unknown command: {cmd}. Try /help"));
+            }
+        }
+
+        self.input.clear();
+        Ok(())
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
         if !self.messages.is_empty() {
             self.scroll_position = self.messages.len().saturating_sub(1);
             self.scroll_state = self.scroll_state.position(self.scroll_position);
         }
     }
 
-    pub fn scroll_up(&mut self) {
-        self.scroll_position = self.scroll_position.saturating_sub(1);
+    pub fn scroll_up(&mut self, amount: usize) {
+        self.scroll_position = self.scroll_position.saturating_sub(amount);
         self.scroll_state = self.scroll_state.position(self.scroll_position);
+        self.pinned_to_bottom = false;
     }
 
-    pub fn scroll_down(&mut self) {
-        if self.scroll_position < self.messages.len().saturating_sub(1) {
-            self.scroll_position = self.scroll_position.saturating_add(1);
-            self.scroll_state = self.scroll_state.position(self.scroll_position);
+    pub fn scroll_down(&mut self, amount: usize) {
+        let max = self.messages.len().saturating_sub(1);
+        self.scroll_position = (self.scroll_position + amount).min(max);
+        self.scroll_state = self.scroll_state.position(self.scroll_position);
+
+        // Re-pin if we've scrolled back to the bottom
+        if self.scroll_position >= max {
+            self.pinned_to_bottom = true;
+        }
+    }
+
+    pub fn history_prev(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        match self.history_index {
+            None => {
+                // Save current input and start browsing
+                self.history_stash = self.input.text.clone();
+                self.history_index = Some(self.input_history.len() - 1);
+                let text = self.input_history.last().unwrap().clone();
+                self.input.set(text);
+            }
+            Some(0) => {
+                // Already at oldest entry
+            }
+            Some(i) => {
+                self.history_index = Some(i - 1);
+                let text = self.input_history[i - 1].clone();
+                self.input.set(text);
+            }
+        }
+    }
+
+    pub fn history_next(&mut self) {
+        match self.history_index {
+            None => {}
+            Some(i) => {
+                if i + 1 >= self.input_history.len() {
+                    // Back to current input
+                    self.history_index = None;
+                    let stash = self.history_stash.clone();
+                    self.input.set(stash);
+                } else {
+                    self.history_index = Some(i + 1);
+                    let text = self.input_history[i + 1].clone();
+                    self.input.set(text);
+                }
+            }
         }
     }
 
     pub async fn refresh_messages(&mut self) -> Result<()> {
-        // Reload messages from database (picks up any new synced messages)
-        // The library handles all syncing automatically based on interval_seconds
         let current_count = self.messages.len();
         self.load_messages().await?;
 
-        // If we have new messages, update scroll to show them
-        if self.messages.len() > current_count {
-            self.update_scroll();
+        if self.messages.len() > current_count && self.pinned_to_bottom {
+            self.scroll_to_bottom();
         }
 
         Ok(())
@@ -312,5 +582,14 @@ impl App {
 
     pub fn clear_status_message(&mut self) {
         self.status_message = None;
+    }
+
+    /// Number of new messages below the current scroll view
+    pub fn unread_below(&self, visible_height: usize) -> usize {
+        if self.pinned_to_bottom || self.messages.is_empty() {
+            return 0;
+        }
+        let visible_end = (self.scroll_position + visible_height).min(self.messages.len());
+        self.messages.len().saturating_sub(visible_end)
     }
 }
