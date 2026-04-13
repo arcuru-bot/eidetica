@@ -35,4 +35,4 @@ Tracked improvements for the eidetica chat TUI, roughly in priority order.
 - [ ] **Multiple rooms** — `/join`, `/part`, room tabs or switchable room list
 - [ ] **Connection status** — show sync state (connected/syncing/disconnected) in topic bar
 - [ ] **Message search** — `/search <query>` to filter/highlight messages
-- [ ] **Room encryption** — leverage eidetica's PasswordStore for encrypted rooms
+- [x] ~~**Room encryption**~~ — AES-256-GCM via PasswordStore, /encrypt and /decrypt commands, --password CLI flag

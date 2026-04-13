@@ -92,6 +92,8 @@ Once in a room, you'll see:
 | `/topic` | Show the current room topic |
 | `/users` / `/names` | List known users |
 | `/timestamps` / `/ts` | Toggle timestamp display |
+| `/encrypt <password>` | Encrypt the room (AES-256-GCM + Argon2id) |
+| `/decrypt <password>` | Unlock an encrypted room |
 | `/help` / `/?` | Toggle help overlay |
 | `/quit` / `/q` | Quit |
 
@@ -115,6 +117,13 @@ cargo run -- messages <TICKET> --follow
 
 # Output messages as JSON
 cargo run -- messages <TICKET> --json
+
+# Create an encrypted room
+cargo run -- create --username alice --password s3cret
+
+# Send/read with encryption
+cargo run -- send <TICKET> "hello" --password s3cret
+cargo run -- messages <TICKET> --password s3cret
 
 # Open the interactive TUI (default when no subcommand)
 cargo run -- tui <TICKET> --username alice
