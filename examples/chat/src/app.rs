@@ -1,7 +1,10 @@
 use crate::models::ChatMessage;
 use eidetica::{
     Database, Instance, Result,
-    auth::{AuthKey, Permission, types::Permission as PermissionType},
+    auth::{
+        AuthKey, Permission,
+        types::{KeyStatus, Permission as PermissionType},
+    },
     crdt::Doc,
     store::{PasswordStore, Table},
     sync::{
@@ -325,6 +328,21 @@ impl Room {
         Ok(())
     }
 
+    /// Load known users from the database's auth settings (synced via CRDT)
+    pub async fn load_users_from_auth(&mut self) -> Result<()> {
+        let txn = self.database.new_transaction().await?;
+        let settings = txn.get_settings()?;
+        let auth = settings.auth_snapshot().await?;
+
+        for (_pubkey_str, auth_key) in auth.get_all_keys()? {
+            if let Some(name) = &auth_key.name {
+                self.known_users.insert(name.clone());
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         if !self.messages.is_empty() {
             self.scroll_position = self.messages.len().saturating_sub(1);
@@ -534,9 +552,31 @@ impl App {
         let mut room = Room::new(database, room_address, room_name);
         room.known_users.insert(self.username.clone());
         room.load_messages().await?;
+        let _ = self.register_in_room(&mut room).await;
 
         self.rooms.push(room);
         self.active_room = self.rooms.len() - 1;
+
+        Ok(())
+    }
+
+    /// Register the current user's nick in the room's auth settings and load the user list
+    async fn register_in_room(&self, room: &mut Room) -> Result<()> {
+        let key_id = self.user.get_default_key()?;
+
+        // Set our auth key name to our username so other peers can see it
+        let txn = room.database.new_transaction().await?;
+        let settings = txn.get_settings()?;
+        let auth_key = AuthKey::new(
+            Some(&self.username),
+            PermissionType::Write(5),
+            KeyStatus::Active,
+        );
+        settings.set_auth_key(&key_id, auth_key).await?;
+        txn.commit().await?;
+
+        // Load all users from auth settings
+        room.load_users_from_auth().await?;
 
         Ok(())
     }
@@ -601,9 +641,9 @@ impl App {
                         .unwrap_or_else(|| "Unknown Room".to_string());
                     let mut room = Room::new(database, room_address.to_string(), room_name);
                     room.known_users.insert(self.username.clone());
-                    // Inherit password if set on app (CLI --password)
                     room.password = self.pending_password.take();
                     room.load_messages().await?;
+                    let _ = self.register_in_room(&mut room).await;
                     self.rooms.push(room);
                     self.active_room = self.rooms.len() - 1;
                     return Ok(true);
@@ -685,6 +725,7 @@ impl App {
         room.known_users.insert(self.username.clone());
         room.password = self.pending_password.take();
         room.load_messages().await?;
+        let _ = self.register_in_room(&mut room).await;
         self.rooms.push(room);
         self.active_room = self.rooms.len() - 1;
 
@@ -848,7 +889,19 @@ impl App {
                         SYSTEM_AUTHOR.to_string(),
                         format!("{old} is now known as {}", self.username),
                     );
+                    // Update auth key name so other peers see the new nick
                     if let Some(room) = self.rooms.get(self.active_room) {
+                        let key_id = self.user.get_default_key()?;
+                        let txn = room.database.new_transaction().await?;
+                        let settings = txn.get_settings()?;
+                        let auth_key = AuthKey::new(
+                            Some(&self.username),
+                            PermissionType::Write(5),
+                            KeyStatus::Active,
+                        );
+                        settings.set_auth_key(&key_id, auth_key).await?;
+                        txn.commit().await?;
+
                         room.insert_message(&msg).await?;
                     }
                     if let Some(room) = self.rooms.get_mut(self.active_room) {
@@ -1156,7 +1209,8 @@ impl App {
         for (i, room) in self.rooms.iter_mut().enumerate() {
             let current_count = room.messages.len();
             room.load_messages().await?;
-            // Ensure current username is always in known_users
+            // Reload user list from auth settings (picks up nick changes from peers)
+            let _ = room.load_users_from_auth().await;
             room.known_users.insert(self.username.clone());
 
             if room.messages.len() > current_count {
