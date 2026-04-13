@@ -21,13 +21,13 @@ Tracked improvements for the eidetica chat TUI, roughly in priority order.
 - [x] ~~**Tab-completion for nicks**~~ — Tab cycles through matching nicks, IRC-style `: ` suffix
 - [x] ~~**Message wrapping**~~ — Paragraph with Wrap, scroll math accounts for wrapped lines
 - [x] ~~**Persistent storage**~~ — Sqlite backend with `--data-dir` flag
-- [ ] **Notifications** — terminal bell or title update on new messages when unfocused
+- [x] ~~**Notifications**~~ — terminal bell + title update on new synced messages
+- [x] ~~**Nick mentions**~~ — bold yellow highlight with word boundary matching
+- [x] ~~**URL detection**~~ — underlined blue for http/https URLs
+- [x] ~~**Timestamps toggle**~~ — `/timestamps` or `/ts` to show/hide
 
 ## Medium Priority
 
-- [x] ~~**Nick mentions**~~ — bold yellow highlight with word boundary matching
-- [ ] **URL detection** — highlight URLs in messages with distinct color
-- [ ] **Timestamps toggle** — `/timestamps` to hide/show for narrow terminals
 - [ ] **Multi-line input** — Shift+Enter or paste support
 
 ## Bigger Lifts

@@ -91,6 +91,7 @@ Once in a room, you'll see:
 | `/clear` | Clear the message display (messages persist in DB) |
 | `/topic` | Show the current room topic |
 | `/users` / `/names` | List known users |
+| `/timestamps` / `/ts` | Toggle timestamp display |
 | `/help` / `/?` | Toggle help overlay |
 | `/quit` / `/q` | Quit |
 
