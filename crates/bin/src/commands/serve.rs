@@ -35,14 +35,14 @@ use crate::session::SessionStore;
 use crate::templates::DatabaseInfo;
 
 const DEFAULT_USER: &str = "default";
-const SESSION_COOKIE: &str = "eidetica_session";
+pub(crate) const SESSION_COOKIE: &str = "eidetica_session";
 
 /// Shared application state
 #[derive(Clone)]
-struct AppState {
-    instance: Arc<Instance>,
-    sync_handler: Arc<dyn SyncHandler>,
-    sessions: SessionStore,
+pub(crate) struct AppState {
+    pub(crate) instance: Arc<Instance>,
+    pub(crate) sync_handler: Arc<dyn SyncHandler>,
+    pub(crate) sessions: SessionStore,
 }
 
 /// Login form data
@@ -155,9 +155,27 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         .route("/logout", post(handle_logout))
         .route("/dashboard", get(handle_dashboard))
         .route("/dashboard/database", get(handle_database_detail))
+        .route(
+            "/dashboard/database/visualize",
+            get(crate::viz::handlers::handle_visualize_page),
+        )
         .route("/dashboard/track", post(handle_track_database))
         .route("/stats", get(handle_stats_request))
         .route("/api/v0", post(handle_sync_request))
+        .route(
+            "/api/dashboard/database/{id}/graph",
+            get(crate::viz::handlers::handle_api_graph),
+        )
+        .route(
+            "/api/dashboard/database/{id}/entries/{eid}",
+            get(crate::viz::handlers::handle_api_entry),
+        )
+        .route(
+            "/api/dashboard/database/{id}/subtrees",
+            get(crate::viz::handlers::handle_api_subtrees),
+        )
+        .route("/static/viz.css", get(crate::viz::handlers::handle_viz_css))
+        .route("/static/viz.js", get(crate::viz::handlers::handle_viz_js))
         .layer(CookieManagerLayer::new())
         .with_state(app_state.clone());
 
@@ -181,6 +199,7 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("  GET  /register     - User registration page");
     println!("  POST /register     - User registration submission");
     println!("  GET  /dashboard    - User dashboard (requires login)");
+    println!("  GET  /dashboard/database/visualize?id=… - DAG visualizer (requires login)");
     println!("  POST /dashboard/track - Request database access (requires login)");
     println!("  GET  /stats        - Server statistics");
     println!("  POST /api/v0       - Eidetica sync protocol endpoint");

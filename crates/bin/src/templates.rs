@@ -227,9 +227,11 @@ pub fn dashboard_page(user: &User, databases: Vec<DatabaseInfo>) -> String {
                 } else {
                     r#"<span style="color: #999;">✗ Disabled</span>"#
                 };
-                let view_link = format!(
-                    r#"<a href="/dashboard/database?id={}" style="color: #0066cc; text-decoration: none;">View</a>"#,
-                    html_escape(&db.root_id)
+                let actions_links = format!(
+                    r#"<a href="/dashboard/database?id={id}" style="color: #0066cc; text-decoration: none;">View</a>
+                    &nbsp;·&nbsp;
+                    <a href="/dashboard/database/visualize?id={id}" style="color: #0066cc; text-decoration: none;">Visualize DAG</a>"#,
+                    id = html_escape(&db.root_id)
                 );
                 format!(
                     r#"<tr>
@@ -243,7 +245,7 @@ pub fn dashboard_page(user: &User, databases: Vec<DatabaseInfo>) -> String {
                     html_escape(&db.name),
                     db.entry_count,
                     sync_status,
-                    view_link
+                    actions_links
                 )
             })
             .collect();
@@ -404,6 +406,13 @@ pub fn database_detail_page(_user: &User, db_info: DatabaseInfo, entries: Vec<St
             <span class="value code">{}</span>
         </div>
 
+        <p>
+            <a href="/dashboard/database/visualize?id={}"
+               style="display: inline-block; padding: 8px 16px; background: #0066cc; color: white; text-decoration: none; border-radius: 4px;">
+                Visualize DAG →
+            </a>
+        </p>
+
         <h2>Entries</h2>
         {}
     </div>
@@ -415,6 +424,7 @@ pub fn database_detail_page(_user: &User, db_info: DatabaseInfo, entries: Vec<St
         db_info.entry_count,
         sync_status,
         html_escape(&db_info.key_id),
+        html_escape(&db_info.root_id),
         entries_html
     )
 }

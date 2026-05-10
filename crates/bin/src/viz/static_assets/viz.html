@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Eidetica DAG Visualizer</title>
+    <link rel="stylesheet" href="/static/viz.css">
+    <link rel="icon" href="data:,">
+</head>
+<body data-database-id="__DATABASE_ID__" data-database-name="__DATABASE_NAME__">
+    <header class="topbar">
+        <a class="topbar-link" href="/dashboard">&larr; Dashboard</a>
+        <h1 id="db-title">__DATABASE_NAME__</h1>
+        <span id="db-id" class="topbar-id"></span>
+        <div class="topbar-actions">
+            <button id="btn-fit" type="button" title="Fit to view">Fit</button>
+            <button id="btn-reset-highlight" type="button" title="Clear highlights">Clear</button>
+        </div>
+    </header>
+
+    <main class="layout">
+        <aside class="sidebar">
+            <section class="panel">
+                <h2>Filters</h2>
+                <div class="filter-row">
+                    <label class="checkbox">
+                        <input type="checkbox" id="toggle-tree-edges" checked>
+                        Tree edges
+                    </label>
+                    <label class="checkbox">
+                        <input type="checkbox" id="toggle-subtree-edges" checked>
+                        Subtree edges
+                    </label>
+                </div>
+                <div class="filter-row">
+                    <label for="subtree-select">Highlight subtree:</label>
+                    <select id="subtree-select">
+                        <option value="">(none)</option>
+                    </select>
+                </div>
+                <div class="filter-row">
+                    <label class="checkbox">
+                        <input type="checkbox" id="toggle-only-tips">
+                        Only show tips + their ancestors
+                    </label>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>Stats</h2>
+                <ul class="stats-list" id="stats-list">
+                    <li>Loading…</li>
+                </ul>
+            </section>
+
+            <section class="panel">
+                <h2>Legend</h2>
+                <ul class="legend">
+                    <li><span class="legend-dot dot-root"></span>Root entry</li>
+                    <li><span class="legend-dot dot-tip"></span>Tip entry</li>
+                    <li><span class="legend-dot dot-entry"></span>Internal entry</li>
+                    <li><span class="legend-edge edge-tree"></span>Tree parent</li>
+                    <li><span class="legend-edge edge-subtree"></span>Subtree parent</li>
+                    <li><span class="legend-edge edge-unknown"></span>Unknown / future link</li>
+                </ul>
+            </section>
+        </aside>
+
+        <section class="canvas-wrap">
+            <svg id="dag" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <marker id="arrow-tree" viewBox="0 0 10 10" refX="9" refY="5"
+                            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                        <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+                    </marker>
+                    <marker id="arrow-subtree" viewBox="0 0 10 10" refX="9" refY="5"
+                            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                        <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+                    </marker>
+                </defs>
+                <g id="viewport">
+                    <g id="edges-layer"></g>
+                    <g id="nodes-layer"></g>
+                </g>
+            </svg>
+            <div class="hint" id="canvas-hint">
+                Drag to pan · scroll to zoom · click an entry for details
+            </div>
+            <div class="error-banner" id="error-banner" hidden></div>
+        </section>
+
+        <aside class="details" id="details-panel">
+            <section class="panel">
+                <h2>Entry details</h2>
+                <p class="muted" id="details-empty">Click a node in the graph to inspect it.</p>
+                <div id="details-body" hidden>
+                    <dl class="kv">
+                        <dt>ID</dt><dd id="d-id" class="mono"></dd>
+                        <dt>Height</dt><dd id="d-height" class="mono"></dd>
+                        <dt>Root</dt><dd id="d-root" class="mono"></dd>
+                        <dt>Flags</dt><dd id="d-flags"></dd>
+                        <dt>Canonical size</dt><dd id="d-size" class="mono"></dd>
+                    </dl>
+                    <h3>Tree parents</h3>
+                    <ul id="d-tree-parents" class="link-list"></ul>
+                    <h3>Subtrees</h3>
+                    <div id="d-subtrees"></div>
+                    <h3>Signature</h3>
+                    <pre id="d-sig" class="mono code"></pre>
+                </div>
+            </section>
+        </aside>
+    </main>
+
+    <script src="/static/viz.js"></script>
+</body>
+</html>

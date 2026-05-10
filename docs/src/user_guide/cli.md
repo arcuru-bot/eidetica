@@ -22,6 +22,10 @@ eidetica serve [OPTIONS]
 | `--data-dir`     | `-d`  | current dir | `EIDETICA_DATA_DIR`     | Data directory for storage files                                |
 | `--postgres-url` |       | —           | `EIDETICA_POSTGRES_URL` | PostgreSQL connection URL (required when backend is `postgres`) |
 
+The dashboard at `/dashboard` includes a **Visualize DAG** action on every
+tracked database that opens an interactive graph view of the database's
+Merkle-DAG. See the [DAG Visualizer](visualizer.md) guide for details.
+
 ### `health`
 
 Checks the health of a running Eidetica server by querying its `/health` endpoint.

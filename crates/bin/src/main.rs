@@ -6,6 +6,7 @@ mod commands;
 mod output;
 mod session;
 mod templates;
+mod viz;
 
 use cli::{Cli, Commands, DbCommands};
 use output::OutputFormat;
