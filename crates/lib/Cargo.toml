@@ -78,3 +78,7 @@ harness = false
 [[bench]]
 name = "table_cache_benchmarks"
 harness = false
+
+[[bench]]
+name = "sync_latency_benchmarks"
+harness = false
