@@ -1709,11 +1709,7 @@ impl Database {
     ///   skipped — they're treated as outside the "excluded" boundary,
     ///   which is the conservative direction (we may over-report rather
     ///   than under-report).
-    pub async fn ids_added(
-        &self,
-        previous_tips: &[ID],
-        post_tips: &[ID],
-    ) -> Result<Vec<ID>> {
+    pub async fn ids_added(&self, previous_tips: &[ID], post_tips: &[ID]) -> Result<Vec<ID>> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         if previous_tips == post_tips {
@@ -1896,8 +1892,7 @@ impl Database {
                 //    scoped). Parents outside the set are pre-settled
                 //    boundary entries and don't contribute to
                 //    in-degree.
-                let mut in_degree: HashMap<ID, usize> =
-                    HashMap::with_capacity(unverified.len());
+                let mut in_degree: HashMap<ID, usize> = HashMap::with_capacity(unverified.len());
                 let mut children: HashMap<ID, Vec<ID>> = HashMap::new();
                 for (id, entry) in &unverified {
                     let mut d = 0usize;
