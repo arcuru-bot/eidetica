@@ -3,8 +3,8 @@
 //! This module contains tests for complex merging scenarios including
 //! LCA computation, diamond patterns, and parent-aware state resolution.
 
-use eidetica::{crdt::doc::Value, store::DocStore};
 use eidetica::Snapshot;
+use eidetica::{crdt::doc::Value, store::DocStore};
 
 use super::helpers::*;
 use crate::helpers::*;
@@ -722,7 +722,10 @@ async fn test_find_merge_base_shallow_divergence() {
 
     // Create merge operation from both tips
     let merge_tips = vec![chain_a_tip.clone(), chain_b_tip.clone()];
-    let op_merge = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
+    let op_merge = tree
+        .new_transaction_at(&Snapshot::from(merge_tips.clone()))
+        .await
+        .unwrap();
     let subtree_merge = op_merge.get_store::<DocStore>("data").await.unwrap();
     subtree_merge.set("merged", "true").await.unwrap();
     let _merge_id = op_merge.commit().await.unwrap();
@@ -801,7 +804,10 @@ async fn test_find_merge_base_deep_divergence() {
 
     // Create merge operation from both tips
     let merge_tips = vec![chain_a_tip.clone(), chain_b_tip.clone()];
-    let op_merge = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
+    let op_merge = tree
+        .new_transaction_at(&Snapshot::from(merge_tips.clone()))
+        .await
+        .unwrap();
     let subtree_merge = op_merge.get_store::<DocStore>("data").await.unwrap();
     subtree_merge.set("deep_merged", "true").await.unwrap();
     let _merge_id = op_merge.commit().await.unwrap();
@@ -880,7 +886,10 @@ async fn test_find_merge_base_very_deep_chains() {
 
     // Create merge operation from both tips
     let merge_tips = vec![chain_a_tip.clone(), chain_b_tip.clone()];
-    let op_merge = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
+    let op_merge = tree
+        .new_transaction_at(&Snapshot::from(merge_tips.clone()))
+        .await
+        .unwrap();
     let subtree_merge = op_merge.get_store::<DocStore>("data").await.unwrap();
     subtree_merge.set("very_deep_merged", "true").await.unwrap();
     let _merge_id = op_merge.commit().await.unwrap();
@@ -960,7 +969,10 @@ async fn test_find_merge_base_actually_called() {
 
     // Create merge transaction with BOTH tips
     let merge_tips = vec![chain_a_tip.clone(), chain_b_tip.clone()];
-    let op_merge = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
+    let op_merge = tree
+        .new_transaction_at(&Snapshot::from(merge_tips.clone()))
+        .await
+        .unwrap();
     let subtree_merge = op_merge.get_store::<DocStore>("data").await.unwrap();
 
     // THIS is the key: read state DURING the merge transaction

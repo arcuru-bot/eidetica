@@ -109,7 +109,10 @@ pub struct DiamondIds {
 /// Create a merge operation from diamond pattern
 pub async fn create_merge_from_diamond(tree: &Database, diamond: &DiamondIds) -> ID {
     let merge_op = tree
-        .new_transaction_at(&Snapshot::from([diamond.left.clone(), diamond.right.clone()]))
+        .new_transaction_at(&Snapshot::from([
+            diamond.left.clone(),
+            diamond.right.clone(),
+        ]))
         .await
         .unwrap();
     let merge_store = merge_op.get_store::<DocStore>("data").await.unwrap();
@@ -288,7 +291,10 @@ pub struct LcaTestIds {
 
 /// Verify that LCA path finding includes all expected data
 pub async fn assert_lca_path_completeness(tree: &Database, tips: &[ID], expected_keys: &[&str]) {
-    let txn = tree.new_transaction_at(&Snapshot::from(tips)).await.unwrap();
+    let txn = tree
+        .new_transaction_at(&Snapshot::from(tips))
+        .await
+        .unwrap();
     let store = txn.get_store::<DocStore>("data").await.unwrap();
     let state = store.get_all().await.unwrap();
 
@@ -307,7 +313,10 @@ pub async fn test_deterministic_operations(tree: &Database, tips: &[ID], iterati
     let mut results = Vec::new();
 
     for _i in 0..iterations {
-        let txn = tree.new_transaction_at(&Snapshot::from(tips)).await.unwrap();
+        let txn = tree
+            .new_transaction_at(&Snapshot::from(tips))
+            .await
+            .unwrap();
         let store = txn.get_store::<DocStore>("data").await.unwrap();
         let state = store.get_all().await.unwrap();
         results.push(state);

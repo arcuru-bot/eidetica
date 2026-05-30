@@ -371,13 +371,16 @@ async fn test_complete_delegation_workflow() {
     let txn = main_tree.new_transaction().await.unwrap();
     let settings = txn.get_settings().unwrap();
     settings
-        .add_delegated_tree(&delegated_tree.root_id().clone(),DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                max: Permission::Write(10),
-                min: Some(Permission::Read),
+        .add_delegated_tree(
+            &delegated_tree.root_id().clone(),
+            DelegatedTreeRef {
+                permission_bounds: PermissionBounds {
+                    max: Permission::Write(10),
+                    min: Some(Permission::Read),
+                },
+                snapshot: Snapshot::from(delegated_tips.clone()),
             },
-            snapshot: Snapshot::from(delegated_tips.clone()),
-        })
+        )
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -452,13 +455,16 @@ async fn test_delegated_tree_requires_tips() {
     let txn = main_tree.new_transaction().await.unwrap();
     let settings = txn.get_settings().unwrap();
     settings
-        .add_delegated_tree(&delegated_tree.root_id().clone(),DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                max: Permission::Write(10),
-                min: Some(Permission::Read),
+        .add_delegated_tree(
+            &delegated_tree.root_id().clone(),
+            DelegatedTreeRef {
+                permission_bounds: PermissionBounds {
+                    max: Permission::Write(10),
+                    min: Some(Permission::Read),
+                },
+                snapshot: Snapshot::from(vec![ID::from_bytes("some_tip")]),
             },
-            snapshot: Snapshot::from(vec![ID::from_bytes("some_tip")]),
-        })
+        )
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -551,18 +557,25 @@ async fn test_nested_delegation_with_permission_clamping() {
     let txn = intermediate_tree.new_transaction().await.unwrap();
     let settings = txn.get_settings().unwrap();
     settings
-        .add_delegated_tree(&user_tree.root_id().clone(),DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                max: Permission::Write(8), // Clamp Admin(3) to Write(8)
-                min: Some(Permission::Read),
+        .add_delegated_tree(
+            &user_tree.root_id().clone(),
+            DelegatedTreeRef {
+                permission_bounds: PermissionBounds {
+                    max: Permission::Write(8), // Clamp Admin(3) to Write(8)
+                    min: Some(Permission::Read),
+                },
+                snapshot: Snapshot::from(user_tips.clone()),
             },
-            snapshot: Snapshot::from(user_tips.clone()),
-        })
+        )
         .await
         .unwrap();
     txn.commit().await.unwrap();
 
-    let intermediate_tips = intermediate_tree.current_snapshot().await.unwrap().into_tips();
+    let intermediate_tips = intermediate_tree
+        .current_snapshot()
+        .await
+        .unwrap()
+        .into_tips();
 
     // 3. Create main tree that delegates to intermediate tree
     // Signing key stays at Admin(0) — matches original test intent.
@@ -578,13 +591,16 @@ async fn test_nested_delegation_with_permission_clamping() {
     let txn = main_tree.new_transaction().await.unwrap();
     let settings = txn.get_settings().unwrap();
     settings
-        .add_delegated_tree(&intermediate_tree.root_id().clone(),DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                max: Permission::Write(5), // Less restrictive than Write(8)
-                min: Some(Permission::Read),
+        .add_delegated_tree(
+            &intermediate_tree.root_id().clone(),
+            DelegatedTreeRef {
+                permission_bounds: PermissionBounds {
+                    max: Permission::Write(5), // Less restrictive than Write(8)
+                    min: Some(Permission::Read),
+                },
+                snapshot: Snapshot::from(intermediate_tips.clone()),
             },
-            snapshot: Snapshot::from(intermediate_tips.clone()),
-        })
+        )
         .await
         .unwrap();
     txn.commit().await.unwrap();

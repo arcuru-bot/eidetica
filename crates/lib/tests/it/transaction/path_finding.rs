@@ -3,8 +3,8 @@
 //! This module contains tests for complex scenarios involving LCA (Lowest Common Ancestor)
 //! computation, path finding, and deterministic ordering in diamond and merge patterns.
 
-use eidetica::{entry::ID, store::DocStore};
 use eidetica::Snapshot;
+use eidetica::{entry::ID, store::DocStore};
 
 use super::helpers::*;
 use crate::helpers::*;
@@ -445,7 +445,10 @@ async fn test_complex_path_finding_scenario() {
     // Create two merges
     let merge1_op = ctx
         .database()
-        .new_transaction_at(&Snapshot::from([extended_ids[0].clone(), extended_ids[1].clone()]))
+        .new_transaction_at(&Snapshot::from([
+            extended_ids[0].clone(),
+            extended_ids[1].clone(),
+        ]))
         .await
         .unwrap();
     let merge1_store = merge1_op.get_store::<DocStore>("data").await.unwrap();
@@ -454,7 +457,10 @@ async fn test_complex_path_finding_scenario() {
 
     let merge2_op = ctx
         .database()
-        .new_transaction_at(&Snapshot::from([extended_ids[2].clone(), extended_ids[3].clone()]))
+        .new_transaction_at(&Snapshot::from([
+            extended_ids[2].clone(),
+            extended_ids[3].clone(),
+        ]))
         .await
         .unwrap();
     let merge2_store = merge2_op.get_store::<DocStore>("data").await.unwrap();
@@ -683,7 +689,10 @@ async fn test_multi_tip_merge_state_caching() {
     // Read state with multiple tips - this should populate the cache
     let tx = ctx
         .database()
-        .new_transaction_at(&Snapshot::from([diamond.left.clone(), diamond.right.clone()]))
+        .new_transaction_at(&Snapshot::from([
+            diamond.left.clone(),
+            diamond.right.clone(),
+        ]))
         .await
         .unwrap();
     let store = tx.get_store::<DocStore>("data").await.unwrap();
@@ -713,7 +722,10 @@ async fn test_multi_tip_merge_state_caching() {
     // Read again - should hit cache and return same result
     let tx2 = ctx
         .database()
-        .new_transaction_at(&Snapshot::from([diamond.left.clone(), diamond.right.clone()]))
+        .new_transaction_at(&Snapshot::from([
+            diamond.left.clone(),
+            diamond.right.clone(),
+        ]))
         .await
         .unwrap();
     let store2 = tx2.get_store::<DocStore>("data").await.unwrap();
@@ -751,7 +763,10 @@ async fn test_multi_tip_cache_key_is_order_independent() {
     // Read with tips in order [left, right]
     let tx1 = ctx
         .database()
-        .new_transaction_at(&Snapshot::from([diamond.left.clone(), diamond.right.clone()]))
+        .new_transaction_at(&Snapshot::from([
+            diamond.left.clone(),
+            diamond.right.clone(),
+        ]))
         .await
         .unwrap();
     let store1 = tx1.get_store::<DocStore>("data").await.unwrap();
@@ -791,7 +806,10 @@ async fn test_multi_tip_cache_key_is_order_independent() {
     // Read with tips in REVERSE order [right, left]
     let tx2 = ctx
         .database()
-        .new_transaction_at(&Snapshot::from([diamond.right.clone(), diamond.left.clone()]))
+        .new_transaction_at(&Snapshot::from([
+            diamond.right.clone(),
+            diamond.left.clone(),
+        ]))
         .await
         .unwrap();
     let store2 = tx2.get_store::<DocStore>("data").await.unwrap();

@@ -3,8 +3,8 @@
 //! This module contains tests for complex integration scenarios including
 //! concurrent modifications, merging, authentication, and cross-subtree operations.
 
-use eidetica::store::{DocStore, Table};
 use eidetica::Snapshot;
+use eidetica::store::{DocStore, Table};
 
 use super::helpers::*;
 use crate::helpers::*;

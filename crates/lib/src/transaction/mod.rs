@@ -699,8 +699,11 @@ impl Transaction {
 
         // Initialize subtree tips if needed (async operations)
         if needs_init {
-            let current_database_snapshot =
-                self.db.backend()?.current_snapshot(self.db.root_id()).await?;
+            let current_database_snapshot = self
+                .db
+                .backend()?
+                .current_snapshot(self.db.root_id())
+                .await?;
 
             // Set-equal comparison via Snapshot canonical form.
             let parents_snapshot = Snapshot::from(main_parents.clone());

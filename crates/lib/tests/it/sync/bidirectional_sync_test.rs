@@ -280,14 +280,16 @@ async fn test_bidirectional_sync_no_common_ancestor_issue() -> Result<()> {
         .expect("Failed to get backend")
         .current_snapshot(&room_id)
         .await
-        .expect("Failed to get tips").into_tips();
+        .expect("Failed to get tips")
+        .into_tips();
     println!("🔍 Device 1 current tree tips before adding C: {current_tips:?}");
     let current_subtree_tips = device1_database
         .backend()
         .expect("Failed to get backend")
         .store_snapshot(&room_id, "messages")
         .await
-        .expect("Failed to get store tips").into_tips();
+        .expect("Failed to get store tips")
+        .into_tips();
     println!("🔍 Device 1 current messages store tips before adding C: {current_subtree_tips:?}");
 
     // Debug: Show all entries in the tree to understand the DAG structure

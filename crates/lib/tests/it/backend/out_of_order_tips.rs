@@ -79,7 +79,11 @@ async fn test_store_tips_out_of_order_arrival() {
     backend.put_verified(entry_a).await.unwrap();
 
     // Verify A is the only store tip
-    let tips = backend.store_snapshot(&id_a, store_name).await.unwrap().into_tips();
+    let tips = backend
+        .store_snapshot(&id_a, store_name)
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(tips.len(), 1, "Initially A should be the only store tip");
     assert_eq!(tips[0], id_a);
 
@@ -103,14 +107,22 @@ async fn test_store_tips_out_of_order_arrival() {
     backend.put_verified(entry_c).await.unwrap();
 
     // C should be a store tip
-    let tips = backend.store_snapshot(&id_a, store_name).await.unwrap().into_tips();
+    let tips = backend
+        .store_snapshot(&id_a, store_name)
+        .await
+        .unwrap()
+        .into_tips();
     assert!(tips.contains(&id_c), "C should be a store tip");
 
     // Now store B
     backend.put_verified(entry_b).await.unwrap();
 
     // After storing B, only C should be a store tip
-    let tips = backend.store_snapshot(&id_a, store_name).await.unwrap().into_tips();
+    let tips = backend
+        .store_snapshot(&id_a, store_name)
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(
         tips.len(),
         1,

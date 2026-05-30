@@ -39,7 +39,8 @@ async fn test_bootstrap_sync_from_zero_state() {
         .backend()
         .current_snapshot(&test_tree_id)
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     println!("🧪 DEBUG: Server tips: {server_tips:?}");
 
     // Start server
@@ -86,7 +87,10 @@ async fn test_bootstrap_sync_from_zero_state() {
     );
 
     // Verify client has tips
-    let tips = client_instance.backend().current_snapshot(&test_tree_id).await;
+    let tips = client_instance
+        .backend()
+        .current_snapshot(&test_tree_id)
+        .await;
     println!("🧪 DEBUG: Client tips result: {tips:?}");
     match tips {
         Ok(tip_vec) => {
@@ -183,7 +187,8 @@ async fn test_incremental_sync_after_bootstrap() {
         .backend()
         .current_snapshot(&test_tree_id)
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert!(
         tips.contains(&entry2_id),
         "Client tips should include the new entry"

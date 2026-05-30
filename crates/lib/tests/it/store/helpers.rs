@@ -3,9 +3,9 @@
 //! This module provides utilities for testing Doc, YDoc, and Table subtree functionality
 //! including basic operations, CRUD operations, search functionality, and integration scenarios.
 
+use eidetica::Snapshot;
 #[cfg(feature = "y-crdt")]
 use eidetica::store::{YDoc, YrsBinary};
-use eidetica::Snapshot;
 use eidetica::{
     Database, Registered, Transaction,
     crdt::{

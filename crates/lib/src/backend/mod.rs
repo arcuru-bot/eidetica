@@ -397,7 +397,8 @@ pub trait BackendImpl: Send + Sync + Any {
     /// # Returns
     /// A `Result` containing a vector of `Entry` objects in the store up to the given snapshot,
     /// sorted topologically, or an error.
-    async fn get_store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>>;
+    async fn get_store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot)
+    -> Result<Vec<Entry>>;
 
     // === CRDT State Cache Methods ===
     //

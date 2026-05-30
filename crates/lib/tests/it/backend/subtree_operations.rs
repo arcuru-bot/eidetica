@@ -232,7 +232,11 @@ async fn test_get_store_tips() {
     backend.put_verified(entry_a).await.unwrap();
 
     // Initially, A is the only tip in subtree "sub1"
-    let sub1_tips = backend.store_snapshot(&root_id, "sub1").await.unwrap().into_tips();
+    let sub1_tips = backend
+        .store_snapshot(&root_id, "sub1")
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(sub1_tips.len(), 1);
     assert_eq!(sub1_tips[0], id_a);
 
@@ -247,7 +251,11 @@ async fn test_get_store_tips() {
     backend.put_verified(entry_b).await.unwrap();
 
     // Now B is the only tip in subtree "sub1"
-    let sub1_tips = backend.store_snapshot(&root_id, "sub1").await.unwrap().into_tips();
+    let sub1_tips = backend
+        .store_snapshot(&root_id, "sub1")
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(sub1_tips.len(), 1);
     assert_eq!(sub1_tips[0], id_b);
 
@@ -261,12 +269,20 @@ async fn test_get_store_tips() {
     backend.put_verified(entry_c).await.unwrap();
 
     // Check tips for subtree "sub1" (should still be just B)
-    let sub1_tips = backend.store_snapshot(&root_id, "sub1").await.unwrap().into_tips();
+    let sub1_tips = backend
+        .store_snapshot(&root_id, "sub1")
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(sub1_tips.len(), 1);
     assert_eq!(sub1_tips[0], id_b);
 
     // Check tips for subtree "sub2" (should be just C)
-    let sub2_tips = backend.store_snapshot(&root_id, "sub2").await.unwrap().into_tips();
+    let sub2_tips = backend
+        .store_snapshot(&root_id, "sub2")
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(sub2_tips.len(), 1);
     assert_eq!(sub2_tips[0], id_c);
 
@@ -284,11 +300,19 @@ async fn test_get_store_tips() {
     backend.put_verified(entry_d).await.unwrap();
 
     // Now D should be the tip for both subtrees
-    let sub1_tips = backend.store_snapshot(&root_id, "sub1").await.unwrap().into_tips();
+    let sub1_tips = backend
+        .store_snapshot(&root_id, "sub1")
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(sub1_tips.len(), 1);
     assert_eq!(sub1_tips[0], id_d);
 
-    let sub2_tips = backend.store_snapshot(&root_id, "sub2").await.unwrap().into_tips();
+    let sub2_tips = backend
+        .store_snapshot(&root_id, "sub2")
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(sub2_tips.len(), 1);
     assert_eq!(sub2_tips[0], id_d);
 }
@@ -359,7 +383,11 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
     backend.put_verified(entry_d).await.unwrap();
 
     // Verify current tips (fast path) - should be D
-    let current_tips = backend.store_snapshot(&root_id, subtree).await.unwrap().into_tips();
+    let current_tips = backend
+        .store_snapshot(&root_id, subtree)
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(current_tips.len(), 1);
     assert_eq!(current_tips[0], id_d);
 
@@ -369,7 +397,8 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
     let tips_at_a = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&id_a))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_at_a.len(), 1, "Tips at A should have 1 entry");
     assert_eq!(tips_at_a[0], id_a, "Tip at A should be A");
 
@@ -377,7 +406,8 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
     let tips_at_b = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&id_b))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_at_b.len(), 1, "Tips at B should have 1 entry");
     assert_eq!(tips_at_b[0], id_b, "Tip at B should be B");
 
@@ -385,7 +415,8 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
     let tips_at_c = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&id_c))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_at_c.len(), 1, "Tips at C should have 1 entry");
     assert_eq!(tips_at_c[0], id_c, "Tip at C should be C");
 
@@ -393,7 +424,8 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
     let tips_at_root = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&root_id))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_at_root.len(), 1, "Tips at root should have 1 entry");
     assert_eq!(tips_at_root[0], root_id, "Tip at root should be root");
 
@@ -401,7 +433,8 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
     let tips_at_ab = backend
         .store_snapshot_up_to(&root_id, subtree, &[id_a.clone(), id_b.clone()])
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_at_ab.len(), 1, "Tips at {{A, B}} should have 1 entry");
     assert_eq!(tips_at_ab[0], id_b, "Tip at {{A, B}} should be B");
 }
@@ -461,7 +494,11 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
     backend.put_verified(entry_c).await.unwrap();
 
     // Verify current tips (fast path) - should be C
-    let current_tips = backend.store_snapshot(&root_id, subtree).await.unwrap().into_tips();
+    let current_tips = backend
+        .store_snapshot(&root_id, subtree)
+        .await
+        .unwrap()
+        .into_tips();
     assert_eq!(current_tips.len(), 1);
     assert_eq!(current_tips[0], id_c);
 
@@ -471,7 +508,8 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
     let tips_at_a = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&id_a))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_at_a.len(), 1);
     assert_eq!(tips_at_a[0], id_a);
 
@@ -479,7 +517,8 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
     let tips_at_b = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&id_b))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_at_b.len(), 1);
     assert_eq!(tips_at_b[0], id_b);
 
@@ -487,7 +526,8 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
     let tips_at_ab = backend
         .store_snapshot_up_to(&root_id, subtree, &[id_a.clone(), id_b.clone()])
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     let tips_set: HashSet<_> = tips_at_ab.iter().collect();
     assert_eq!(
         tips_at_ab.len(),
@@ -507,7 +547,8 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
     let tips_at_root = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&root_id))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_at_root.len(), 1);
     assert_eq!(tips_at_root[0], root_id);
 }
@@ -580,7 +621,11 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     backend.put_verified(entry_d).await.unwrap();
 
     // Current tree tips are C and D (parallel branches)
-    let tree_tips = backend.current_snapshot(&root_id).await.unwrap().into_tips();
+    let tree_tips = backend
+        .current_snapshot(&root_id)
+        .await
+        .unwrap()
+        .into_tips();
     let tree_tips_set: HashSet<_> = tree_tips.iter().collect();
     assert_eq!(tree_tips.len(), 2);
     assert!(tree_tips_set.contains(&id_c));
@@ -592,7 +637,8 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     let sub1_tips_at_a = backend
         .store_snapshot_up_to(&root_id, "sub1", std::slice::from_ref(&id_a))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(sub1_tips_at_a.len(), 1);
     assert_eq!(sub1_tips_at_a[0], id_a);
 
@@ -600,7 +646,8 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     let sub1_tips_at_c = backend
         .store_snapshot_up_to(&root_id, "sub1", std::slice::from_ref(&id_c))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(sub1_tips_at_c.len(), 1);
     assert_eq!(sub1_tips_at_c[0], id_c);
 
@@ -608,7 +655,8 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     let sub1_tips_at_b = backend
         .store_snapshot_up_to(&root_id, "sub1", std::slice::from_ref(&id_b))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(
         sub1_tips_at_b.len(),
         1,
@@ -622,7 +670,8 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     let sub2_tips_at_b = backend
         .store_snapshot_up_to(&root_id, "sub2", std::slice::from_ref(&id_b))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(sub2_tips_at_b.len(), 1);
     assert_eq!(sub2_tips_at_b[0], id_b);
 
@@ -630,7 +679,8 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     let sub2_tips_at_d = backend
         .store_snapshot_up_to(&root_id, "sub2", std::slice::from_ref(&id_d))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(sub2_tips_at_d.len(), 1);
     assert_eq!(sub2_tips_at_d[0], id_d);
 
@@ -638,7 +688,8 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     let sub2_tips_at_a = backend
         .store_snapshot_up_to(&root_id, "sub2", std::slice::from_ref(&id_a))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(
         sub2_tips_at_a.len(),
         1,
@@ -651,7 +702,8 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     let sub1_tips_at_cd = backend
         .store_snapshot_up_to(&root_id, "sub1", &[id_c.clone(), id_d.clone()])
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(sub1_tips_at_cd.len(), 1);
     assert_eq!(sub1_tips_at_cd[0], id_c);
 }
@@ -691,7 +743,8 @@ async fn test_get_store_tips_up_to_entries_edge_cases() {
     let tips_empty = backend
         .store_snapshot_up_to(&root_id, subtree, &[])
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert!(
         tips_empty.is_empty(),
         "Tips with empty main_entries should be empty"
@@ -715,7 +768,8 @@ async fn test_get_store_tips_up_to_entries_edge_cases() {
     let tips_bad_subtree = backend
         .store_snapshot_up_to(&root_id, "nonexistent_subtree", std::slice::from_ref(&id_a))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert!(
         tips_bad_subtree.is_empty(),
         "Tips for non-existent subtree should be empty"
@@ -843,7 +897,11 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
     backend.put_verified(entry_i).await.unwrap();
 
     // Current tips should be H and I
-    let current_tips = backend.store_snapshot(&root_id, subtree).await.unwrap().into_tips();
+    let current_tips = backend
+        .store_snapshot(&root_id, subtree)
+        .await
+        .unwrap()
+        .into_tips();
     let current_tips_set: HashSet<_> = current_tips.iter().collect();
     assert_eq!(current_tips.len(), 2);
     assert!(current_tips_set.contains(&id_h));
@@ -859,7 +917,8 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
             &[id_a.clone(), id_b.clone(), id_c.clone()],
         )
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     let tips_abc_set: HashSet<_> = tips_abc.iter().collect();
     assert_eq!(
         tips_abc.len(),
@@ -878,7 +937,8 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
             &[id_d.clone(), id_e.clone(), id_f.clone(), id_g.clone()],
         )
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     let tips_defg_set: HashSet<_> = tips_defg.iter().collect();
     assert_eq!(
         tips_defg.len(),
@@ -894,7 +954,8 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
     let tips_ad = backend
         .store_snapshot_up_to(&root_id, subtree, &[id_a.clone(), id_d.clone()])
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_ad.len(), 1, "Tips at {{A, D}} should have 1 entry");
     assert_eq!(tips_ad[0], id_d, "Tip at {{A, D}} should be D");
 
@@ -902,7 +963,8 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
     let tips_e = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&id_e))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_e.len(), 1);
     assert_eq!(tips_e[0], id_e);
 
@@ -910,7 +972,8 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
     let tips_de = backend
         .store_snapshot_up_to(&root_id, subtree, &[id_d.clone(), id_e.clone()])
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     let tips_de_set: HashSet<_> = tips_de.iter().collect();
     assert_eq!(tips_de.len(), 2, "Tips at {{D, E}} should have 2 entries");
     assert!(tips_de_set.contains(&id_d));
@@ -920,7 +983,8 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
     let tips_h = backend
         .store_snapshot_up_to(&root_id, subtree, std::slice::from_ref(&id_h))
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_h.len(), 1);
     assert_eq!(tips_h[0], id_h);
 
@@ -932,7 +996,8 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
             &[id_d.clone(), id_e.clone(), id_h.clone()],
         )
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     assert_eq!(tips_deh.len(), 1, "Tips at {{D, E, H}} should have 1 entry");
     assert_eq!(tips_deh[0], id_h, "Tip at {{D, E, H}} should be H");
 
@@ -940,7 +1005,8 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
     let tips_hi = backend
         .store_snapshot_up_to(&root_id, subtree, &[id_h.clone(), id_i.clone()])
         .await
-        .unwrap().into_tips();
+        .unwrap()
+        .into_tips();
     let tips_hi_set: HashSet<_> = tips_hi.iter().collect();
     assert_eq!(tips_hi.len(), 2, "Tips at {{H, I}} should have 2 entries");
     assert!(tips_hi_set.contains(&id_h));

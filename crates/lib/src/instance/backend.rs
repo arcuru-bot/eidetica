@@ -147,9 +147,7 @@ impl Backend {
         store: &str,
         snapshot: &Snapshot,
     ) -> Result<Vec<Entry>> {
-        self.backend_impl
-            .get_store_at(tree, store, snapshot)
-            .await
+        self.backend_impl.get_store_at(tree, store, snapshot).await
     }
 
     /// Get cached CRDT state

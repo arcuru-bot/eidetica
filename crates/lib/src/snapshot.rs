@@ -18,12 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    Result,
-    backend::errors::BackendError,
-    entry::ID,
-    instance::backend::Backend,
-};
+use crate::{Result, backend::errors::BackendError, entry::ID, instance::backend::Backend};
 
 /// Identifier for a database state — a sorted, deduplicated set of DAG tips.
 ///

@@ -357,7 +357,10 @@ async fn test_settings_metadata_with_branching() {
 
     // Create merge operation
     let merge_tips = vec![settings_id.clone(), branch2_id.clone()];
-    let merge_op = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
+    let merge_op = tree
+        .new_transaction_at(&Snapshot::from(merge_tips.clone()))
+        .await
+        .unwrap();
     let merge_store = merge_op.get_store::<DocStore>("data").await.unwrap();
     merge_store.set("merged", "true").await.unwrap();
     let merge_id = merge_op.commit().await.unwrap();

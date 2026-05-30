@@ -3,8 +3,8 @@
 //! This module contains tests for fundamental Tree operations including
 //! entry creation, subtree operations, atomic operations, and tip management.
 
-use eidetica::{constants::SETTINGS, store::DocStore};
 use eidetica::Snapshot;
+use eidetica::{constants::SETTINGS, store::DocStore};
 
 use super::helpers::*;
 use crate::helpers::*;
@@ -28,7 +28,11 @@ async fn test_insert_into_tree() {
     let id2 = txn2.commit().await.expect("Failed to commit transaction");
 
     // Verify tips include id2
-    let tips = tree.current_snapshot().await.expect("Failed to get tips").into_tips();
+    let tips = tree
+        .current_snapshot()
+        .await
+        .expect("Failed to get tips")
+        .into_tips();
     assert!(tips.contains(&id2));
     assert!(!tips.contains(&id1)); // id1 should no longer be a tip
 
@@ -413,7 +417,11 @@ async fn test_get_tips() {
     let (_instance, tree) = setup_tree().await;
 
     // Initially, the tree should have one tip (the root entry)
-    let initial_tips = tree.current_snapshot().await.expect("Failed to get initial tips").into_tips();
+    let initial_tips = tree
+        .current_snapshot()
+        .await
+        .expect("Failed to get initial tips")
+        .into_tips();
     assert_eq!(
         initial_tips.len(),
         1,
@@ -424,7 +432,11 @@ async fn test_get_tips() {
     let entry1_id = add_data_to_subtree(&tree, "data", &[("key1", "value1")]).await;
 
     // Tips should now include entry1_id
-    let tips_after_op1 = tree.current_snapshot().await.expect("Failed to get tips after op1").into_tips();
+    let tips_after_op1 = tree
+        .current_snapshot()
+        .await
+        .expect("Failed to get tips after op1")
+        .into_tips();
     assert_eq!(
         tips_after_op1.len(),
         1,
@@ -443,7 +455,11 @@ async fn test_get_tips() {
     let entry2_id = add_data_to_subtree(&tree, "data", &[("key2", "value2")]).await;
 
     // Tips should now include entry2_id
-    let tips_after_op2 = tree.current_snapshot().await.expect("Failed to get tips after op2").into_tips();
+    let tips_after_op2 = tree
+        .current_snapshot()
+        .await
+        .expect("Failed to get tips after op2")
+        .into_tips();
     assert_eq!(
         tips_after_op2.len(),
         1,
@@ -522,7 +538,8 @@ async fn test_new_transaction_at() {
     let tips_after_branch = tree
         .current_snapshot()
         .await
-        .expect("Failed to get tips after branch").into_tips();
+        .expect("Failed to get tips after branch")
+        .into_tips();
     assert_eq!(
         tips_after_branch.len(),
         2,

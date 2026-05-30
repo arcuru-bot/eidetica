@@ -183,8 +183,7 @@ impl AuthSettings {
     /// The root could alternatively be recovered from `tree_ref.snapshot.root(backend)`,
     /// but requiring an explicit `root` keeps this call synchronous.
     pub fn add_delegated_tree(&mut self, root: &ID, tree_ref: DelegatedTreeRef) -> Result<()> {
-        self.inner
-            .set(format!("delegations.{root}"), tree_ref);
+        self.inner.set(format!("delegations.{root}"), tree_ref);
         Ok(())
     }
 

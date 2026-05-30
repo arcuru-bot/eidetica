@@ -182,13 +182,16 @@ async fn test_privilege_escalation_through_delegation() -> Result<()> {
     let settings_store = txn.get_settings()?;
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
-        .add_delegated_tree(&delegated_tree_root.clone(),DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                min: None,
-                max: Permission::Write(10), // Restrict to Write only
+        .add_delegated_tree(
+            &delegated_tree_root.clone(),
+            DelegatedTreeRef {
+                permission_bounds: PermissionBounds {
+                    min: None,
+                    max: Permission::Write(10), // Restrict to Write only
+                },
+                snapshot: Snapshot::from(delegated_tips.clone()),
             },
-            snapshot: Snapshot::from(delegated_tips.clone()),
-        })
+        )
         .await?;
     txn.commit().await?;
 
@@ -257,13 +260,16 @@ async fn test_delegation_with_tampered_tips() -> Result<()> {
     let settings_store = txn.get_settings()?;
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
-        .add_delegated_tree(&delegated_tree_root.clone(),DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                min: None,
-                max: Permission::Write(10),
+        .add_delegated_tree(
+            &delegated_tree_root.clone(),
+            DelegatedTreeRef {
+                permission_bounds: PermissionBounds {
+                    min: None,
+                    max: Permission::Write(10),
+                },
+                snapshot: Snapshot::from(real_tips.clone()),
             },
-            snapshot: Snapshot::from(real_tips.clone()),
-        })
+        )
         .await?;
     txn.commit().await?;
 
@@ -338,13 +344,16 @@ async fn test_delegation_mixed_key_statuses() -> Result<()> {
     let settings_store = txn.get_settings()?;
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
-        .add_delegated_tree(&delegated_tree_root.clone(),DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                min: None,
-                max: Permission::Write(10),
+        .add_delegated_tree(
+            &delegated_tree_root.clone(),
+            DelegatedTreeRef {
+                permission_bounds: PermissionBounds {
+                    min: None,
+                    max: Permission::Write(10),
+                },
+                snapshot: Snapshot::from(delegated_tips.clone()),
             },
-            snapshot: Snapshot::from(delegated_tips.clone()),
-        })
+        )
         .await?;
     txn.commit().await?;
 

@@ -451,7 +451,12 @@ impl BackendImpl for SqlxBackend {
         traversal::get_tree_from_tips(self, tree, tips).await
     }
 
-    async fn get_store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>> {
+    async fn get_store_at(
+        &self,
+        tree: &ID,
+        store: &str,
+        snapshot: &Snapshot,
+    ) -> Result<Vec<Entry>> {
         traversal::get_store_from_tips(self, tree, store, snapshot.tips()).await
     }
 

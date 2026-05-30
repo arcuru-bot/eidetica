@@ -3,8 +3,8 @@
 //! This module contains tests for Table subtree functionality including
 //! CRUD operations, search functionality, UUID generation, and multiple operations.
 
-use eidetica::store::Table;
 use eidetica::Snapshot;
+use eidetica::store::Table;
 
 use super::helpers::*;
 use crate::helpers::*;
