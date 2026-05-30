@@ -18,7 +18,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::entry::ID;
+use crate::{
+    Result,
+    backend::errors::BackendError,
+    entry::ID,
+    instance::backend::Backend,
+};
 
 /// Identifier for a database state — a sorted, deduplicated set of DAG tips.
 ///
@@ -70,6 +75,46 @@ impl Snapshot {
     /// Number of tips in this snapshot.
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    /// Returns the database root that all tips in this snapshot belong to.
+    ///
+    /// Walks each tip's stored `tree.root` (recovering it from the entry itself
+    /// for root entries) and asserts they all agree. Errors if the snapshot is
+    /// empty or if its tips span multiple databases (a malformed snapshot).
+    ///
+    /// The check is intentionally always-verified — silently returning the
+    /// first tip's root would hide a real bug class. If a profiler later finds
+    /// a hot caller, an explicit fast-path variant can be added; until then,
+    /// the verified semantics are the right default.
+    pub async fn root(&self, backend: &Backend) -> Result<ID> {
+        if self.0.is_empty() {
+            return Err(BackendError::EmptyEntryList {
+                operation: "Snapshot::root".to_string(),
+            }
+            .into());
+        }
+
+        let mut common: Option<ID> = None;
+        for tip in &self.0 {
+            let entry = backend.get(tip).await?;
+            // For root entries Entry::root() returns None — the root is the entry itself.
+            let root = entry.root().unwrap_or_else(|| entry.id());
+            match &common {
+                None => common = Some(root),
+                Some(prev) if prev != &root => {
+                    return Err(BackendError::TreeIntegrityViolation {
+                        reason: format!(
+                            "Snapshot tips span multiple databases: tip {tip} belongs to {root}, expected {prev}"
+                        ),
+                    }
+                    .into());
+                }
+                _ => {}
+            }
+        }
+
+        Ok(common.expect("snapshot is non-empty"))
     }
 }
 
@@ -263,5 +308,103 @@ mod tests {
         let snap_json = serde_json::to_string(&snap).unwrap();
         let vec_json = serde_json::to_string(snap.tips()).unwrap();
         assert_eq!(snap_json, vec_json);
+    }
+
+    mod root {
+        use std::sync::Arc;
+
+        use super::*;
+        use crate::backend::database::InMemory;
+        use crate::entry::Entry;
+        use crate::instance::backend::Backend;
+
+        fn test_backend() -> Backend {
+            Backend::new(Arc::new(InMemory::new()))
+        }
+
+        async fn put_root(backend: &Backend) -> ID {
+            let entry = Entry::root_builder()
+                .set_subtree_data("data", "root-data")
+                .build()
+                .expect("root entry should build");
+            let id = entry.id();
+            backend.put_verified(entry).await.unwrap();
+            id
+        }
+
+        async fn put_child(backend: &Backend, root: &ID, parent: &ID, label: &str) -> ID {
+            let entry = Entry::builder(root.clone())
+                .add_parent(parent.clone())
+                .set_subtree_data("data", label)
+                .build()
+                .expect("child entry should build");
+            let id = entry.id();
+            backend.put_verified(entry).await.unwrap();
+            id
+        }
+
+        #[tokio::test]
+        async fn empty_snapshot_errors() {
+            let backend = test_backend();
+            let err = Snapshot::EMPTY.root(&backend).await.unwrap_err();
+            assert!(format!("{err}").contains("Snapshot::root"));
+        }
+
+        #[tokio::test]
+        async fn single_tip_returns_database_root() {
+            let backend = test_backend();
+            let root = put_root(&backend).await;
+            let child = put_child(&backend, &root, &root, "child").await;
+
+            let snap = Snapshot::from([child]);
+            assert_eq!(snap.root(&backend).await.unwrap(), root);
+        }
+
+        #[tokio::test]
+        async fn root_entry_resolves_to_itself() {
+            let backend = test_backend();
+            let root = put_root(&backend).await;
+
+            let snap = Snapshot::from([root.clone()]);
+            assert_eq!(snap.root(&backend).await.unwrap(), root);
+        }
+
+        #[tokio::test]
+        async fn agreeing_tips_return_common_root() {
+            let backend = test_backend();
+            let root = put_root(&backend).await;
+            let left = put_child(&backend, &root, &root, "left").await;
+            let right = put_child(&backend, &root, &root, "right").await;
+
+            let snap = Snapshot::from([left, right]);
+            assert_eq!(snap.root(&backend).await.unwrap(), root);
+        }
+
+        #[tokio::test]
+        async fn disagreeing_tips_error() {
+            let backend = test_backend();
+            let root_a = put_root(&backend).await;
+            let child_a = put_child(&backend, &root_a, &root_a, "a").await;
+
+            // Distinct database (different root entry, different data).
+            let root_b = {
+                let entry = Entry::root_builder()
+                    .set_subtree_data("data", "different-root-data")
+                    .build()
+                    .expect("root entry should build");
+                let id = entry.id();
+                backend.put_verified(entry).await.unwrap();
+                id
+            };
+            let child_b = put_child(&backend, &root_b, &root_b, "b").await;
+
+            let snap = Snapshot::from([child_a, child_b]);
+            let err = snap.root(&backend).await.unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("span multiple databases"),
+                "expected multi-database error, got: {msg}"
+            );
+        }
     }
 }
