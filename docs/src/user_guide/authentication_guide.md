@@ -311,7 +311,7 @@ When you delegate to another database:
 # extern crate eidetica;
 # extern crate tokio;
 # use eidetica::{Instance, backend::database::Sqlite, crdt::Doc};
-# use eidetica::{Snapshot, auth::{DelegatedTreeRef, Permission, PermissionBounds}};
+# use eidetica::auth::{DelegatedTreeRef, Permission, PermissionBounds};
 # use eidetica::store::SettingsStore;
 #
 # #[tokio::main]
@@ -326,7 +326,8 @@ When you delegate to another database:
 #
 # // Create main project database
 # let project_database = user.create_database(Doc::new(), &default_key).await?;
-// Get Alice's database root and current snapshot
+// Capture Alice's database root and current state. The root keys the
+// delegation; the snapshot pins the state at the point of delegation.
 let user_root = alice_database.root_id().clone();
 let user_snapshot = alice_database.snapshot().await?;
 
@@ -334,7 +335,8 @@ let user_snapshot = alice_database.snapshot().await?;
 let transaction = project_database.new_transaction().await?;
 let settings = transaction.get_settings()?;
 
-settings.add_delegated_tree(&user_root, DelegatedTreeRef {
+settings.add_delegated_tree(DelegatedTreeRef {
+    root: user_root,
     permission_bounds: PermissionBounds {
         max: Permission::Write(15),
         min: Some(Permission::Read),
@@ -364,7 +366,7 @@ Delegations are stored in the **delegating database's** auth settings by the del
 # extern crate eidetica;
 # extern crate tokio;
 # use eidetica::{Instance, backend::database::Sqlite, crdt::Doc};
-# use eidetica::{Snapshot, auth::{DelegatedTreeRef, Permission, PermissionBounds}};
+# use eidetica::auth::{DelegatedTreeRef, Permission, PermissionBounds};
 # use eidetica::store::SettingsStore;
 #
 # #[tokio::main]
@@ -379,8 +381,10 @@ Delegations are stored in the **delegating database's** auth settings by the del
 # let project_db = user.create_database(Doc::new(), &default_key).await?;
 # let transaction = project_db.new_transaction().await?;
 # let settings = transaction.get_settings()?;
-// In project database: delegation stored by Alice's database root ID
-settings.add_delegated_tree(&alice_root, DelegatedTreeRef {
+// In project database: delegation is keyed by Alice's database root —
+// `add_delegated_tree` stores the ref under `delegations.<root>`.
+settings.add_delegated_tree(DelegatedTreeRef {
+    root: alice_root,
     snapshot: alice_snapshot,
     permission_bounds: PermissionBounds {
         max: Permission::Write(15),

@@ -569,10 +569,10 @@ impl Transaction {
 
     /// Get the subtree tips reachable from the given main tree entries.
     async fn get_subtree_tips(&self, subtree_name: &str, main_parents: &[ID]) -> Result<Vec<ID>> {
-        let boundary = Snapshot::for_database(self.db.root_id().clone(), main_parents.to_vec());
+        let boundary = Snapshot::from(main_parents.to_vec());
         self.db
             .backend()?
-            .store_snapshot_at(subtree_name, &boundary)
+            .store_snapshot_at(self.db.root_id(), subtree_name, &boundary)
             .await
             .map(Snapshot::into_tips)
     }
@@ -712,11 +712,10 @@ impl Transaction {
                     .into_tips()
             } else {
                 // This transaction uses custom tips - use special handler
-                let boundary =
-                    Snapshot::for_database(self.db.root_id().clone(), main_parents.clone());
+                let boundary = Snapshot::from(main_parents.clone());
                 self.db
                     .backend()?
-                    .store_snapshot_at(subtree_name, &boundary)
+                    .store_snapshot_at(self.db.root_id(), subtree_name, &boundary)
                     .await?
                     .into_tips()
             };
@@ -880,12 +879,11 @@ impl Transaction {
 
             // Step 2: Batch fetch all ancestors sorted by height (root first)
             // This single query replaces N recursive queries
-            let boundary =
-                Snapshot::for_database(self.db.root_id().clone(), vec![entry_id.clone()]);
+            let boundary = Snapshot::from([entry_id.clone()]);
             let entries = self
                 .db
                 .backend()?
-                .store_at(subtree_name, &boundary)
+                .store_at(self.db.root_id(), subtree_name, &boundary)
                 .await?;
 
             // Step 3: Merge all entries in order (already sorted by height, root first)
@@ -1077,7 +1075,7 @@ impl Transaction {
         let settings_snapshot = self
             .db
             .backend()?
-            .store_snapshot_at(SETTINGS, &db_snapshot)
+            .store_snapshot_at(self.db.root_id(), SETTINGS, &db_snapshot)
             .await?;
 
         // Clone the builder from RefCell (limit borrow scope to avoid holding across await)

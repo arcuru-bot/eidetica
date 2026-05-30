@@ -372,13 +372,13 @@ async fn test_complete_delegation_workflow() {
     let settings = txn.get_settings().unwrap();
     settings
         .add_delegated_tree(DelegatedTreeRef {
-                permission_bounds: PermissionBounds {
-                    max: Permission::Write(10),
-                    min: Some(Permission::Read),
-                },
-                snapshot: Snapshot::for_database(delegated_tree.root_id().clone(), delegated_tips.clone()),
+            root: delegated_tree.root_id().clone(),
+            permission_bounds: PermissionBounds {
+                max: Permission::Write(10),
+                min: Some(Permission::Read),
             },
-        )
+            snapshot: Snapshot::from(delegated_tips.clone()),
+        })
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -454,13 +454,13 @@ async fn test_delegated_tree_requires_tips() {
     let settings = txn.get_settings().unwrap();
     settings
         .add_delegated_tree(DelegatedTreeRef {
-                permission_bounds: PermissionBounds {
-                    max: Permission::Write(10),
-                    min: Some(Permission::Read),
-                },
-                snapshot: Snapshot::for_database(delegated_tree.root_id().clone(), vec![ID::from_bytes("some_tip")]),
+            root: delegated_tree.root_id().clone(),
+            permission_bounds: PermissionBounds {
+                max: Permission::Write(10),
+                min: Some(Permission::Read),
             },
-        )
+            snapshot: Snapshot::from([ID::from_bytes("some_tip")]),
+        })
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -554,13 +554,13 @@ async fn test_nested_delegation_with_permission_clamping() {
     let settings = txn.get_settings().unwrap();
     settings
         .add_delegated_tree(DelegatedTreeRef {
-                permission_bounds: PermissionBounds {
-                    max: Permission::Write(8), // Clamp Admin(3) to Write(8)
-                    min: Some(Permission::Read),
-                },
-                snapshot: Snapshot::for_database(user_tree.root_id().clone(), user_tips.clone()),
+            root: user_tree.root_id().clone(),
+            permission_bounds: PermissionBounds {
+                max: Permission::Write(8), // Clamp Admin(3) to Write(8)
+                min: Some(Permission::Read),
             },
-        )
+            snapshot: Snapshot::from(user_tips.clone()),
+        })
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -582,13 +582,13 @@ async fn test_nested_delegation_with_permission_clamping() {
     let settings = txn.get_settings().unwrap();
     settings
         .add_delegated_tree(DelegatedTreeRef {
-                permission_bounds: PermissionBounds {
-                    max: Permission::Write(5), // Less restrictive than Write(8)
-                    min: Some(Permission::Read),
-                },
-                snapshot: Snapshot::for_database(intermediate_tree.root_id().clone(), intermediate_tips.clone()),
+            root: intermediate_tree.root_id().clone(),
+            permission_bounds: PermissionBounds {
+                max: Permission::Write(5), // Less restrictive than Write(8)
+                min: Some(Permission::Read),
             },
-        )
+            snapshot: Snapshot::from(intermediate_tips.clone()),
+        })
         .await
         .unwrap();
     txn.commit().await.unwrap();

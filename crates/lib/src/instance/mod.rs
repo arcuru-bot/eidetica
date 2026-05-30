@@ -445,7 +445,9 @@ impl Instance {
         self.inner.backend.put(verification_status, entry).await
     }
 
-    /// Current snapshot of a tree.
+    /// Returns the current [`crate::Snapshot`] of `tree` — its DAG tips with
+    /// the root cached on the snapshot. See [`Database::snapshot`] for the
+    /// public entry point.
     pub(crate) async fn snapshot(
         &self,
         tree: &crate::entry::ID,

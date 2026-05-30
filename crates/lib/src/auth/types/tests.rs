@@ -230,6 +230,7 @@ fn test_delegated_tree_ref_serialization() {
 
     use crate::Snapshot;
     let tree_ref = DelegatedTreeRef {
+        root: ID::from_bytes("root123"),
         permission_bounds: bounds,
         snapshot: Snapshot::from([ID::from_bytes("tip1")]),
     };
@@ -240,6 +241,7 @@ fn test_delegated_tree_ref_serialization() {
 
     assert_eq!(tree_ref.permission_bounds.max, parsed.permission_bounds.max);
     assert_eq!(tree_ref.permission_bounds.min, parsed.permission_bounds.min);
+    assert_eq!(tree_ref.root, parsed.root);
     assert_eq!(tree_ref.snapshot, parsed.snapshot);
 }
 
@@ -308,6 +310,7 @@ fn test_permission_bounds_nested_value_roundtrip() {
 fn test_delegated_tree_ref_complete_roundtrip() {
     use crate::Snapshot;
     let tree_ref = DelegatedTreeRef {
+        root: ID::from_bytes("root123"),
         permission_bounds: PermissionBounds {
             max: Permission::Write(10),
             min: Some(Permission::Read),
@@ -321,6 +324,7 @@ fn test_delegated_tree_ref_complete_roundtrip() {
 
     assert_eq!(tree_ref.permission_bounds.max, parsed.permission_bounds.max);
     assert_eq!(tree_ref.permission_bounds.min, parsed.permission_bounds.min);
+    assert_eq!(tree_ref.root, parsed.root);
     assert_eq!(tree_ref.snapshot, parsed.snapshot);
 }
 

@@ -259,6 +259,7 @@ pub async fn create_delegation_ref(
     min_permission: Option<Permission>,
 ) -> Result<DelegatedTreeRef> {
     Ok(DelegatedTreeRef {
+        root: tree.root_id().clone(),
         permission_bounds: PermissionBounds {
             max: max_permission,
             min: min_permission,

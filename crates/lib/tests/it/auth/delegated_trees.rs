@@ -702,11 +702,12 @@ async fn test_delegated_tree_invalid_tips() -> Result<()> {
         let settings = txn.get_settings()?;
         // Manually create delegation ref with bogus tips
         let delegation_ref = DelegatedTreeRef {
+            root: delegated_tree_root.clone(),
             permission_bounds: PermissionBounds {
                 max: Permission::Write(5),
                 min: None,
             },
-            snapshot: Snapshot::for_database(delegated_tree_root.clone(), vec![bogus_tip.clone()]),
+            snapshot: Snapshot::from([bogus_tip.clone()]),
         };
         settings
             .add_delegated_tree(delegation_ref)

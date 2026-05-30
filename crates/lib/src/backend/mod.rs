@@ -231,17 +231,15 @@ pub trait BackendImpl: Send + Sync + Any {
         status: VerificationStatus,
     ) -> Result<Vec<ID>>;
 
-    /// Returns the current snapshot of a tree — the set of tip entry IDs.
+    /// Returns the current [`Snapshot`] of `tree` — its sorted, deduplicated
+    /// set of DAG tips.
     ///
-    /// Tips are defined as the set of entries within the specified tree
-    /// that have no children *within that same tree*. An entry is considered
-    /// a child of another if it lists the other entry in its `parents` list.
+    /// Tips are entries within `tree` that have no children *within that same
+    /// tree*: an entry is a child of another iff it lists the other entry in
+    /// its `parents` list.
     ///
     /// # Arguments
-    /// * `tree` - The root ID of the tree for which to find tips.
-    ///
-    /// # Returns
-    /// A `Result` containing a `Snapshot` (sorted, deduplicated set of tip IDs).
+    /// * `tree` - The root ID of the tree to snapshot.
     async fn snapshot(&self, tree: &ID) -> Result<Snapshot>;
 
     /// Returns the snapshot of a specific store within a given tree.
@@ -262,18 +260,18 @@ pub trait BackendImpl: Send + Sync + Any {
     /// Returns the store snapshot as of a specific main-tree snapshot.
     ///
     /// Finds all store entries reachable from the boundary's tips, then filters
-    /// to the ones that are tips within the store. The parent tree's root is
-    /// taken from `main_snapshot.require_root()`.
+    /// to the ones that are tips within the store.
     ///
     /// # Arguments
+    /// * `tree` - The root ID of the parent tree.
     /// * `store` - The name of the store for which to find tips.
-    /// * `main_snapshot` - Snapshot of the parent tree defining the boundary;
-    ///   must carry its cached root.
+    /// * `main_snapshot` - Snapshot of the parent tree defining the boundary.
     ///
     /// # Returns
     /// A `Result` containing a `Snapshot` of the store's tip IDs as of the boundary.
     async fn store_snapshot_at(
         &self,
+        tree: &ID,
         store: &str,
         main_snapshot: &Snapshot,
     ) -> Result<Snapshot>;
@@ -387,17 +385,16 @@ pub trait BackendImpl: Send + Sync + Any {
     /// Retrieves all entries belonging to a specific store at the given snapshot, sorted topologically.
     ///
     /// Returns entries that are ancestors of the provided store snapshot's tips.
-    /// The parent tree's root is taken from `snapshot.require_root()`.
     ///
     /// # Arguments
+    /// * `tree` - The root ID of the parent tree.
     /// * `store` - The name of the store to retrieve.
-    /// * `snapshot` - The store snapshot defining the state to read from;
-    ///   must carry its cached root.
+    /// * `snapshot` - The store snapshot defining the state to read from.
     ///
     /// # Returns
     /// A `Result` containing a vector of `Entry` objects in the store up to the given snapshot,
     /// sorted topologically, or an error.
-    async fn store_at(&self, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>>;
+    async fn store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>>;
 
     // === CRDT State Cache Methods ===
     //

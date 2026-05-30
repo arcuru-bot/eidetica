@@ -1,40 +1,35 @@
 //! Snapshot — an immutable identifier of a database state at a point in time.
 //!
-//! A `Snapshot` is the set of tip entry IDs that fully identifies the state
-//! of a `Database`. Content-addressing makes the mapping bijective: given a
-//! snapshot, the entries (and therefore all reachable content) are uniquely
-//! determined.
+//! A `Snapshot` is the canonical (sorted, deduplicated) set of DAG tip IDs
+//! that fully identifies the state of a `Database` or a `Store` within one.
+//! Content-addressing makes the mapping bijective: given a snapshot and the
+//! database root it belongs to, the entries (and therefore all reachable
+//! content) are uniquely determined.
 //!
 //! Use a `Snapshot` to pin a read view, anchor a transaction, or describe
 //! a state transition (e.g. `WriteEvent { from, to }`).
 //!
-//! Internally a snapshot is a sorted, deduplicated set of DAG tips plus an
-//! optional cached database root. The sorted+deduped invariant is enforced
-//! at every construction path; equality and hashing depend only on the tips
-//! (the root is a derived value).
-//!
-//! The user-facing name is `Snapshot`; `tips` is the structural noun used
-//! inside the data-structure layer. Local variables and accessors still
-//! talk about "tips" — `for tip in snapshot.tips()` reads naturally.
+//! `Snapshot` is intentionally scope-free: it carries *only* a set of tips.
+//! The database root is contextual — it's "the `Database` this snapshot came
+//! from" — and is supplied alongside the snapshot at API boundaries. Likewise
+//! a snapshot can describe either a database state or a store state; the
+//! distinction lives in the API method consuming the snapshot, not on the
+//! snapshot itself. Keeping `Snapshot` as just a canonical tip-set means no
+//! optional fields, no runtime "is the root set?" checks, and a wire format
+//! identical to `Vec<ID>`.
 
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::{Result, backend::errors::BackendError, entry::ID, instance::backend::Backend};
+use crate::entry::ID;
 
-/// Identifier for a database state — a sorted, deduplicated set of DAG tips
-/// with an optional cached database root.
+/// Identifier for a database state — a sorted, deduplicated set of DAG tips.
 ///
-/// Serialization is transparent (the wire form is a JSON/DAG-CBOR array of IDs,
-/// identical to a `Vec<ID>`). The cached root is not part of the wire format:
-/// callers that know the root populate it at construction time, callers that
-/// only see wire data leave it `None` and resolve via [`Snapshot::root`] when
-/// needed. Deserialization normalizes tips via `Snapshot::new`, so unsorted or
-/// duplicated input is canonicalized on read.
+/// Equality and hashing are set-equality on the tips. Serialization is
+/// transparent: the wire form is a bare array of IDs, identical to a
+/// `Vec<ID>`. Deserialization normalizes (sort + dedup), so unsorted or
+/// duplicated wire input is canonicalized on read.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
-    /// Cached database root. Populated when the constructor knew it; absent
-    /// after deserialize and after rootless construction. Not serialized.
-    root: Option<ID>,
     /// Sorted, deduplicated set of tip IDs.
     tips: Vec<ID>,
 }
@@ -57,33 +52,15 @@ impl<'de> Deserialize<'de> for Snapshot {
 
 impl Snapshot {
     /// A snapshot containing no tips — the state of a database with no entries.
-    pub const EMPTY: Snapshot = Snapshot {
-        root: None,
-        tips: Vec::new(),
-    };
+    pub const EMPTY: Snapshot = Snapshot { tips: Vec::new() };
 
-    /// Construct a snapshot from a vector of tips, with no cached root.
+    /// Construct a snapshot from a vector of tips.
     ///
-    /// Tips are sorted and deduplicated. Prefer [`Snapshot::for_database`]
-    /// when the database root is known at construction time — it lets callers
-    /// of [`Snapshot::root`] avoid a backend round-trip.
+    /// Tips are sorted and deduplicated.
     pub fn new(mut tips: Vec<ID>) -> Self {
         tips.sort();
         tips.dedup();
-        Self { root: None, tips }
-    }
-
-    /// Construct a snapshot bound to a known database root.
-    ///
-    /// The root is cached; [`Snapshot::root`] returns it without I/O.
-    /// Tips are sorted and deduplicated.
-    pub fn for_database(root: ID, mut tips: Vec<ID>) -> Self {
-        tips.sort();
-        tips.dedup();
-        Self {
-            root: Some(root),
-            tips,
-        }
+        Self { tips }
     }
 
     /// Borrow the tips as a sorted, deduplicated slice.
@@ -105,79 +82,9 @@ impl Snapshot {
     pub fn len(&self) -> usize {
         self.tips.len()
     }
-
-    /// Cached database root, if the snapshot was constructed with one.
-    ///
-    /// Returns `None` for snapshots built via [`Snapshot::new`] or restored
-    /// from wire data. Use [`Snapshot::root`] to resolve unconditionally.
-    pub fn known_root(&self) -> Option<&ID> {
-        self.root.as_ref()
-    }
-
-    /// Borrow the cached root or error.
-    ///
-    /// Used by APIs that require the snapshot to carry its root (backend
-    /// query methods). Callers holding a wire-restored snapshot must
-    /// resolve the root via [`Snapshot::root`] and rebuild with
-    /// [`Snapshot::for_database`] before passing it in.
-    pub fn require_root(&self) -> Result<&ID> {
-        self.root.as_ref().ok_or_else(|| {
-            BackendError::TreeIntegrityViolation {
-                reason: "Snapshot is missing its cached database root; \
-                         construct with Snapshot::for_database or resolve via snapshot.root(backend)"
-                    .to_string(),
-            }
-            .into()
-        })
-    }
-
-    /// Returns the database root that all tips in this snapshot belong to.
-    ///
-    /// Returns the cached root when present. Otherwise walks each tip's
-    /// stored `tree.root` (one backend read per tip) and asserts they all
-    /// agree. Errors if the snapshot is empty or if its tips span multiple
-    /// databases (a malformed snapshot).
-    ///
-    /// The walk is intentionally always-verified — silently returning the
-    /// first tip's root would hide a real bug class. Hot callers should
-    /// construct snapshots with [`Snapshot::for_database`] so the cached
-    /// root is returned immediately without I/O.
-    pub async fn root(&self, backend: &Backend) -> Result<ID> {
-        if let Some(root) = &self.root {
-            return Ok(root.clone());
-        }
-
-        if self.tips.is_empty() {
-            return Err(BackendError::EmptyEntryList {
-                operation: "Snapshot::root".to_string(),
-            }
-            .into());
-        }
-
-        let mut common: Option<ID> = None;
-        for tip in &self.tips {
-            let entry = backend.get(tip).await?;
-            // For root entries Entry::root() returns None — the root is the entry itself.
-            let root = entry.root().unwrap_or_else(|| entry.id());
-            match &common {
-                None => common = Some(root),
-                Some(prev) if prev != &root => {
-                    return Err(BackendError::TreeIntegrityViolation {
-                        reason: format!(
-                            "Snapshot tips span multiple databases: tip {tip} belongs to {root}, expected {prev}"
-                        ),
-                    }
-                    .into());
-                }
-                _ => {}
-            }
-        }
-
-        Ok(common.expect("snapshot is non-empty"))
-    }
 }
 
-/// Equality compares tips only — the cached root is derived data, not identity.
+/// Equality is set-equality on tips.
 impl PartialEq for Snapshot {
     fn eq(&self, other: &Self) -> bool {
         self.tips == other.tips
@@ -186,7 +93,6 @@ impl PartialEq for Snapshot {
 
 impl Eq for Snapshot {}
 
-/// Hash is over tips only, matching `PartialEq`.
 impl std::hash::Hash for Snapshot {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.tips.hash(state);
@@ -239,7 +145,6 @@ mod tests {
         assert!(Snapshot::EMPTY.is_empty());
         assert_eq!(Snapshot::EMPTY.len(), 0);
         assert_eq!(Snapshot::EMPTY.tips(), &[] as &[ID]);
-        assert_eq!(Snapshot::EMPTY.known_root(), None);
     }
 
     #[test]
@@ -266,48 +171,6 @@ mod tests {
         expected.sort();
         assert_eq!(with_dupes.len(), 2);
         assert_eq!(with_dupes.tips(), expected.as_slice());
-    }
-
-    #[test]
-    fn new_leaves_root_unset() {
-        let snap = Snapshot::new(vec![id(1)]);
-        assert_eq!(snap.known_root(), None);
-    }
-
-    #[test]
-    fn for_database_caches_root_and_normalizes_tips() {
-        let root = id(99);
-        let a = id(1);
-        let b = id(2);
-        let snap = Snapshot::for_database(root.clone(), vec![b.clone(), a.clone(), a.clone()]);
-        assert_eq!(snap.known_root(), Some(&root));
-        let mut expected = vec![a, b];
-        expected.sort();
-        assert_eq!(snap.tips(), expected.as_slice());
-    }
-
-    #[test]
-    fn equality_ignores_root() {
-        let a = id(1);
-        let b = id(2);
-        let rootless = Snapshot::new(vec![a.clone(), b.clone()]);
-        let with_root = Snapshot::for_database(id(99), vec![a, b]);
-        assert_eq!(rootless, with_root);
-    }
-
-    #[test]
-    fn hash_ignores_root() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let a = id(1);
-        let b = id(2);
-        let rootless = Snapshot::new(vec![a.clone(), b.clone()]);
-        let with_root = Snapshot::for_database(id(99), vec![a, b]);
-        let mut h1 = DefaultHasher::new();
-        rootless.hash(&mut h1);
-        let mut h2 = DefaultHasher::new();
-        with_root.hash(&mut h2);
-        assert_eq!(h1.finish(), h2.finish());
     }
 
     #[test]
@@ -394,15 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn serde_does_not_persist_cached_root() {
-        let snap = Snapshot::for_database(id(99), vec![id(1), id(2)]);
-        let json = serde_json::to_string(&snap).unwrap();
-        let parsed: Snapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.known_root(), None);
-        assert_eq!(parsed.tips(), snap.tips());
-    }
-
-    #[test]
     fn deserialize_normalizes_unsorted_wire_data() {
         // Simulate wire data written without the sorted invariant
         // (e.g. by an older client). The Snapshot deserializer must canonicalize.
@@ -435,114 +289,5 @@ mod tests {
         let snap_json = serde_json::to_string(&snap).unwrap();
         let vec_json = serde_json::to_string(snap.tips()).unwrap();
         assert_eq!(snap_json, vec_json);
-    }
-
-    mod root {
-        use std::sync::Arc;
-
-        use super::*;
-        use crate::backend::database::InMemory;
-        use crate::entry::Entry;
-        use crate::instance::backend::Backend;
-
-        fn test_backend() -> Backend {
-            Backend::new(Arc::new(InMemory::new()))
-        }
-
-        async fn put_root(backend: &Backend) -> ID {
-            let entry = Entry::root_builder()
-                .set_subtree_data("data", "root-data")
-                .build()
-                .expect("root entry should build");
-            let id = entry.id();
-            backend.put_verified(entry).await.unwrap();
-            id
-        }
-
-        async fn put_child(backend: &Backend, root: &ID, parent: &ID, label: &str) -> ID {
-            let entry = Entry::builder(root.clone())
-                .add_parent(parent.clone())
-                .set_subtree_data("data", label)
-                .build()
-                .expect("child entry should build");
-            let id = entry.id();
-            backend.put_verified(entry).await.unwrap();
-            id
-        }
-
-        #[tokio::test]
-        async fn empty_snapshot_errors() {
-            let backend = test_backend();
-            let err = Snapshot::EMPTY.root(&backend).await.unwrap_err();
-            assert!(format!("{err}").contains("Snapshot::root"));
-        }
-
-        #[tokio::test]
-        async fn single_tip_returns_database_root() {
-            let backend = test_backend();
-            let root = put_root(&backend).await;
-            let child = put_child(&backend, &root, &root, "child").await;
-
-            let snap = Snapshot::from([child]);
-            assert_eq!(snap.root(&backend).await.unwrap(), root);
-        }
-
-        #[tokio::test]
-        async fn root_entry_resolves_to_itself() {
-            let backend = test_backend();
-            let root = put_root(&backend).await;
-
-            let snap = Snapshot::from([root.clone()]);
-            assert_eq!(snap.root(&backend).await.unwrap(), root);
-        }
-
-        #[tokio::test]
-        async fn agreeing_tips_return_common_root() {
-            let backend = test_backend();
-            let root = put_root(&backend).await;
-            let left = put_child(&backend, &root, &root, "left").await;
-            let right = put_child(&backend, &root, &root, "right").await;
-
-            let snap = Snapshot::from([left, right]);
-            assert_eq!(snap.root(&backend).await.unwrap(), root);
-        }
-
-        #[tokio::test]
-        async fn disagreeing_tips_error() {
-            let backend = test_backend();
-            let root_a = put_root(&backend).await;
-            let child_a = put_child(&backend, &root_a, &root_a, "a").await;
-
-            // Distinct database (different root entry, different data).
-            let root_b = {
-                let entry = Entry::root_builder()
-                    .set_subtree_data("data", "different-root-data")
-                    .build()
-                    .expect("root entry should build");
-                let id = entry.id();
-                backend.put_verified(entry).await.unwrap();
-                id
-            };
-            let child_b = put_child(&backend, &root_b, &root_b, "b").await;
-
-            let snap = Snapshot::from([child_a, child_b]);
-            let err = snap.root(&backend).await.unwrap_err();
-            let msg = format!("{err}");
-            assert!(
-                msg.contains("span multiple databases"),
-                "expected multi-database error, got: {msg}"
-            );
-        }
-
-        #[tokio::test]
-        async fn cached_root_returned_without_backend_io() {
-            // Use a snapshot built with for_database whose tips don't exist
-            // in the backend. If the cached path is taken, no read is attempted.
-            let backend = test_backend();
-            let fabricated_root = id(42);
-            let fabricated_tip = id(43);
-            let snap = Snapshot::for_database(fabricated_root.clone(), vec![fabricated_tip]);
-            assert_eq!(snap.root(&backend).await.unwrap(), fabricated_root);
-        }
     }
 }

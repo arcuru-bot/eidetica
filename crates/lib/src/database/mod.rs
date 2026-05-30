@@ -794,12 +794,15 @@ impl Database {
         T::new(&txn, name.into()).await
     }
 
-    /// Returns the current snapshot of the database — the set of tip entry IDs.
+    /// Returns a [`Snapshot`] identifying the database's current state.
     ///
-    /// A snapshot uniquely identifies the database state at a point in time.
+    /// A snapshot is the sorted, deduplicated set of DAG tips that fully
+    /// determines the database content reachable from this state; content-
+    /// addressing makes the mapping bijective given the database root.
     ///
-    /// # Returns
-    /// A `Result` containing the current `Snapshot`.
+    /// Pass the result to [`Database::new_transaction_at`] to pin a transaction
+    /// to this exact state, or pair it with `Database::root_id()` in a
+    /// `DelegatedTreeRef` to record the state at the point of delegation.
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let instance = self.instance()?;
         instance.snapshot(&self.root).await

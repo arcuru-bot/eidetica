@@ -398,26 +398,24 @@ impl BackendImpl for SqlxBackend {
     }
 
     async fn snapshot(&self, tree: &ID) -> Result<Snapshot> {
-        traversal::get_tips(self, tree)
-            .await
-            .map(|tips| Snapshot::for_database(tree.clone(), tips))
+        traversal::get_tips(self, tree).await.map(Snapshot::new)
     }
 
     async fn store_snapshot(&self, tree: &ID, store: &str) -> Result<Snapshot> {
         traversal::get_store_tips(self, tree, store)
             .await
-            .map(|tips| Snapshot::for_database(tree.clone(), tips))
+            .map(Snapshot::new)
     }
 
     async fn store_snapshot_at(
         &self,
+        tree: &ID,
         store: &str,
         main_snapshot: &Snapshot,
     ) -> Result<Snapshot> {
-        let tree = main_snapshot.require_root()?.clone();
-        traversal::get_store_tips_up_to_entries(self, &tree, store, main_snapshot.tips())
+        traversal::get_store_tips_up_to_entries(self, tree, store, main_snapshot.tips())
             .await
-            .map(|tips| Snapshot::for_database(tree, tips))
+            .map(Snapshot::new)
     }
 
     async fn all_roots(&self) -> Result<Vec<ID>> {
@@ -453,8 +451,7 @@ impl BackendImpl for SqlxBackend {
         traversal::get_tree_from_tips(self, tree, tips).await
     }
 
-    async fn store_at(&self, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>> {
-        let tree = snapshot.require_root()?;
+    async fn store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>> {
         traversal::get_store_from_tips(self, tree, store, snapshot.tips()).await
     }
 

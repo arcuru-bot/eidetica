@@ -1,8 +1,9 @@
-//! Delegation system types for authentication
+//! Delegation system types for authentication.
 //!
-//! Defines references to delegated databases for the cross-database delegation system.
-//! A delegation is a `Snapshot` of the delegated database's state plus the permission
-//! bounds that clamp keys derived from that database.
+//! Defines references to delegated databases for the cross-database delegation
+//! system. A delegation is the delegated database's root ID, a [`Snapshot`] of
+//! its state at the point of delegation, and the permission bounds that clamp
+//! keys derived from that database.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,14 +12,17 @@ use crate::Snapshot;
 use crate::crdt::{CRDTError, Doc, doc::Value};
 use crate::entry::ID;
 
-/// Delegated tree reference stored in main tree's _settings.auth.
+/// Delegated tree reference stored in main tree's `_settings.auth`.
 ///
-/// The delegation is identified externally by the delegated database's root ID
-/// (used as the storage key in `AuthSettings`); the root is therefore not
-/// duplicated inside the reference itself. To recover the root from the snapshot
-/// for verification, call `snapshot.root(backend).await`.
+/// The reference is self-contained: it carries the delegated database's `root`,
+/// the permission bounds, and a snapshot of the delegated state. Storage in
+/// [`crate::auth::AuthSettings`] is keyed by `root`, so the field is
+/// denormalized — the reader recovers it directly from the ref rather than
+/// from the surrounding storage key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DelegatedTreeRef {
+    /// Root ID of the delegated tree.
+    pub root: ID,
     /// Permission bounds for keys derived from this delegated tree.
     #[serde(rename = "permission-bounds")]
     pub permission_bounds: PermissionBounds,
@@ -37,6 +41,7 @@ impl From<DelegatedTreeRef> for Value {
 impl From<DelegatedTreeRef> for Doc {
     fn from(dtref: DelegatedTreeRef) -> Doc {
         let mut doc = Doc::atomic();
+        doc.set("root", dtref.root.to_string());
         doc.set("permission_bounds", dtref.permission_bounds);
         let mut tips_doc = Doc::new();
         for (i, tip) in dtref.snapshot.tips().iter().enumerate() {
@@ -62,16 +67,27 @@ impl TryFrom<&Doc> for DelegatedTreeRef {
         };
         let permission_bounds = PermissionBounds::try_from(pb_doc)?;
 
-        // New wire format keys the snapshot under "snapshot"; legacy format
-        // nested it under "tree" with a denormalized "root" alongside "tips".
-        // The legacy root is ignored — content-addressing recovers it.
-        let snapshot = if let Some(Value::Doc(snap_doc)) = doc.get("snapshot") {
-            tips_from_indexed_doc(snap_doc)?
+        // New wire format keys the snapshot under "snapshot" with a top-level
+        // "root". Legacy format nested both under "tree" as
+        // {tree: {root, tips: {0:..., 1:...}}}.
+        let (root, snapshot) = if let Some(Value::Doc(snap_doc)) = doc.get("snapshot") {
+            let root = doc
+                .get_as::<&str>("root")
+                .ok_or_else(|| CRDTError::ElementNotFound {
+                    key: "root".to_string(),
+                })?;
+            (ID::parse(root)?, tips_from_indexed_doc(snap_doc)?)
         } else if let Some(Value::Doc(tree_doc)) = doc.get("tree") {
-            match tree_doc.get("tips") {
+            let root = tree_doc
+                .get_as::<&str>("root")
+                .ok_or_else(|| CRDTError::ElementNotFound {
+                    key: "tree.root".to_string(),
+                })?;
+            let tips = match tree_doc.get("tips") {
                 Some(Value::Doc(tips_doc)) => tips_from_indexed_doc(tips_doc)?,
                 _ => Snapshot::EMPTY,
-            }
+            };
+            (ID::parse(root)?, tips)
         } else {
             return Err(CRDTError::ElementNotFound {
                 key: "snapshot".to_string(),
@@ -80,6 +96,7 @@ impl TryFrom<&Doc> for DelegatedTreeRef {
         };
 
         Ok(DelegatedTreeRef {
+            root,
             permission_bounds,
             snapshot,
         })

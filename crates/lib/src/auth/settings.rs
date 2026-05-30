@@ -178,15 +178,10 @@ impl AuthSettings {
 
     /// Add or update a delegated tree reference.
     ///
-    /// The delegation is keyed by the delegated tree's root ID, taken from
-    /// `tree_ref.snapshot.require_root()`. Callers building a `DelegatedTreeRef`
-    /// from a `Database` get the root for free via
-    /// [`Database::snapshot`](crate::Database::snapshot); callers working from
-    /// a wire-restored snapshot must call [`Snapshot::root`](crate::Snapshot::root)
-    /// and rebuild with [`Snapshot::for_database`](crate::Snapshot::for_database)
-    /// before passing it here.
+    /// The delegation is keyed by `tree_ref.root` — the delegated database's
+    /// root ID, which the ref carries explicitly.
     pub fn add_delegated_tree(&mut self, tree_ref: DelegatedTreeRef) -> Result<()> {
-        let root = tree_ref.snapshot.require_root()?.clone();
+        let root = tree_ref.root.clone();
         self.inner.set(format!("delegations.{root}"), tree_ref);
         Ok(())
     }

@@ -93,7 +93,7 @@ async fn test_backend_get_store_from_tips() {
 
     // --- Test with single tip e2a ---
     let subtree_e2a = backend
-        .store_at(subtree_name, &Snapshot::for_database(root_entry_id.clone(), vec![e2a_id.clone()]))
+        .store_at(&root_entry_id, subtree_name, &Snapshot::from([e2a_id.clone()]))
         .await
         .expect("Failed to get subtree from tip e2a");
     // Should contain root and e2a (which have the subtree), but not e1 (no subtree) or e2b (not in history of tip e2a)
@@ -114,7 +114,7 @@ async fn test_backend_get_store_from_tips() {
 
     // --- Test with both tips e2a and e2b ---
     let subtree_both = backend
-        .store_at(subtree_name, &Snapshot::for_database(root_entry_id.clone(), vec![e2a_id.clone(), e2b_id.clone()]))
+        .store_at(&root_entry_id, subtree_name, &Snapshot::from([e2a_id.clone(), e2b_id.clone()]))
         .await
         .expect("Failed to get subtree from tips e2a, e2b");
     // Should contain root, e2a, e2b (all have the subtree)
@@ -139,7 +139,7 @@ async fn test_backend_get_store_from_tips() {
     // When given a tip that exists but doesn't have the specified store,
     // the result should be empty.
     let subtree_bad_name = backend
-        .store_at("bad_name", &Snapshot::for_database(root_entry_id.clone(), vec![e2a_id.clone()]))
+        .store_at(&root_entry_id, "bad_name", &Snapshot::from([e2a_id.clone()]))
         .await
         .expect("Getting subtree with bad name should succeed");
     assert!(
@@ -149,7 +149,7 @@ async fn test_backend_get_store_from_tips() {
 
     // --- Test with non-existent tip ---
     let subtree_bad_tip = backend
-        .store_at(subtree_name, &Snapshot::for_database(root_entry_id.clone(), vec![ID::from_bytes("bad_tip_id")]))
+        .store_at(&root_entry_id, subtree_name, &Snapshot::from([ID::from_bytes("bad_tip_id")]))
         .await
         .expect("Failed to get subtree with non-existent tip");
     assert!(
@@ -162,7 +162,7 @@ async fn test_backend_get_store_from_tips() {
     // the result should be empty because the tip doesn't belong to the specified tree.
     let bad_root_id_2: ID = ID::from_bytes("bad_root");
     let subtree_bad_root = backend
-        .store_at(subtree_name, &Snapshot::for_database(bad_root_id_2.clone(), vec![e1_id.clone()]))
+        .store_at(&bad_root_id_2, subtree_name, &Snapshot::from([e1_id.clone()]))
         .await
         .expect("Failed to get subtree with non-existent root");
     assert!(
@@ -375,7 +375,7 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
 
     // Query tips up to {A} - should return A as the tip
     let tips_at_a = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_a.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_a.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -384,7 +384,7 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
 
     // Query tips up to {B} - should return B as the tip
     let tips_at_b = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_b.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_b.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -393,7 +393,7 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
 
     // Query tips up to {C} - should return C as the tip
     let tips_at_c = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_c.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_c.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -402,7 +402,7 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
 
     // Query tips up to {root} - should return root as the tip
     let tips_at_root = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![root_id.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([root_id.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -411,7 +411,7 @@ async fn test_get_store_tips_up_to_entries_linear_chain() {
 
     // Query tips up to {A, B} - should return B (A is ancestor of B)
     let tips_at_ab = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_a.clone(), id_b.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_a.clone(), id_b.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -486,7 +486,7 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
 
     // Query tips up to {A} - should return A
     let tips_at_a = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_a.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_a.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -495,7 +495,7 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
 
     // Query tips up to {B} - should return B
     let tips_at_b = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_b.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_b.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -504,7 +504,7 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
 
     // Query tips up to {A, B} - should return BOTH A and B (neither is ancestor of the other)
     let tips_at_ab = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_a.clone(), id_b.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_a.clone(), id_b.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -525,7 +525,7 @@ async fn test_get_store_tips_up_to_entries_diamond_pattern() {
 
     // Query tips up to {root} - should return root
     let tips_at_root = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![root_id.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([root_id.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -611,7 +611,7 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
 
     // Query sub1 tips up to {A} - should return A
     let sub1_tips_at_a = backend
-        .store_snapshot_at("sub1", &Snapshot::for_database(root_id.clone(), vec![id_a.clone()]))
+        .store_snapshot_at(&root_id, "sub1", &Snapshot::from([id_a.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -620,7 +620,7 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
 
     // Query sub1 tips up to {C} - should return C
     let sub1_tips_at_c = backend
-        .store_snapshot_at("sub1", &Snapshot::for_database(root_id.clone(), vec![id_c.clone()]))
+        .store_snapshot_at(&root_id, "sub1", &Snapshot::from([id_c.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -629,7 +629,7 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
 
     // Query sub1 tips up to {B} - B is not in sub1, so only root is reachable
     let sub1_tips_at_b = backend
-        .store_snapshot_at("sub1", &Snapshot::for_database(root_id.clone(), vec![id_b.clone()]))
+        .store_snapshot_at(&root_id, "sub1", &Snapshot::from([id_b.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -644,7 +644,7 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
 
     // Query sub2 tips up to {B} - should return B
     let sub2_tips_at_b = backend
-        .store_snapshot_at("sub2", &Snapshot::for_database(root_id.clone(), vec![id_b.clone()]))
+        .store_snapshot_at(&root_id, "sub2", &Snapshot::from([id_b.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -653,7 +653,7 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
 
     // Query sub2 tips up to {D} - should return D
     let sub2_tips_at_d = backend
-        .store_snapshot_at("sub2", &Snapshot::for_database(root_id.clone(), vec![id_d.clone()]))
+        .store_snapshot_at(&root_id, "sub2", &Snapshot::from([id_d.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -662,7 +662,7 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
 
     // Query sub2 tips up to {A} - A is not in sub2, so only root is reachable
     let sub2_tips_at_a = backend
-        .store_snapshot_at("sub2", &Snapshot::for_database(root_id.clone(), vec![id_a.clone()]))
+        .store_snapshot_at(&root_id, "sub2", &Snapshot::from([id_a.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -676,7 +676,7 @@ async fn test_get_store_tips_up_to_entries_multiple_subtrees() {
     // Query sub1 tips up to {C, D} (both current tree tips)
     // Only C is in sub1, D is not, so tip should be C
     let sub1_tips_at_cd = backend
-        .store_snapshot_at("sub1", &Snapshot::for_database(root_id.clone(), vec![id_c.clone(), id_d.clone()]))
+        .store_snapshot_at(&root_id, "sub1", &Snapshot::from([id_c.clone(), id_d.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -717,7 +717,7 @@ async fn test_get_store_tips_up_to_entries_edge_cases() {
 
     // --- Edge case: empty main_entries ---
     let tips_empty = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::EMPTY)
         .await
         .unwrap()
         .into_tips();
@@ -730,7 +730,7 @@ async fn test_get_store_tips_up_to_entries_edge_cases() {
     // Backends may either return an error or an empty result for non-existent entries
     let fake_id: ID = ID::from_bytes("nonexistent_entry_12345");
     let result = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![fake_id]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([fake_id]))
         .await;
     match result {
         Err(_) => {} // InMemory backend returns error
@@ -742,7 +742,7 @@ async fn test_get_store_tips_up_to_entries_edge_cases() {
 
     // --- Edge case: non-existent subtree name returns empty ---
     let tips_bad_subtree = backend
-        .store_snapshot_at("nonexistent_subtree", &Snapshot::for_database(root_id.clone(), vec![id_a.clone()]))
+        .store_snapshot_at(&root_id, "nonexistent_subtree", &Snapshot::from([id_a.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -887,7 +887,7 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
 
     // Query tips up to {A, B, C} - should return A, B, C
     let tips_abc = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_a.clone(), id_b.clone(), id_c.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_a.clone(), id_b.clone(), id_c.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -903,7 +903,7 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
 
     // Query tips up to {D, E, F, G} - all four should be tips
     let tips_defg = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_d.clone(), id_e.clone(), id_f.clone(), id_g.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_d.clone(), id_e.clone(), id_f.clone(), id_g.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -920,7 +920,7 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
 
     // Query tips up to {A, D} - A is ancestor of D, so only D is tip
     let tips_ad = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_a.clone(), id_d.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_a.clone(), id_d.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -929,7 +929,7 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
 
     // Query tips up to {E} - should return E only
     let tips_e = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_e.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_e.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -938,7 +938,7 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
 
     // Query tips up to {D, E} - both D and E are tips (neither is ancestor of the other)
     let tips_de = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_d.clone(), id_e.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_d.clone(), id_e.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -949,7 +949,7 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
 
     // Query tips up to {H} - should return H only
     let tips_h = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_h.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_h.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -958,7 +958,7 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
 
     // Query tips up to {D, E, H} - D and E are ancestors of H, so only H is tip
     let tips_deh = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_d.clone(), id_e.clone(), id_h.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_d.clone(), id_e.clone(), id_h.clone()]))
         .await
         .unwrap()
         .into_tips();
@@ -967,7 +967,7 @@ async fn test_get_store_tips_up_to_entries_complex_dag() {
 
     // Query tips up to {H, I} (current tips)
     let tips_hi = backend
-        .store_snapshot_at(subtree, &Snapshot::for_database(root_id.clone(), vec![id_h.clone(), id_i.clone()]))
+        .store_snapshot_at(&root_id, subtree, &Snapshot::from([id_h.clone(), id_i.clone()]))
         .await
         .unwrap()
         .into_tips();
