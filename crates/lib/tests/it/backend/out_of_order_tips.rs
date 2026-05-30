@@ -28,7 +28,7 @@ async fn test_tree_tips_out_of_order_arrival() {
     backend.put_verified(entry_a).await.unwrap();
 
     // Verify A is the only tip
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert_eq!(tips.len(), 1, "Initially A should be the only tip");
     assert_eq!(tips[0], id_a);
 
@@ -49,7 +49,7 @@ async fn test_tree_tips_out_of_order_arrival() {
 
     // At this point, C is stored but its parent B is not
     // C should be a tip
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert!(tips.contains(&id_c), "C should be a tip");
 
     // Now store B (the parent of C)
@@ -57,7 +57,7 @@ async fn test_tree_tips_out_of_order_arrival() {
 
     // After storing B, only C should be a tip
     // B should NOT be a tip because C already references it as a parent
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert_eq!(tips.len(), 1, "Only C should be a tip after storing B");
     assert_eq!(tips[0], id_c, "The single tip should be C, not B");
 }
@@ -172,14 +172,14 @@ async fn test_diamond_tips_out_of_order_arrival() {
     backend.put_verified(entry_d).await.unwrap();
 
     // D should be a tip (its parents don't exist yet)
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert!(tips.contains(&id_d), "D should be a tip");
 
     // Store B
     backend.put_verified(entry_b).await.unwrap();
 
     // B should NOT be a tip (D references it)
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert!(
         !tips.contains(&id_b),
         "B should NOT be a tip (D is its child)"
@@ -191,7 +191,7 @@ async fn test_diamond_tips_out_of_order_arrival() {
 
     // C should NOT be a tip (D references it)
     // Only D should be a tip
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert_eq!(tips.len(), 1, "Only D should be a tip");
     assert_eq!(tips[0], id_d, "The single tip should be D");
 }
@@ -252,7 +252,7 @@ async fn test_partial_sync_with_gaps() {
     backend.put_verified(entry_b).await.unwrap();
 
     // After storing B: B is the only entry, so B is a tip
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert_eq!(tips.len(), 1, "After storing B: only B should be a tip");
     assert!(tips.contains(&id_b));
 
@@ -261,7 +261,7 @@ async fn test_partial_sync_with_gaps() {
     // After storing E: B and E are both tips
     // B has no children (C is not stored)
     // E has no children
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert_eq!(tips.len(), 2, "After storing E: B and E should be tips");
     assert!(tips.contains(&id_b), "B should be a tip (C is missing)");
     assert!(tips.contains(&id_e), "E should be a tip (no children)");
@@ -271,7 +271,7 @@ async fn test_partial_sync_with_gaps() {
     // After storing D: B and E are still the tips
     // D is NOT a tip because E references it as parent
     // B is still a tip because C is missing
-    let tips = backend.current_snapshot(&id_a).await.unwrap().into_tips();
+    let tips = backend.snapshot(&id_a).await.unwrap().into_tips();
     assert_eq!(
         tips.len(),
         2,

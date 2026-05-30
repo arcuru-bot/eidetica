@@ -307,7 +307,7 @@ async fn test_incremental_sync_tracks_tree_peer_relationship() {
     // Get current tips for incremental sync
     let tips = instance
         .backend()
-        .current_snapshot(&tree_id)
+        .snapshot(&tree_id)
         .await
         .unwrap()
         .into_tips();

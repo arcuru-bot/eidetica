@@ -253,19 +253,17 @@ impl SettingsStore {
         self.set_auth_key(pubkey, key).await
     }
 
-    /// Add a delegated tree reference to the settings
+    /// Add a delegated tree reference to the settings.
     ///
-    /// The delegation is stored by root tree ID, extracted from `tree_ref.tree.root`.
-    ///
-    /// # Arguments
-    /// * `tree_ref` - The delegated tree reference to add
-    ///
-    /// # Returns
-    /// Result indicating success or failure
+    /// The delegation is keyed by the delegated tree's root ID, taken from
+    /// `tree_ref.snapshot.require_root()`. Snapshots produced by
+    /// [`Database::snapshot`](crate::Database::snapshot) carry their root;
+    /// wire-restored snapshots must be re-rooted with
+    /// [`Snapshot::for_database`](crate::Snapshot::for_database) first.
     pub async fn add_delegated_tree(&self, tree_ref: DelegatedTreeRef) -> Result<()> {
-        let root_id = tree_ref.tree.root.to_string();
+        let root = tree_ref.snapshot.require_root()?.clone();
         self.inner
-            .set(format!("auth.delegations.{root_id}"), tree_ref)
+            .set(format!("auth.delegations.{root}"), tree_ref)
             .await
     }
 

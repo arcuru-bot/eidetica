@@ -166,12 +166,12 @@ async fn test_save_load_with_various_entries() {
 
     // Check tips match
     let orig_tips = backend
-        .current_snapshot(&root_id)
+        .snapshot(&root_id)
         .await
         .unwrap()
         .into_tips();
     let loaded_tips = loaded_backend
-        .current_snapshot(&root_id)
+        .snapshot(&root_id)
         .await
         .unwrap()
         .into_tips();

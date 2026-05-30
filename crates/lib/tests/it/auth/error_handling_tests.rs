@@ -3,13 +3,14 @@
 //! These tests cover error propagation, validation failures, backend issues,
 //! and security edge cases in the delegation system.
 
+use eidetica::Snapshot;
 use eidetica::{
     Result,
     auth::{
         AuthSettings,
         types::{
             AuthKey, DelegatedTreeRef, DelegationStep, KeyHint, KeyStatus, Permission,
-            PermissionBounds, SigKey, TreeReference,
+            PermissionBounds, SigKey,
         },
         validation::AuthValidator,
     },
@@ -65,10 +66,7 @@ async fn test_delegation_nonexistent_tree() -> Result<()> {
             min: None,
             max: Permission::Write(10),
         },
-        tree: TreeReference {
-            root: nonexistent_root_id.clone(),
-            tips: vec![ID::from_bytes("nonexistent_tip")],
-        },
+        snapshot: Snapshot::for_database(nonexistent_root_id.clone(), vec![ID::from_bytes("nonexistent_tip")]),
     };
 
     let mut new_auth_settings = tree.get_settings().await?.get_all().await?;
@@ -173,7 +171,7 @@ async fn test_privilege_escalation_through_delegation() -> Result<()> {
     let delegated_tree = user
         .create_database(delegated_settings, &admin_key_id)
         .await?;
-    let delegated_tips = delegated_tree.current_snapshot().await?.into_tips();
+    let delegated_tips = delegated_tree.snapshot().await?.into_tips();
 
     // Create main tree (signing key becomes Admin(0))
     let main_settings = Doc::new();
@@ -185,15 +183,13 @@ async fn test_privilege_escalation_through_delegation() -> Result<()> {
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
         .add_delegated_tree(DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                min: None,
-                max: Permission::Write(10), // Restrict to Write only
+                permission_bounds: PermissionBounds {
+                    min: None,
+                    max: Permission::Write(10), // Restrict to Write only
+                },
+                snapshot: Snapshot::for_database(delegated_tree_root.clone(), delegated_tips.clone()),
             },
-            tree: TreeReference {
-                root: delegated_tree_root.clone(),
-                tips: delegated_tips.clone(),
-            },
-        })
+        )
         .await?;
     txn.commit().await?;
 
@@ -251,7 +247,7 @@ async fn test_delegation_with_tampered_tips() -> Result<()> {
         .await?;
     txn.commit().await?;
 
-    let real_tips = delegated_tree.current_snapshot().await?.into_tips();
+    let real_tips = delegated_tree.snapshot().await?.into_tips();
 
     // Create main tree (signing key becomes Admin(0))
     let main_settings = Doc::new();
@@ -263,15 +259,13 @@ async fn test_delegation_with_tampered_tips() -> Result<()> {
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
         .add_delegated_tree(DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                min: None,
-                max: Permission::Write(10),
+                permission_bounds: PermissionBounds {
+                    min: None,
+                    max: Permission::Write(10),
+                },
+                snapshot: Snapshot::for_database(delegated_tree_root.clone(), real_tips.clone()),
             },
-            tree: TreeReference {
-                root: delegated_tree_root.clone(),
-                tips: real_tips.clone(),
-            },
-        })
+        )
         .await?;
     txn.commit().await?;
 
@@ -335,7 +329,7 @@ async fn test_delegation_mixed_key_statuses() -> Result<()> {
         .await?;
     txn.commit().await?;
 
-    let delegated_tips = delegated_tree.current_snapshot().await?.into_tips();
+    let delegated_tips = delegated_tree.snapshot().await?.into_tips();
 
     // Create main tree (signing key becomes Admin(0))
     let main_settings = Doc::new();
@@ -347,15 +341,13 @@ async fn test_delegation_mixed_key_statuses() -> Result<()> {
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
         .add_delegated_tree(DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                min: None,
-                max: Permission::Write(10),
+                permission_bounds: PermissionBounds {
+                    min: None,
+                    max: Permission::Write(10),
+                },
+                snapshot: Snapshot::for_database(delegated_tree_root.clone(), delegated_tips.clone()),
             },
-            tree: TreeReference {
-                root: delegated_tree_root.clone(),
-                tips: delegated_tips.clone(),
-            },
-        })
+        )
         .await?;
     txn.commit().await?;
 

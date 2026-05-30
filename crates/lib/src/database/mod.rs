@@ -528,7 +528,7 @@ impl Database {
                 }
 
                 // Get current tips for the delegated tree
-                let tips = match instance.backend().current_snapshot(delegated_root_id).await {
+                let tips = match instance.backend().snapshot(delegated_root_id).await {
                     Ok(snap) => snap.into_tips(),
                     Err(_) => continue,
                 };
@@ -742,7 +742,7 @@ impl Database {
     /// # Returns
     /// A `Result<Transaction>` containing the new atomic transaction
     pub async fn new_transaction(&self) -> Result<Transaction> {
-        let snapshot = self.current_snapshot().await?;
+        let snapshot = self.snapshot().await?;
         self.new_transaction_at(&snapshot).await
     }
 
@@ -800,9 +800,9 @@ impl Database {
     ///
     /// # Returns
     /// A `Result` containing the current `Snapshot`.
-    pub async fn current_snapshot(&self) -> Result<Snapshot> {
+    pub async fn snapshot(&self) -> Result<Snapshot> {
         let instance = self.instance()?;
-        instance.current_snapshot(&self.root).await
+        instance.snapshot(&self.root).await
     }
 
     /// Get the full `Entry` objects for the current tips of the main database branch.
@@ -811,7 +811,7 @@ impl Database {
     /// A `Result` containing a vector of the tip `Entry` objects or an error.
     pub async fn get_tip_entries(&self) -> Result<Vec<Entry>> {
         let instance = self.instance()?;
-        let snapshot = instance.current_snapshot(&self.root).await?;
+        let snapshot = instance.snapshot(&self.root).await?;
         let mut entries = Vec::new();
         for id in snapshot.tips() {
             entries.push(instance.get(id).await?);

@@ -738,7 +738,7 @@ impl BackgroundSync {
             let instance = self.instance()?;
             let our_tips: Vec<ID> = instance
                 .backend()
-                .current_snapshot(tree_id)
+                .snapshot(tree_id)
                 .await
                 .map_err(|e| SyncError::BackendError(format!("Failed to get local tips: {e}")))?
                 .into_tips();

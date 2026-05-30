@@ -569,9 +569,10 @@ impl Transaction {
 
     /// Get the subtree tips reachable from the given main tree entries.
     async fn get_subtree_tips(&self, subtree_name: &str, main_parents: &[ID]) -> Result<Vec<ID>> {
+        let boundary = Snapshot::for_database(self.db.root_id().clone(), main_parents.to_vec());
         self.db
             .backend()?
-            .store_snapshot_up_to(self.db.root_id(), subtree_name, main_parents)
+            .store_snapshot_at(subtree_name, &boundary)
             .await
             .map(Snapshot::into_tips)
     }
@@ -699,11 +700,7 @@ impl Transaction {
 
         // Initialize subtree tips if needed (async operations)
         if needs_init {
-            let current_database_snapshot = self
-                .db
-                .backend()?
-                .current_snapshot(self.db.root_id())
-                .await?;
+            let current_database_snapshot = self.db.backend()?.snapshot(self.db.root_id()).await?;
 
             // Set-equal comparison via Snapshot canonical form.
             let parents_snapshot = Snapshot::from(main_parents.clone());
@@ -715,9 +712,11 @@ impl Transaction {
                     .into_tips()
             } else {
                 // This transaction uses custom tips - use special handler
+                let boundary =
+                    Snapshot::for_database(self.db.root_id().clone(), main_parents.clone());
                 self.db
                     .backend()?
-                    .store_snapshot_up_to(self.db.root_id(), subtree_name, &main_parents)
+                    .store_snapshot_at(subtree_name, &boundary)
                     .await?
                     .into_tips()
             };
@@ -881,14 +880,12 @@ impl Transaction {
 
             // Step 2: Batch fetch all ancestors sorted by height (root first)
             // This single query replaces N recursive queries
+            let boundary =
+                Snapshot::for_database(self.db.root_id().clone(), vec![entry_id.clone()]);
             let entries = self
                 .db
                 .backend()?
-                .get_store_at(
-                    self.db.root_id(),
-                    subtree_name,
-                    &Snapshot::from([entry_id.clone()]),
-                )
+                .store_at(subtree_name, &boundary)
                 .await?;
 
             // Step 3: Merge all entries in order (already sorted by height, root first)
@@ -1076,11 +1073,11 @@ impl Transaction {
 
         // Add metadata with settings snapshot for all entries
         // Get the backend to access the settings snapshot (do async ops before RefCell borrow)
-        let db_snapshot = self.db.current_snapshot().await?;
+        let db_snapshot = self.db.snapshot().await?;
         let settings_snapshot = self
             .db
             .backend()?
-            .store_snapshot_up_to(self.db.root_id(), SETTINGS, db_snapshot.tips())
+            .store_snapshot_at(SETTINGS, &db_snapshot)
             .await?;
 
         // Clone the builder from RefCell (limit borrow scope to avoid holding across await)

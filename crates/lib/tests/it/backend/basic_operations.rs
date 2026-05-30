@@ -30,7 +30,7 @@ async fn test_backend_error_handling() {
     assert!(get_result.is_err());
 
     // get_tips for non-existent tree returns an empty vector
-    let tips_result = backend.current_snapshot(&non_existent_id).await;
+    let tips_result = backend.snapshot(&non_existent_id).await;
     assert!(
         tips_result.is_ok(),
         "get_tips should succeed for non-existent tree"

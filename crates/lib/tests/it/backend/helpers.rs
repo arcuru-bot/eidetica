@@ -87,7 +87,7 @@ pub struct DiamondStructure {
 
 /// Assert that a tree has a single tip with the specified ID
 pub async fn assert_single_tip(backend: &dyn BackendImpl, tree_id: &ID, expected_tip: &ID) {
-    let tips = backend.current_snapshot(tree_id).await.unwrap().into_tips();
+    let tips = backend.snapshot(tree_id).await.unwrap().into_tips();
     assert_eq!(tips.len(), 1, "Expected exactly one tip");
     assert_eq!(tips[0], *expected_tip, "Tip ID doesn't match expected");
 }

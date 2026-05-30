@@ -298,7 +298,7 @@ pub fn bench_tips_finding(c: &mut Criterion) {
                         rt.block_on(async {
                             let backend = tree.backend().expect("Failed to get backend");
                             let snapshot = backend
-                                .current_snapshot(tree.root_id())
+                                .snapshot(tree.root_id())
                                 .await
                                 .expect("Failed to get snapshot");
                             black_box(snapshot);

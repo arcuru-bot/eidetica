@@ -278,7 +278,7 @@ async fn test_bidirectional_sync_no_common_ancestor_issue() -> Result<()> {
     let current_tips = device1_database
         .backend()
         .expect("Failed to get backend")
-        .current_snapshot(&room_id)
+        .snapshot(&room_id)
         .await
         .expect("Failed to get tips")
         .into_tips();

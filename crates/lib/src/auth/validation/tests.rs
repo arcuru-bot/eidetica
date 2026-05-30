@@ -320,8 +320,8 @@ async fn test_basic_delegated_tree_resolution() {
 #[tokio::test]
 async fn test_complete_delegation_workflow() {
     use crate::{
-        Instance,
-        auth::types::{DelegatedTreeRef, PermissionBounds, TreeReference},
+        Instance, Snapshot,
+        auth::types::{DelegatedTreeRef, PermissionBounds},
         backend::database::InMemory,
     };
 
@@ -356,7 +356,7 @@ async fn test_complete_delegation_workflow() {
     txn.commit().await.unwrap();
 
     // Get the actual tips from the delegated tree
-    let delegated_tips = delegated_tree.current_snapshot().await.unwrap().into_tips();
+    let delegated_tips = delegated_tree.snapshot().await.unwrap().into_tips();
 
     // Create the main tree — signing key bootstrapped as Admin(0)
     let main_tree = Database::create(
@@ -372,15 +372,13 @@ async fn test_complete_delegation_workflow() {
     let settings = txn.get_settings().unwrap();
     settings
         .add_delegated_tree(DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                max: Permission::Write(10),
-                min: Some(Permission::Read),
+                permission_bounds: PermissionBounds {
+                    max: Permission::Write(10),
+                    min: Some(Permission::Read),
+                },
+                snapshot: Snapshot::for_database(delegated_tree.root_id().clone(), delegated_tips.clone()),
             },
-            tree: TreeReference {
-                root: delegated_tree.root_id().clone(),
-                tips: delegated_tips.clone(),
-            },
-        })
+        )
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -422,8 +420,8 @@ async fn test_complete_delegation_workflow() {
 #[tokio::test]
 async fn test_delegated_tree_requires_tips() {
     use crate::{
-        Instance,
-        auth::types::{DelegatedTreeRef, PermissionBounds, TreeReference},
+        Instance, Snapshot,
+        auth::types::{DelegatedTreeRef, PermissionBounds},
         backend::database::InMemory,
     };
 
@@ -456,15 +454,13 @@ async fn test_delegated_tree_requires_tips() {
     let settings = txn.get_settings().unwrap();
     settings
         .add_delegated_tree(DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                max: Permission::Write(10),
-                min: Some(Permission::Read),
+                permission_bounds: PermissionBounds {
+                    max: Permission::Write(10),
+                    min: Some(Permission::Read),
+                },
+                snapshot: Snapshot::for_database(delegated_tree.root_id().clone(), vec![ID::from_bytes("some_tip")]),
             },
-            tree: TreeReference {
-                root: delegated_tree.root_id().clone(),
-                tips: vec![ID::from_bytes("some_tip")],
-            },
-        })
+        )
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -506,8 +502,8 @@ async fn test_delegated_tree_requires_tips() {
 #[tokio::test]
 async fn test_nested_delegation_with_permission_clamping() {
     use crate::{
-        Instance,
-        auth::types::{DelegatedTreeRef, PermissionBounds, TreeReference},
+        Instance, Snapshot,
+        auth::types::{DelegatedTreeRef, PermissionBounds},
         backend::database::InMemory,
     };
 
@@ -542,7 +538,7 @@ async fn test_nested_delegation_with_permission_clamping() {
         .unwrap();
     txn.commit().await.unwrap();
 
-    let user_tips = user_tree.current_snapshot().await.unwrap().into_tips();
+    let user_tips = user_tree.snapshot().await.unwrap().into_tips();
 
     // 2. Create intermediate delegated tree that delegates to user tree
     let intermediate_tree = Database::create(
@@ -558,20 +554,18 @@ async fn test_nested_delegation_with_permission_clamping() {
     let settings = txn.get_settings().unwrap();
     settings
         .add_delegated_tree(DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                max: Permission::Write(8), // Clamp Admin(3) to Write(8)
-                min: Some(Permission::Read),
+                permission_bounds: PermissionBounds {
+                    max: Permission::Write(8), // Clamp Admin(3) to Write(8)
+                    min: Some(Permission::Read),
+                },
+                snapshot: Snapshot::for_database(user_tree.root_id().clone(), user_tips.clone()),
             },
-            tree: TreeReference {
-                root: user_tree.root_id().clone(),
-                tips: user_tips.clone(),
-            },
-        })
+        )
         .await
         .unwrap();
     txn.commit().await.unwrap();
 
-    let intermediate_tips = intermediate_tree.current_snapshot().await.unwrap().into_tips();
+    let intermediate_tips = intermediate_tree.snapshot().await.unwrap().into_tips();
 
     // 3. Create main tree that delegates to intermediate tree
     // Signing key stays at Admin(0) — matches original test intent.
@@ -588,15 +582,13 @@ async fn test_nested_delegation_with_permission_clamping() {
     let settings = txn.get_settings().unwrap();
     settings
         .add_delegated_tree(DelegatedTreeRef {
-            permission_bounds: PermissionBounds {
-                max: Permission::Write(5), // Less restrictive than Write(8)
-                min: Some(Permission::Read),
+                permission_bounds: PermissionBounds {
+                    max: Permission::Write(5), // Less restrictive than Write(8)
+                    min: Some(Permission::Read),
+                },
+                snapshot: Snapshot::for_database(intermediate_tree.root_id().clone(), intermediate_tips.clone()),
             },
-            tree: TreeReference {
-                root: intermediate_tree.root_id().clone(),
-                tips: intermediate_tips.clone(),
-            },
-        })
+        )
         .await
         .unwrap();
     txn.commit().await.unwrap();
