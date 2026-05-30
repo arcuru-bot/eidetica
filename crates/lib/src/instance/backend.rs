@@ -80,8 +80,8 @@ impl Backend {
     }
 
     /// Current snapshot of a tree (set of tip IDs).
-    pub async fn current_snapshot(&self, tree: &ID) -> Result<Snapshot> {
-        self.backend_impl.current_snapshot(tree).await
+    pub async fn snapshot(&self, tree: &ID) -> Result<Snapshot> {
+        self.backend_impl.snapshot(tree).await
     }
 
     /// Snapshot of a specific store within a tree.
@@ -89,15 +89,14 @@ impl Backend {
         self.backend_impl.store_snapshot(tree, store).await
     }
 
-    /// Snapshot of a store as of a specific set of main-tree entries.
-    pub async fn store_snapshot_up_to(
+    /// Snapshot of a store as of a specific main-tree snapshot.
+    pub async fn store_snapshot_at(
         &self,
-        tree: &ID,
         store: &str,
-        up_to: &[ID],
+        main_snapshot: &Snapshot,
     ) -> Result<Snapshot> {
         self.backend_impl
-            .store_snapshot_up_to(tree, store, up_to)
+            .store_snapshot_at(store, main_snapshot)
             .await
     }
 
@@ -140,14 +139,9 @@ impl Backend {
         self.backend_impl.get_tree_from_tips(tree, tips).await
     }
 
-    /// Get store entries at a snapshot
-    pub async fn get_store_at(
-        &self,
-        tree: &ID,
-        store: &str,
-        snapshot: &Snapshot,
-    ) -> Result<Vec<Entry>> {
-        self.backend_impl.get_store_at(tree, store, snapshot).await
+    /// Get store entries at a snapshot.
+    pub async fn store_at(&self, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>> {
+        self.backend_impl.store_at(store, snapshot).await
     }
 
     /// Get cached CRDT state

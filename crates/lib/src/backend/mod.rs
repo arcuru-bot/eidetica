@@ -242,7 +242,7 @@ pub trait BackendImpl: Send + Sync + Any {
     ///
     /// # Returns
     /// A `Result` containing a `Snapshot` (sorted, deduplicated set of tip IDs).
-    async fn current_snapshot(&self, tree: &ID) -> Result<Snapshot>;
+    async fn snapshot(&self, tree: &ID) -> Result<Snapshot>;
 
     /// Returns the snapshot of a specific store within a given tree.
     ///
@@ -259,23 +259,23 @@ pub trait BackendImpl: Send + Sync + Any {
     /// A `Result` containing a `Snapshot` of the store's tip IDs.
     async fn store_snapshot(&self, tree: &ID, store: &str) -> Result<Snapshot>;
 
-    /// Returns the store snapshot as of a specific set of main-tree entries.
+    /// Returns the store snapshot as of a specific main-tree snapshot.
     ///
-    /// This method finds all store entries that are reachable from the specified
-    /// main tree entries, then filters to find which of those are tips within the store.
+    /// Finds all store entries reachable from the boundary's tips, then filters
+    /// to the ones that are tips within the store. The parent tree's root is
+    /// taken from `main_snapshot.require_root()`.
     ///
     /// # Arguments
-    /// * `tree` - The root ID of the parent tree.
     /// * `store` - The name of the store for which to find tips.
-    /// * `main_entries` - The main tree entry IDs to use as the boundary.
+    /// * `main_snapshot` - Snapshot of the parent tree defining the boundary;
+    ///   must carry its cached root.
     ///
     /// # Returns
     /// A `Result` containing a `Snapshot` of the store's tip IDs as of the boundary.
-    async fn store_snapshot_up_to(
+    async fn store_snapshot_at(
         &self,
-        tree: &ID,
         store: &str,
-        main_entries: &[ID],
+        main_snapshot: &Snapshot,
     ) -> Result<Snapshot>;
 
     /// Retrieves the IDs of all top-level root entries stored in the backend.
@@ -384,21 +384,20 @@ pub trait BackendImpl: Send + Sync + Any {
     /// - `EntryNotInTree` if any tip belongs to a different tree
     async fn get_tree_from_tips(&self, tree: &ID, tips: &[ID]) -> Result<Vec<Entry>>;
 
-    /// Retrieves all entries belonging to a specific store within a tree at the given snapshot, sorted topologically.
+    /// Retrieves all entries belonging to a specific store at the given snapshot, sorted topologically.
     ///
-    /// Similar to `get_store`, but only includes entries that are ancestors of the provided store snapshot.
-    /// This allows reading from a specific state of the store defined by that snapshot.
+    /// Returns entries that are ancestors of the provided store snapshot's tips.
+    /// The parent tree's root is taken from `snapshot.require_root()`.
     ///
     /// # Arguments
-    /// * `tree` - The root ID of the parent tree.
     /// * `store` - The name of the store to retrieve.
-    /// * `snapshot` - The snapshot defining the state to read from.
+    /// * `snapshot` - The store snapshot defining the state to read from;
+    ///   must carry its cached root.
     ///
     /// # Returns
     /// A `Result` containing a vector of `Entry` objects in the store up to the given snapshot,
     /// sorted topologically, or an error.
-    async fn get_store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot)
-    -> Result<Vec<Entry>>;
+    async fn store_at(&self, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>>;
 
     // === CRDT State Cache Methods ===
     //

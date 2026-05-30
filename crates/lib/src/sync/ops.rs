@@ -51,7 +51,7 @@ impl Sync {
         // Get our current tips for this tree (empty if tree doesn't exist)
         let backend = self.backend()?;
         let our_tips: Vec<ID> = backend
-            .current_snapshot(tree_id)
+            .snapshot(tree_id)
             .await
             .map_err(|e| SyncError::BackendError(format!("Failed to get local tips: {e}")))?
             .into_tips();
@@ -152,7 +152,7 @@ impl Sync {
 
         // Step 2: Check if server is missing entries from us
         let backend = self.backend()?;
-        let our_snapshot = backend.current_snapshot(&response.tree_id).await?;
+        let our_snapshot = backend.snapshot(&response.tree_id).await?;
         let their_tips = &response.their_tips;
 
         // Find tips they don't have
@@ -644,7 +644,7 @@ impl Sync {
         // Get our current tips for this tree (empty if tree doesn't exist)
         let backend = self.backend()?;
         let our_tips: Vec<ID> = backend
-            .current_snapshot(tree_id)
+            .snapshot(tree_id)
             .await
             .map_err(|e| SyncError::BackendError(format!("Failed to get local tips: {e}")))?
             .into_tips();

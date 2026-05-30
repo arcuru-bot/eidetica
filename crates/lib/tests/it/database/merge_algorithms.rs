@@ -399,7 +399,7 @@ async fn test_true_diamond_pattern() {
     let entry_a_id = op_a.commit().await.unwrap();
 
     // Verify A is now the only tip
-    let tips_after_a = tree.current_snapshot().await.unwrap().into_tips();
+    let tips_after_a = tree.snapshot().await.unwrap().into_tips();
     assert_eq!(tips_after_a.len(), 1, "Should have exactly 1 tip after A");
     assert_eq!(tips_after_a[0], entry_a_id, "A should be the only tip");
 
@@ -431,7 +431,7 @@ async fn test_true_diamond_pattern() {
     let entry_c_id = op_c.commit().await.unwrap();
 
     // Verify we now have a true diamond: both B and C should be tips with A as parent
-    let tips_after_fork = tree.current_snapshot().await.unwrap().into_tips();
+    let tips_after_fork = tree.snapshot().await.unwrap().into_tips();
     assert_eq!(
         tips_after_fork.len(),
         2,

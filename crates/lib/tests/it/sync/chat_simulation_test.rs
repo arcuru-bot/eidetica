@@ -304,7 +304,7 @@ async fn test_global_key_bootstrap() {
     // Verify entry uses global permission key (encoded as "*:ed25519:...")
     let tips = client_instance
         .backend()
-        .current_snapshot(&tree_id)
+        .snapshot(&tree_id)
         .await
         .unwrap()
         .into_tips();

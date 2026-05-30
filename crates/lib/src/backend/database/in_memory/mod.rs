@@ -261,17 +261,20 @@ impl BackendImpl for InMemory {
         Ok(ids)
     }
 
-    async fn current_snapshot(&self, tree: &ID) -> Result<Snapshot> {
+    async fn snapshot(&self, tree: &ID) -> Result<Snapshot> {
         // Fast path: check cache with read lock
         {
             let inner = self.inner.read().unwrap();
             if let Some(cache) = inner.tips.get(tree) {
-                return Ok(Snapshot::new(cache.tree_tips.iter().cloned().collect()));
+                return Ok(Snapshot::for_database(
+                    tree.clone(),
+                    cache.tree_tips.iter().cloned().collect(),
+                ));
             }
         }
         // Slow path: compute and cache with write lock
         let mut inner = self.inner.write().unwrap();
-        traversal::get_tips(&mut inner, tree).map(Snapshot::new)
+        traversal::get_tips(&mut inner, tree).map(|tips| Snapshot::for_database(tree.clone(), tips))
     }
 
     async fn store_snapshot(&self, tree: &ID, subtree: &str) -> Result<Snapshot> {
@@ -281,23 +284,27 @@ impl BackendImpl for InMemory {
             if let Some(cache) = inner.tips.get(tree)
                 && let Some(subtree_tips) = cache.subtree_tips.get(subtree)
             {
-                return Ok(Snapshot::new(subtree_tips.iter().cloned().collect()));
+                return Ok(Snapshot::for_database(
+                    tree.clone(),
+                    subtree_tips.iter().cloned().collect(),
+                ));
             }
         }
         // Slow path: compute and cache with write lock
         let mut inner = self.inner.write().unwrap();
-        traversal::get_store_tips(&mut inner, tree, subtree).map(Snapshot::new)
+        traversal::get_store_tips(&mut inner, tree, subtree)
+            .map(|tips| Snapshot::for_database(tree.clone(), tips))
     }
 
-    async fn store_snapshot_up_to(
+    async fn store_snapshot_at(
         &self,
-        tree: &ID,
         subtree: &str,
-        main_entries: &[ID],
+        main_snapshot: &Snapshot,
     ) -> Result<Snapshot> {
+        let tree = main_snapshot.require_root()?.clone();
         let mut inner = self.inner.write().unwrap();
-        traversal::get_store_tips_up_to_entries(&mut inner, tree, subtree, main_entries)
-            .map(Snapshot::new)
+        traversal::get_store_tips_up_to_entries(&mut inner, &tree, subtree, main_snapshot.tips())
+            .map(|tips| Snapshot::for_database(tree, tips))
     }
 
     /// Retrieves the IDs of all top-level root entries stored in the database.
@@ -354,12 +361,8 @@ impl BackendImpl for InMemory {
         storage::get_tree_from_tips(&inner, tree, tips)
     }
 
-    async fn get_store_at(
-        &self,
-        tree: &ID,
-        subtree: &str,
-        snapshot: &Snapshot,
-    ) -> Result<Vec<Entry>> {
+    async fn store_at(&self, subtree: &str, snapshot: &Snapshot) -> Result<Vec<Entry>> {
+        let tree = snapshot.require_root()?;
         let inner = self.inner.read().unwrap();
         storage::get_store_from_tips(&inner, tree, subtree, snapshot.tips())
     }

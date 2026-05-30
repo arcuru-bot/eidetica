@@ -145,7 +145,7 @@ async fn test_sync_with_ticket_happy_path() {
     // Verify tips are non-empty
     let tips = client_instance
         .backend()
-        .current_snapshot(&tree_id)
+        .snapshot(&tree_id)
         .await
         .expect("Client should have tips")
         .into_tips();
@@ -338,7 +338,7 @@ async fn test_bootstrap_with_ticket_authenticated() {
     // Verify tips exist
     let tips = client_instance
         .backend()
-        .current_snapshot(&tree_id)
+        .snapshot(&tree_id)
         .await
         .expect("Client should have tips")
         .into_tips();

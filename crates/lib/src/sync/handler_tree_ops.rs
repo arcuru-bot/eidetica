@@ -53,7 +53,7 @@ impl SyncHandlerImpl {
         let mut to_visit = std::collections::VecDeque::new();
 
         // Get tips to start traversal
-        let snapshot = self.instance()?.backend().current_snapshot(tree_id).await?;
+        let snapshot = self.instance()?.backend().snapshot(tree_id).await?;
         to_visit.extend(snapshot.into_tips());
 
         // Traverse the DAG depth-first
@@ -98,7 +98,7 @@ impl SyncHandlerImpl {
         let mut to_visit = std::collections::VecDeque::new();
 
         // Get tips to start traversal
-        let snapshot = self.instance()?.backend().current_snapshot(tree_id).await?;
+        let snapshot = self.instance()?.backend().snapshot(tree_id).await?;
         to_visit.extend(snapshot.into_tips());
 
         // Traverse the DAG depth-first, INCLUDING the root
@@ -171,7 +171,7 @@ impl SyncHandlerImpl {
         let mut to_visit = std::collections::VecDeque::new();
 
         // Get tips to start traversal
-        let snapshot = self.instance()?.backend().current_snapshot(tree_id).await?;
+        let snapshot = self.instance()?.backend().snapshot(tree_id).await?;
         to_visit.extend(snapshot.into_tips());
 
         // Count all entries

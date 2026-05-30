@@ -190,7 +190,7 @@ impl Sync {
     ) -> Result<SyncStatus> {
         // Check if we have local data for this tree
         let backend = self.backend()?;
-        let our_snapshot = backend.current_snapshot(tree_id).await.unwrap_or_default();
+        let our_snapshot = backend.snapshot(tree_id).await.unwrap_or_default();
 
         // TODO: Track last_sync time and last_error in sync tree
         // For now, just report if we have data

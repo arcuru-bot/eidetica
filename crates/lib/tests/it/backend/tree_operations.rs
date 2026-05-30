@@ -220,7 +220,7 @@ async fn test_get_tips() {
 
     // Initially, root is the only tip
     let tips = backend
-        .current_snapshot(&root_id)
+        .snapshot(&root_id)
         .await
         .unwrap()
         .into_tips();
@@ -241,7 +241,7 @@ async fn test_get_tips() {
 
     // Now A should be the only tip
     let tips = backend
-        .current_snapshot(&root_id)
+        .snapshot(&root_id)
         .await
         .unwrap()
         .into_tips();
@@ -262,7 +262,7 @@ async fn test_get_tips() {
 
     // Now B should be the only tip from that branch
     let tips = backend
-        .current_snapshot(&root_id)
+        .snapshot(&root_id)
         .await
         .unwrap()
         .into_tips();
@@ -283,7 +283,7 @@ async fn test_get_tips() {
 
     // Now should have 2 tips: B and C
     let tips = backend
-        .current_snapshot(&root_id)
+        .snapshot(&root_id)
         .await
         .unwrap()
         .into_tips();

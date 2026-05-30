@@ -184,19 +184,15 @@ fn test_sig_info_nested_value_roundtrip() {
 }
 
 #[test]
-fn test_tree_reference_nested_value_content() {
-    let tree_ref = TreeReference {
-        root: ID::from_bytes("root123"),
-        tips: vec![ID::from_bytes("tip1"), ID::from_bytes("tip2")],
-    };
+fn test_snapshot_nested_value_content() {
+    use crate::Snapshot;
+    let snapshot = Snapshot::from([ID::from_bytes("tip1"), ID::from_bytes("tip2")]);
 
     let mut nested = Doc::new();
-    nested.set_json("tree_ref", &tree_ref).unwrap();
+    nested.set_json("snapshot", &snapshot).unwrap();
 
-    // Test that we can retrieve it back correctly
-    let retrieved: TreeReference = nested.get_json("tree_ref").unwrap();
-    assert_eq!(retrieved.root, tree_ref.root);
-    assert_eq!(retrieved.tips, tree_ref.tips);
+    let retrieved: Snapshot = nested.get_json("snapshot").unwrap();
+    assert_eq!(retrieved, snapshot);
 }
 
 #[test]
@@ -232,12 +228,10 @@ fn test_delegated_tree_ref_serialization() {
         min: Some(Permission::Read),
     };
 
+    use crate::Snapshot;
     let tree_ref = DelegatedTreeRef {
         permission_bounds: bounds,
-        tree: TreeReference {
-            root: ID::from_bytes("root123"),
-            tips: vec![ID::from_bytes("tip1")],
-        },
+        snapshot: Snapshot::from([ID::from_bytes("tip1")]),
     };
 
     let mut nested = Doc::new();
@@ -246,7 +240,7 @@ fn test_delegated_tree_ref_serialization() {
 
     assert_eq!(tree_ref.permission_bounds.max, parsed.permission_bounds.max);
     assert_eq!(tree_ref.permission_bounds.min, parsed.permission_bounds.min);
-    assert_eq!(tree_ref.tree.root, parsed.tree.root);
+    assert_eq!(tree_ref.snapshot, parsed.snapshot);
 }
 
 #[test]
@@ -312,15 +306,13 @@ fn test_permission_bounds_nested_value_roundtrip() {
 
 #[test]
 fn test_delegated_tree_ref_complete_roundtrip() {
+    use crate::Snapshot;
     let tree_ref = DelegatedTreeRef {
         permission_bounds: PermissionBounds {
             max: Permission::Write(10),
             min: Some(Permission::Read),
         },
-        tree: TreeReference {
-            root: ID::from_bytes("root123"),
-            tips: vec![ID::from_bytes("tip1"), ID::from_bytes("tip2")],
-        },
+        snapshot: Snapshot::from([ID::from_bytes("tip1"), ID::from_bytes("tip2")]),
     };
 
     let mut nested = Doc::new();
@@ -329,8 +321,7 @@ fn test_delegated_tree_ref_complete_roundtrip() {
 
     assert_eq!(tree_ref.permission_bounds.max, parsed.permission_bounds.max);
     assert_eq!(tree_ref.permission_bounds.min, parsed.permission_bounds.min);
-    assert_eq!(tree_ref.tree.root, parsed.tree.root);
-    assert_eq!(tree_ref.tree.tips, parsed.tree.tips);
+    assert_eq!(tree_ref.snapshot, parsed.snapshot);
 }
 
 #[test]

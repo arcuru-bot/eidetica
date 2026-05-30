@@ -196,7 +196,7 @@ async fn test_incremental_sync_rejected_when_sync_disabled() {
     .unwrap();
     let client_tips = client_instance
         .backend()
-        .current_snapshot(client_db.root_id())
+        .snapshot(client_db.root_id())
         .await
         .unwrap()
         .into_tips();

@@ -176,13 +176,18 @@ impl AuthSettings {
 
     // ==================== Delegation Operations ====================
 
-    /// Add or update a delegated tree reference
+    /// Add or update a delegated tree reference.
     ///
-    /// The delegation is stored by root tree ID, extracted from `tree_ref.tree.root`.
-    /// This ensures collision-resistant storage similar to key storage by pubkey.
+    /// The delegation is keyed by the delegated tree's root ID, taken from
+    /// `tree_ref.snapshot.require_root()`. Callers building a `DelegatedTreeRef`
+    /// from a `Database` get the root for free via
+    /// [`Database::snapshot`](crate::Database::snapshot); callers working from
+    /// a wire-restored snapshot must call [`Snapshot::root`](crate::Snapshot::root)
+    /// and rebuild with [`Snapshot::for_database`](crate::Snapshot::for_database)
+    /// before passing it here.
     pub fn add_delegated_tree(&mut self, tree_ref: DelegatedTreeRef) -> Result<()> {
-        let root_id = tree_ref.tree.root.to_string();
-        self.inner.set(format!("delegations.{root_id}"), tree_ref);
+        let root = tree_ref.snapshot.require_root()?.clone();
+        self.inner.set(format!("delegations.{root}"), tree_ref);
         Ok(())
     }
 

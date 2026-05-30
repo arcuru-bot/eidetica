@@ -65,7 +65,7 @@ impl Sync {
         // Open user's preferences database (read-only)
         let instance = self.instance.upgrade().ok_or(SyncError::InstanceDropped)?;
         let prefs_db = Database::open_unauthenticated(preferences_db_id.clone(), &instance)?;
-        let current_snapshot = prefs_db.current_snapshot().await?;
+        let current_snapshot = prefs_db.snapshot().await?;
 
         // Check if preferences have changed via snapshot comparison (set-equal).
         if current_snapshot == Snapshot::from(old_tips.clone()) {

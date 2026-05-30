@@ -29,7 +29,7 @@ async fn test_insert_into_tree() {
 
     // Verify tips include id2
     let tips = tree
-        .current_snapshot()
+        .snapshot()
         .await
         .expect("Failed to get tips")
         .into_tips();
@@ -215,7 +215,7 @@ async fn test_txn_scenarios() {
 
     // --- 1. Modify multiple subtrees in one transaction and read staged data ---
     let txn1 = tree.new_transaction().await.expect("Txn1: Failed to start");
-    let initial_tip = tree.current_snapshot().await.unwrap().tips()[0].clone();
+    let initial_tip = tree.snapshot().await.unwrap().tips()[0].clone();
     {
         let store_a = txn1
             .get_store::<DocStore>("sub_a")
@@ -288,7 +288,7 @@ async fn test_txn_scenarios() {
     // If it's not an error, check the tip is still changed to the empty commit
     assert!(commit_empty_result.is_ok());
     assert_eq!(
-        tree.current_snapshot().await.unwrap().tips()[0],
+        tree.snapshot().await.unwrap().tips()[0],
         commit_empty_result.unwrap(),
         "Empty commit should still be a tip"
     );
@@ -418,7 +418,7 @@ async fn test_get_tips() {
 
     // Initially, the tree should have one tip (the root entry)
     let initial_tips = tree
-        .current_snapshot()
+        .snapshot()
         .await
         .expect("Failed to get initial tips")
         .into_tips();
@@ -433,7 +433,7 @@ async fn test_get_tips() {
 
     // Tips should now include entry1_id
     let tips_after_op1 = tree
-        .current_snapshot()
+        .snapshot()
         .await
         .expect("Failed to get tips after op1")
         .into_tips();
@@ -456,7 +456,7 @@ async fn test_get_tips() {
 
     // Tips should now include entry2_id
     let tips_after_op2 = tree
-        .current_snapshot()
+        .snapshot()
         .await
         .expect("Failed to get tips after op2")
         .into_tips();
@@ -536,7 +536,7 @@ async fn test_new_transaction_at() {
 
     // Now we should have two tips: entry2_id and custom_entry_id
     let tips_after_branch = tree
-        .current_snapshot()
+        .snapshot()
         .await
         .expect("Failed to get tips after branch")
         .into_tips();
