@@ -26,6 +26,7 @@ pub mod database;
 pub mod entry;
 pub mod height;
 pub mod instance;
+pub mod snapshot;
 pub mod store;
 pub mod sync;
 pub mod transaction;
@@ -39,6 +40,7 @@ pub use database::{Database, DatabaseKey};
 pub use entry::{Entry, ID};
 pub use height::HeightStrategy;
 pub use instance::{Instance, WeakInstance};
+pub use snapshot::Snapshot;
 pub use store::{Registered, Store};
 /// Re-export fundamental types for easier access.
 pub use transaction::Transaction;
