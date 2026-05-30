@@ -3,6 +3,7 @@
 //! This module provides utilities for testing Doc, YDoc, and Table subtree functionality
 //! including basic operations, CRUD operations, search functionality, and integration scenarios.
 
+use eidetica::Snapshot;
 #[cfg(feature = "y-crdt")]
 use eidetica::store::{YDoc, YrsBinary};
 use eidetica::{
@@ -536,7 +537,7 @@ pub async fn test_table_concurrent_modifications(
 
     // Branch A: Concurrent modification
     let op_branch_a = tree
-        .new_transaction_with_tips([base_entry_id.clone()])
+        .new_transaction_at(&Snapshot::from([base_entry_id.clone()]))
         .await
         .unwrap();
     {
@@ -555,7 +556,7 @@ pub async fn test_table_concurrent_modifications(
 
     // Branch B: Parallel modification
     let op_branch_b = tree
-        .new_transaction_with_tips([base_entry_id])
+        .new_transaction_at(&Snapshot::from([base_entry_id]))
         .await
         .unwrap();
     {
