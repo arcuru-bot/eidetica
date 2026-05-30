@@ -196,9 +196,9 @@ async fn test_incremental_sync_rejected_when_sync_disabled() {
     .unwrap();
     let client_tips = client_instance
         .backend()
-        .get_tips(client_db.root_id())
+        .current_snapshot(client_db.root_id())
         .await
-        .unwrap();
+        .unwrap().into_tips();
 
     // NOW disable sync on the server
     server_user

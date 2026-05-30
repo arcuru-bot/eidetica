@@ -30,7 +30,7 @@ pub use errors::TransactionError;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Database, Result, Store,
+    Database, Result, Snapshot, Store,
     auth::{
         AuthSettings,
         crypto::{PrivateKey, sign_entry},
@@ -123,9 +123,11 @@ pub(crate) trait Encryptor: Send + Sync {
 /// Metadata structure for entries
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EntryMetadata {
-    /// Tips of the _settings subtree at the time this entry was created
-    /// This is used for improving sync performance and for validation in sparse checkouts.
-    settings_tips: Vec<ID>,
+    /// Snapshot of the _settings subtree at the time this entry was created.
+    /// Used for improving sync performance and for validation in sparse checkouts.
+    /// Wire name remains `settings_tips` for on-disk stability.
+    #[serde(rename = "settings_tips")]
+    settings_snapshot: Snapshot,
     /// Random entropy for ensuring unique IDs for root entries
     entropy: Option<u64>,
 }
@@ -177,7 +179,9 @@ impl Transaction {
     ///
     /// # Returns
     /// A `Result<Self>` containing the new transaction or an error if tips are empty or invalid.
-    pub(crate) async fn new_with_tips(database: &Database, tips: &[ID]) -> Result<Self> {
+    pub(crate) async fn new_at(database: &Database, snapshot: &Snapshot) -> Result<Self> {
+        let tips = snapshot.tips();
+
         // Validate that tips are not empty, unless we're creating the root entry
         if tips.is_empty() {
             // Check if this is a root entry creation by seeing if the database root exists in backend
@@ -205,7 +209,7 @@ impl Transaction {
         // Data and parents will be filled based on the transaction type.
         let mut builder = Entry::builder(database.root_id().clone());
 
-        // Use the provided tips as parents (only if not empty)
+        // Use the snapshot's tips as parents (only if not empty)
         if !tips.is_empty() {
             builder.set_parents_mut(tips.to_vec());
         }
@@ -429,7 +433,7 @@ impl Transaction {
             .metadata()
             .and_then(|m| serde_json::from_str::<EntryMetadata>(m).ok())
             .unwrap_or_else(|| EntryMetadata {
-                settings_tips: Vec::new(),
+                settings_snapshot: Snapshot::EMPTY,
                 entropy: None,
             });
 
@@ -479,8 +483,13 @@ impl Transaction {
         // Fetch tips if needed (no borrow held across this await)
         let tips = if needs_tips {
             let backend = self.db.backend()?;
-            // FIXME: we should get the subtree tips while still using the parent pointers
-            Some(backend.get_store_tips(self.db.root_id(), subtree).await?)
+            // FIXME: we should get the subtree snapshot while still using the parent pointers
+            Some(
+                backend
+                    .store_snapshot(self.db.root_id(), subtree)
+                    .await?
+                    .into_tips(),
+            )
         } else {
             None
         };
@@ -562,8 +571,9 @@ impl Transaction {
     async fn get_subtree_tips(&self, subtree_name: &str, main_parents: &[ID]) -> Result<Vec<ID>> {
         self.db
             .backend()?
-            .get_store_tips_up_to_entries(self.db.root_id(), subtree_name, main_parents)
+            .store_snapshot_up_to(self.db.root_id(), subtree_name, main_parents)
             .await
+            .map(Snapshot::into_tips)
     }
 
     /// Initialize subtree parents if this is the first time accessing this subtree
@@ -689,19 +699,24 @@ impl Transaction {
 
         // Initialize subtree tips if needed (async operations)
         if needs_init {
-            let current_database_tips = self.db.backend()?.get_tips(self.db.root_id()).await?;
+            let current_database_snapshot =
+                self.db.backend()?.current_snapshot(self.db.root_id()).await?;
 
-            let tips = if main_parents == current_database_tips {
+            // Set-equal comparison via Snapshot canonical form.
+            let parents_snapshot = Snapshot::from(main_parents.clone());
+            let tips = if parents_snapshot == current_database_snapshot {
                 let backend = self.db.backend()?;
                 backend
-                    .get_store_tips(self.db.root_id(), subtree_name)
+                    .store_snapshot(self.db.root_id(), subtree_name)
                     .await?
+                    .into_tips()
             } else {
                 // This transaction uses custom tips - use special handler
                 self.db
                     .backend()?
-                    .get_store_tips_up_to_entries(self.db.root_id(), subtree_name, &main_parents)
+                    .store_snapshot_up_to(self.db.root_id(), subtree_name, &main_parents)
                     .await?
+                    .into_tips()
             };
 
             // Update RefCell after async operations
@@ -866,10 +881,10 @@ impl Transaction {
             let entries = self
                 .db
                 .backend()?
-                .get_store_from_tips(
+                .get_store_at(
                     self.db.root_id(),
                     subtree_name,
-                    std::slice::from_ref(entry_id),
+                    &Snapshot::from([entry_id.clone()]),
                 )
                 .await?;
 
@@ -1056,13 +1071,13 @@ impl Transaction {
             builder.remove_empty_subtrees_mut()?;
         }
 
-        // Add metadata with settings tips for all entries
-        // Get the backend to access settings tips (do async ops before RefCell borrow)
-        let db_tips = self.db.get_tips().await?;
-        let settings_tips = self
+        // Add metadata with settings snapshot for all entries
+        // Get the backend to access the settings snapshot (do async ops before RefCell borrow)
+        let db_snapshot = self.db.current_snapshot().await?;
+        let settings_snapshot = self
             .db
             .backend()?
-            .get_store_tips_up_to_entries(self.db.root_id(), SETTINGS, &db_tips)
+            .store_snapshot_up_to(self.db.root_id(), SETTINGS, db_snapshot.tips())
             .await?;
 
         // Clone the builder from RefCell (limit borrow scope to avoid holding across await)
@@ -1079,12 +1094,12 @@ impl Transaction {
             .metadata()
             .and_then(|m| serde_json::from_str::<EntryMetadata>(m).ok())
             .unwrap_or_else(|| EntryMetadata {
-                settings_tips: Vec::new(),
+                settings_snapshot: Snapshot::EMPTY,
                 entropy: None,
             });
 
-        // Update settings tips
-        metadata.settings_tips = settings_tips;
+        // Update settings snapshot
+        metadata.settings_snapshot = settings_snapshot;
 
         // Serialize the metadata
         let metadata_json = serde_json::to_string(&metadata)?;

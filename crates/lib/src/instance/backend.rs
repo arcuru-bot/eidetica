@@ -12,6 +12,7 @@ use crate::{
     Result,
     backend::{BackendImpl, InstanceMetadata, VerificationStatus},
     entry::{Entry, ID},
+    snapshot::Snapshot,
 };
 
 /// Backend wrapper for Instance operations
@@ -78,25 +79,25 @@ impl Backend {
             .await
     }
 
-    /// Get tips for a tree
-    pub async fn get_tips(&self, tree: &ID) -> Result<Vec<ID>> {
-        self.backend_impl.get_tips(tree).await
+    /// Current snapshot of a tree (set of tip IDs).
+    pub async fn current_snapshot(&self, tree: &ID) -> Result<Snapshot> {
+        self.backend_impl.current_snapshot(tree).await
     }
 
-    /// Get tips for a specific store within a tree
-    pub async fn get_store_tips(&self, tree: &ID, store: &str) -> Result<Vec<ID>> {
-        self.backend_impl.get_store_tips(tree, store).await
+    /// Snapshot of a specific store within a tree.
+    pub async fn store_snapshot(&self, tree: &ID, store: &str) -> Result<Snapshot> {
+        self.backend_impl.store_snapshot(tree, store).await
     }
 
-    /// Get store tips up to specific entries
-    pub async fn get_store_tips_up_to_entries(
+    /// Snapshot of a store as of a specific set of main-tree entries.
+    pub async fn store_snapshot_up_to(
         &self,
         tree: &ID,
         store: &str,
         up_to: &[ID],
-    ) -> Result<Vec<ID>> {
+    ) -> Result<Snapshot> {
         self.backend_impl
-            .get_store_tips_up_to_entries(tree, store, up_to)
+            .store_snapshot_up_to(tree, store, up_to)
             .await
     }
 
@@ -139,15 +140,15 @@ impl Backend {
         self.backend_impl.get_tree_from_tips(tree, tips).await
     }
 
-    /// Get store entries from tips
-    pub async fn get_store_from_tips(
+    /// Get store entries at a snapshot
+    pub async fn get_store_at(
         &self,
         tree: &ID,
         store: &str,
-        tips: &[ID],
+        snapshot: &Snapshot,
     ) -> Result<Vec<Entry>> {
         self.backend_impl
-            .get_store_from_tips(tree, store, tips)
+            .get_store_at(tree, store, snapshot)
             .await
     }
 

@@ -50,10 +50,11 @@ impl Sync {
 
         // Get our current tips for this tree (empty if tree doesn't exist)
         let backend = self.backend()?;
-        let our_tips = backend
-            .get_tips(tree_id)
+        let our_tips: Vec<ID> = backend
+            .current_snapshot(tree_id)
             .await
-            .map_err(|e| SyncError::BackendError(format!("Failed to get local tips: {e}")))?;
+            .map_err(|e| SyncError::BackendError(format!("Failed to get local tips: {e}")))?
+            .into_tips();
 
         // Get our device public key for automatic peer tracking
         let our_device_pubkey = self.get_device_pubkey().ok();
@@ -151,11 +152,12 @@ impl Sync {
 
         // Step 2: Check if server is missing entries from us
         let backend = self.backend()?;
-        let our_tips = backend.get_tips(&response.tree_id).await?;
+        let our_snapshot = backend.current_snapshot(&response.tree_id).await?;
         let their_tips = &response.their_tips;
 
         // Find tips they don't have
-        let missing_tip_ids: Vec<_> = our_tips
+        let missing_tip_ids: Vec<_> = our_snapshot
+            .tips()
             .iter()
             .filter(|tip_id| !their_tips.contains(tip_id))
             .cloned()
@@ -641,10 +643,11 @@ impl Sync {
 
         // Get our current tips for this tree (empty if tree doesn't exist)
         let backend = self.backend()?;
-        let our_tips = backend
-            .get_tips(tree_id)
+        let our_tips: Vec<ID> = backend
+            .current_snapshot(tree_id)
             .await
-            .map_err(|e| SyncError::BackendError(format!("Failed to get local tips: {e}")))?;
+            .map_err(|e| SyncError::BackendError(format!("Failed to get local tips: {e}")))?
+            .into_tips();
 
         // Get our device public key for automatic peer tracking
         let our_device_pubkey = self.get_device_pubkey().ok();

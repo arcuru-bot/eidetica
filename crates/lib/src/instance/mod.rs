@@ -409,8 +409,8 @@ impl Instance {
     /// of the database by the Instance. This method checks if we're tracking
     /// the database's tip state.
     pub async fn has_database(&self, root_id: &ID) -> bool {
-        match self.inner.backend.get_tips(root_id).await {
-            Ok(tips) => !tips.is_empty(),
+        match self.inner.backend.current_snapshot(root_id).await {
+            Ok(snap) => !snap.is_empty(),
             Err(_) => false,
         }
     }
@@ -445,9 +445,12 @@ impl Instance {
         self.inner.backend.put(verification_status, entry).await
     }
 
-    /// Get tips for a tree
-    pub(crate) async fn get_tips(&self, tree: &crate::entry::ID) -> Result<Vec<crate::entry::ID>> {
-        self.inner.backend.get_tips(tree).await
+    /// Current snapshot of a tree.
+    pub(crate) async fn current_snapshot(
+        &self,
+        tree: &crate::entry::ID,
+    ) -> Result<crate::snapshot::Snapshot> {
+        self.inner.backend.current_snapshot(tree).await
     }
 
     // === System database accessors ===

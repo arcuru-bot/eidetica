@@ -4,6 +4,7 @@
 //! LCA computation, diamond patterns, and parent-aware state resolution.
 
 use eidetica::{crdt::doc::Value, store::DocStore};
+use eidetica::Snapshot;
 
 use super::helpers::*;
 use crate::helpers::*;
@@ -398,7 +399,7 @@ async fn test_true_diamond_pattern() {
     let entry_a_id = op_a.commit().await.unwrap();
 
     // Verify A is now the only tip
-    let tips_after_a = tree.get_tips().await.unwrap();
+    let tips_after_a = tree.current_snapshot().await.unwrap().into_tips();
     assert_eq!(tips_after_a.len(), 1, "Should have exactly 1 tip after A");
     assert_eq!(tips_after_a[0], entry_a_id, "A should be the only tip");
 
@@ -407,7 +408,7 @@ async fn test_true_diamond_pattern() {
 
     // Create operation B - starts from A
     let op_b = tree
-        .new_transaction_with_tips(std::slice::from_ref(&entry_a_id))
+        .new_transaction_at(&Snapshot::from(std::slice::from_ref(&entry_a_id)))
         .await
         .unwrap();
     let subtree_b = op_b.get_store::<DocStore>("data").await.unwrap();
@@ -417,7 +418,7 @@ async fn test_true_diamond_pattern() {
 
     // Create operation C - also starts from A (same parent!)
     let op_c = tree
-        .new_transaction_with_tips(std::slice::from_ref(&entry_a_id))
+        .new_transaction_at(&Snapshot::from(std::slice::from_ref(&entry_a_id)))
         .await
         .unwrap();
     let subtree_c = op_c.get_store::<DocStore>("data").await.unwrap();
@@ -430,7 +431,7 @@ async fn test_true_diamond_pattern() {
     let entry_c_id = op_c.commit().await.unwrap();
 
     // Verify we now have a true diamond: both B and C should be tips with A as parent
-    let tips_after_fork = tree.get_tips().await.unwrap();
+    let tips_after_fork = tree.current_snapshot().await.unwrap().into_tips();
     assert_eq!(
         tips_after_fork.len(),
         2,
@@ -699,7 +700,7 @@ async fn test_find_merge_base_shallow_divergence() {
     let mut chain_a_tip = base_id.clone();
     for i in 0..CHAIN_DEPTH {
         let txn = tree
-            .new_transaction_with_tips(std::slice::from_ref(&chain_a_tip))
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&chain_a_tip)))
             .await
             .unwrap();
         let subtree = txn.get_store::<DocStore>("data").await.unwrap();
@@ -711,7 +712,7 @@ async fn test_find_merge_base_shallow_divergence() {
     let mut chain_b_tip = base_id.clone();
     for i in 0..CHAIN_DEPTH {
         let txn = tree
-            .new_transaction_with_tips(std::slice::from_ref(&chain_b_tip))
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&chain_b_tip)))
             .await
             .unwrap();
         let subtree = txn.get_store::<DocStore>("data").await.unwrap();
@@ -721,7 +722,7 @@ async fn test_find_merge_base_shallow_divergence() {
 
     // Create merge operation from both tips
     let merge_tips = vec![chain_a_tip.clone(), chain_b_tip.clone()];
-    let op_merge = tree.new_transaction_with_tips(&merge_tips).await.unwrap();
+    let op_merge = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
     let subtree_merge = op_merge.get_store::<DocStore>("data").await.unwrap();
     subtree_merge.set("merged", "true").await.unwrap();
     let _merge_id = op_merge.commit().await.unwrap();
@@ -778,7 +779,7 @@ async fn test_find_merge_base_deep_divergence() {
     let mut chain_a_tip = base_id.clone();
     for i in 0..CHAIN_DEPTH {
         let txn = tree
-            .new_transaction_with_tips(std::slice::from_ref(&chain_a_tip))
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&chain_a_tip)))
             .await
             .unwrap();
         let subtree = txn.get_store::<DocStore>("data").await.unwrap();
@@ -790,7 +791,7 @@ async fn test_find_merge_base_deep_divergence() {
     let mut chain_b_tip = base_id.clone();
     for i in 0..CHAIN_DEPTH {
         let txn = tree
-            .new_transaction_with_tips(std::slice::from_ref(&chain_b_tip))
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&chain_b_tip)))
             .await
             .unwrap();
         let subtree = txn.get_store::<DocStore>("data").await.unwrap();
@@ -800,7 +801,7 @@ async fn test_find_merge_base_deep_divergence() {
 
     // Create merge operation from both tips
     let merge_tips = vec![chain_a_tip.clone(), chain_b_tip.clone()];
-    let op_merge = tree.new_transaction_with_tips(&merge_tips).await.unwrap();
+    let op_merge = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
     let subtree_merge = op_merge.get_store::<DocStore>("data").await.unwrap();
     subtree_merge.set("deep_merged", "true").await.unwrap();
     let _merge_id = op_merge.commit().await.unwrap();
@@ -857,7 +858,7 @@ async fn test_find_merge_base_very_deep_chains() {
     let mut chain_a_tip = base_id.clone();
     for i in 0..CHAIN_DEPTH {
         let txn = tree
-            .new_transaction_with_tips(std::slice::from_ref(&chain_a_tip))
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&chain_a_tip)))
             .await
             .unwrap();
         let subtree = txn.get_store::<DocStore>("data").await.unwrap();
@@ -869,7 +870,7 @@ async fn test_find_merge_base_very_deep_chains() {
     let mut chain_b_tip = base_id.clone();
     for i in 0..CHAIN_DEPTH {
         let txn = tree
-            .new_transaction_with_tips(std::slice::from_ref(&chain_b_tip))
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&chain_b_tip)))
             .await
             .unwrap();
         let subtree = txn.get_store::<DocStore>("data").await.unwrap();
@@ -879,7 +880,7 @@ async fn test_find_merge_base_very_deep_chains() {
 
     // Create merge operation from both tips
     let merge_tips = vec![chain_a_tip.clone(), chain_b_tip.clone()];
-    let op_merge = tree.new_transaction_with_tips(&merge_tips).await.unwrap();
+    let op_merge = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
     let subtree_merge = op_merge.get_store::<DocStore>("data").await.unwrap();
     subtree_merge.set("very_deep_merged", "true").await.unwrap();
     let _merge_id = op_merge.commit().await.unwrap();
@@ -937,7 +938,7 @@ async fn test_find_merge_base_actually_called() {
     let mut chain_a_tip = base_id.clone();
     for i in 0..CHAIN_DEPTH {
         let txn = tree
-            .new_transaction_with_tips(std::slice::from_ref(&chain_a_tip))
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&chain_a_tip)))
             .await
             .unwrap();
         let subtree = txn.get_store::<DocStore>("data").await.unwrap();
@@ -949,7 +950,7 @@ async fn test_find_merge_base_actually_called() {
     let mut chain_b_tip = base_id.clone();
     for i in 0..CHAIN_DEPTH {
         let txn = tree
-            .new_transaction_with_tips(std::slice::from_ref(&chain_b_tip))
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&chain_b_tip)))
             .await
             .unwrap();
         let subtree = txn.get_store::<DocStore>("data").await.unwrap();
@@ -959,7 +960,7 @@ async fn test_find_merge_base_actually_called() {
 
     // Create merge transaction with BOTH tips
     let merge_tips = vec![chain_a_tip.clone(), chain_b_tip.clone()];
-    let op_merge = tree.new_transaction_with_tips(&merge_tips).await.unwrap();
+    let op_merge = tree.new_transaction_at(&Snapshot::from(merge_tips.clone())).await.unwrap();
     let subtree_merge = op_merge.get_store::<DocStore>("data").await.unwrap();
 
     // THIS is the key: read state DURING the merge transaction

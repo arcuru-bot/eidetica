@@ -9,7 +9,7 @@ use rand::{Rng, RngCore, distributions::Alphanumeric};
 use serde_json;
 
 use crate::{
-    Error, Instance, Result, Transaction, WeakInstance,
+    Error, Instance, Result, Snapshot, Transaction, WeakInstance,
     auth::{
         crypto::{PrivateKey, PublicKey},
         errors::AuthError,
@@ -191,7 +191,7 @@ impl Database {
         initial_settings.set("auth", auth_settings.as_doc().clone());
 
         // Create the initial root entry using a temporary Database and Transaction.
-        // This placeholder ID should not exist in the backend, so get_tips will be empty.
+        // This placeholder ID should not exist in the backend, so current_snapshot will be empty.
         let bootstrap_placeholder_id = format!(
             "bootstrap_root_{}",
             rand::thread_rng()
@@ -528,8 +528,8 @@ impl Database {
                 }
 
                 // Get current tips for the delegated tree
-                let tips = match instance.backend().get_tips(delegated_root_id).await {
-                    Ok(t) => t,
+                let tips = match instance.backend().current_snapshot(delegated_root_id).await {
+                    Ok(snap) => snap.into_tips(),
                     Err(_) => continue,
                 };
 
@@ -742,23 +742,23 @@ impl Database {
     /// # Returns
     /// A `Result<Transaction>` containing the new atomic transaction
     pub async fn new_transaction(&self) -> Result<Transaction> {
-        let tips = self.get_tips().await?;
-        self.new_transaction_with_tips(&tips).await
+        let snapshot = self.current_snapshot().await?;
+        self.new_transaction_at(&snapshot).await
     }
 
-    /// Create a new atomic transaction on this database with specific parent tips
+    /// Create a new atomic transaction on this database anchored at a specific snapshot.
     ///
-    /// This creates a new atomic transaction that will have the specified entries as parents
-    /// instead of using the current database tips. This allows creating complex DAG structures
+    /// The transaction's parents are taken from the provided snapshot's tips instead of
+    /// the database's current state. This allows creating complex DAG structures
     /// like diamond patterns for testing and advanced use cases.
     ///
     /// # Arguments
-    /// * `tips` - The specific parent tips to use for this transaction
+    /// * `snapshot` - The snapshot to anchor the transaction at
     ///
     /// # Returns
     /// A `Result<Transaction>` containing the new atomic transaction
-    pub async fn new_transaction_with_tips(&self, tips: impl AsRef<[ID]>) -> Result<Transaction> {
-        let mut txn = Transaction::new_with_tips(self, tips.as_ref()).await?;
+    pub async fn new_transaction_at(&self, snapshot: &Snapshot) -> Result<Transaction> {
+        let mut txn = Transaction::new_at(self, snapshot).await?;
 
         // Set provided signing key from DatabaseKey
         if let Some(key) = &self.key {
@@ -794,15 +794,15 @@ impl Database {
         T::new(&txn, name.into()).await
     }
 
-    /// Get the current tips (leaf entries) of the main database branch.
+    /// Returns the current snapshot of the database — the set of tip entry IDs.
     ///
-    /// Tips represent the latest entries in the database's main history, forming the heads of the DAG.
+    /// A snapshot uniquely identifies the database state at a point in time.
     ///
     /// # Returns
-    /// A `Result` containing a vector of `ID`s for the tip entries or an error.
-    pub async fn get_tips(&self) -> Result<Vec<ID>> {
+    /// A `Result` containing the current `Snapshot`.
+    pub async fn current_snapshot(&self) -> Result<Snapshot> {
         let instance = self.instance()?;
-        instance.get_tips(&self.root).await
+        instance.current_snapshot(&self.root).await
     }
 
     /// Get the full `Entry` objects for the current tips of the main database branch.
@@ -811,9 +811,9 @@ impl Database {
     /// A `Result` containing a vector of the tip `Entry` objects or an error.
     pub async fn get_tip_entries(&self) -> Result<Vec<Entry>> {
         let instance = self.instance()?;
-        let tips = instance.get_tips(&self.root).await?;
+        let snapshot = instance.current_snapshot(&self.root).await?;
         let mut entries = Vec::new();
-        for id in &tips {
+        for id in snapshot.tips() {
             entries.push(instance.get(id).await?);
         }
         Ok(entries)
@@ -1045,7 +1045,7 @@ impl Database {
     /// Get all entries in this database.
     ///
     /// ⚠️ **Warning**: This method loads all entries into memory. Use with caution on large databases.
-    /// Consider using `get_tips()` or `get_tip_entries()` for more efficient access patterns.
+    /// Consider using `current_snapshot()` or `get_tip_entries()` for more efficient access patterns.
     ///
     /// # Returns
     /// A `Result` containing a vector of all `Entry` objects in the database

@@ -1,6 +1,7 @@
 mod helpers;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use eidetica::Snapshot;
 use eidetica::{Database, backend::database::InMemory, entry::ID, store::DocStore};
 use std::hint::black_box;
 
@@ -41,7 +42,7 @@ async fn create_diamond_pattern(tree: &Database) -> (Vec<ID>, ID) {
 
     // Create B and C from A
     let txn_b = tree
-        .new_transaction_with_tips(std::slice::from_ref(&entry_a))
+        .new_transaction_at(&Snapshot::from(std::slice::from_ref(&entry_a)))
         .await
         .expect("Failed to create txn");
     let kv_b = txn_b
@@ -54,7 +55,7 @@ async fn create_diamond_pattern(tree: &Database) -> (Vec<ID>, ID) {
     let entry_b = txn_b.commit().await.expect("Failed to commit");
 
     let txn_c = tree
-        .new_transaction_with_tips(std::slice::from_ref(&entry_a))
+        .new_transaction_at(&Snapshot::from(std::slice::from_ref(&entry_a)))
         .await
         .expect("Failed to create txn");
     let kv_c = txn_c
@@ -95,7 +96,7 @@ async fn create_branching_tree(
 
         for entry_idx in 0..entries_per_branch {
             let txn = tree
-                .new_transaction_with_tips([current_tip])
+                .new_transaction_at(&Snapshot::from([current_tip]))
                 .await
                 .expect("Failed to create txn");
             let kv = txn
@@ -151,7 +152,7 @@ async fn create_large_tree(tree: &Database, num_entries: usize, structure: &str)
 
             for i in 0..num_entries {
                 let txn = tree
-                    .new_transaction_with_tips(std::slice::from_ref(&root_entry))
+                    .new_transaction_at(&Snapshot::from(std::slice::from_ref(&root_entry)))
                     .await
                     .expect("Failed to create txn");
                 let kv = txn
@@ -382,7 +383,7 @@ pub fn bench_crdt_merge_operations(c: &mut Criterion) {
                     |(_instance, tree, tip_entry)| {
                         rt.block_on(async {
                             let txn = tree
-                                .new_transaction_with_tips([tip_entry])
+                                .new_transaction_at(&Snapshot::from([tip_entry]))
                                 .await
                                 .expect("Failed to create txn");
                             let kv = txn

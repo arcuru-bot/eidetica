@@ -40,6 +40,7 @@ use crate::Result;
 use crate::backend::errors::BackendError;
 use crate::backend::{BackendImpl, InstanceMetadata, InstanceSecrets, VerificationStatus};
 use crate::entry::{Entry, ID};
+use crate::snapshot::Snapshot;
 
 /// Extension trait for sqlx Result types to simplify error handling.
 ///
@@ -396,21 +397,25 @@ impl BackendImpl for SqlxBackend {
         storage::get_entries_by_verification_status(self, status).await
     }
 
-    async fn get_tips(&self, tree: &ID) -> Result<Vec<ID>> {
-        traversal::get_tips(self, tree).await
+    async fn current_snapshot(&self, tree: &ID) -> Result<Snapshot> {
+        traversal::get_tips(self, tree).await.map(Snapshot::new)
     }
 
-    async fn get_store_tips(&self, tree: &ID, store: &str) -> Result<Vec<ID>> {
-        traversal::get_store_tips(self, tree, store).await
+    async fn store_snapshot(&self, tree: &ID, store: &str) -> Result<Snapshot> {
+        traversal::get_store_tips(self, tree, store)
+            .await
+            .map(Snapshot::new)
     }
 
-    async fn get_store_tips_up_to_entries(
+    async fn store_snapshot_up_to(
         &self,
         tree: &ID,
         store: &str,
         main_entries: &[ID],
-    ) -> Result<Vec<ID>> {
-        traversal::get_store_tips_up_to_entries(self, tree, store, main_entries).await
+    ) -> Result<Snapshot> {
+        traversal::get_store_tips_up_to_entries(self, tree, store, main_entries)
+            .await
+            .map(Snapshot::new)
     }
 
     async fn all_roots(&self) -> Result<Vec<ID>> {
@@ -446,8 +451,8 @@ impl BackendImpl for SqlxBackend {
         traversal::get_tree_from_tips(self, tree, tips).await
     }
 
-    async fn get_store_from_tips(&self, tree: &ID, store: &str, tips: &[ID]) -> Result<Vec<Entry>> {
-        traversal::get_store_from_tips(self, tree, store, tips).await
+    async fn get_store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>> {
+        traversal::get_store_from_tips(self, tree, store, snapshot.tips()).await
     }
 
     async fn get_cached_crdt_state(&self, entry_id: &ID, store: &str) -> Result<Option<String>> {

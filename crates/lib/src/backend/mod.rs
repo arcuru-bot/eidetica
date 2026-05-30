@@ -17,6 +17,7 @@ use crate::{
     Result,
     auth::crypto::{PrivateKey, PublicKey},
     entry::{Entry, ID},
+    snapshot::Snapshot,
 };
 
 /// Persistent public metadata for an Eidetica instance.
@@ -230,7 +231,7 @@ pub trait BackendImpl: Send + Sync + Any {
         status: VerificationStatus,
     ) -> Result<Vec<ID>>;
 
-    /// Retrieves the IDs of the tip entries for a given tree.
+    /// Returns the current snapshot of a tree — the set of tip entry IDs.
     ///
     /// Tips are defined as the set of entries within the specified tree
     /// that have no children *within that same tree*. An entry is considered
@@ -240,10 +241,10 @@ pub trait BackendImpl: Send + Sync + Any {
     /// * `tree` - The root ID of the tree for which to find tips.
     ///
     /// # Returns
-    /// A `Result` containing a vector of tip entry IDs or an error.
-    async fn get_tips(&self, tree: &ID) -> Result<Vec<ID>>;
+    /// A `Result` containing a `Snapshot` (sorted, deduplicated set of tip IDs).
+    async fn current_snapshot(&self, tree: &ID) -> Result<Snapshot>;
 
-    /// Retrieves the IDs of the tip entries for a specific store within a given tree.
+    /// Returns the snapshot of a specific store within a given tree.
     ///
     /// Store tips are defined as the set of entries within the specified store
     /// that have no children *within that same store*. An entry is considered
@@ -255,10 +256,10 @@ pub trait BackendImpl: Send + Sync + Any {
     /// * `store` - The name of the store for which to find tips.
     ///
     /// # Returns
-    /// A `Result` containing a vector of tip entry IDs for the store or an error.
-    async fn get_store_tips(&self, tree: &ID, store: &str) -> Result<Vec<ID>>;
+    /// A `Result` containing a `Snapshot` of the store's tip IDs.
+    async fn store_snapshot(&self, tree: &ID, store: &str) -> Result<Snapshot>;
 
-    /// Gets the store tips that exist up to a specific set of main tree entries.
+    /// Returns the store snapshot as of a specific set of main-tree entries.
     ///
     /// This method finds all store entries that are reachable from the specified
     /// main tree entries, then filters to find which of those are tips within the store.
@@ -269,13 +270,13 @@ pub trait BackendImpl: Send + Sync + Any {
     /// * `main_entries` - The main tree entry IDs to use as the boundary.
     ///
     /// # Returns
-    /// A `Result` containing a vector of store tip entry IDs up to the main entries.
-    async fn get_store_tips_up_to_entries(
+    /// A `Result` containing a `Snapshot` of the store's tip IDs as of the boundary.
+    async fn store_snapshot_up_to(
         &self,
         tree: &ID,
         store: &str,
         main_entries: &[ID],
-    ) -> Result<Vec<ID>>;
+    ) -> Result<Snapshot>;
 
     /// Retrieves the IDs of all top-level root entries stored in the backend.
     ///
@@ -383,20 +384,20 @@ pub trait BackendImpl: Send + Sync + Any {
     /// - `EntryNotInTree` if any tip belongs to a different tree
     async fn get_tree_from_tips(&self, tree: &ID, tips: &[ID]) -> Result<Vec<Entry>>;
 
-    /// Retrieves all entries belonging to a specific store within a tree up to the given tips, sorted topologically.
+    /// Retrieves all entries belonging to a specific store within a tree at the given snapshot, sorted topologically.
     ///
-    /// Similar to `get_subtree`, but only includes entries that are ancestors of the provided store tips.
-    /// This allows reading from a specific state of the store defined by those tips.
+    /// Similar to `get_store`, but only includes entries that are ancestors of the provided store snapshot.
+    /// This allows reading from a specific state of the store defined by that snapshot.
     ///
     /// # Arguments
     /// * `tree` - The root ID of the parent tree.
     /// * `store` - The name of the store to retrieve.
-    /// * `tips` - The tip IDs defining the state to read from.
+    /// * `snapshot` - The snapshot defining the state to read from.
     ///
     /// # Returns
-    /// A `Result` containing a vector of `Entry` objects in the store up to the given tips,
+    /// A `Result` containing a vector of `Entry` objects in the store up to the given snapshot,
     /// sorted topologically, or an error.
-    async fn get_store_from_tips(&self, tree: &ID, store: &str, tips: &[ID]) -> Result<Vec<Entry>>;
+    async fn get_store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>>;
 
     // === CRDT State Cache Methods ===
     //

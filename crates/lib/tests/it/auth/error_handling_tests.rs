@@ -173,7 +173,7 @@ async fn test_privilege_escalation_through_delegation() -> Result<()> {
     let delegated_tree = user
         .create_database(delegated_settings, &admin_key_id)
         .await?;
-    let delegated_tips = delegated_tree.get_tips().await?;
+    let delegated_tips = delegated_tree.current_snapshot().await?.into_tips();
 
     // Create main tree (signing key becomes Admin(0))
     let main_settings = Doc::new();
@@ -251,7 +251,7 @@ async fn test_delegation_with_tampered_tips() -> Result<()> {
         .await?;
     txn.commit().await?;
 
-    let real_tips = delegated_tree.get_tips().await?;
+    let real_tips = delegated_tree.current_snapshot().await?.into_tips();
 
     // Create main tree (signing key becomes Admin(0))
     let main_settings = Doc::new();
@@ -335,7 +335,7 @@ async fn test_delegation_mixed_key_statuses() -> Result<()> {
         .await?;
     txn.commit().await?;
 
-    let delegated_tips = delegated_tree.get_tips().await?;
+    let delegated_tips = delegated_tree.current_snapshot().await?.into_tips();
 
     // Create main tree (signing key becomes Admin(0))
     let main_settings = Doc::new();

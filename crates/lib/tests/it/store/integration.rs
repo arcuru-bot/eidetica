@@ -4,6 +4,7 @@
 //! concurrent modifications, merging, authentication, and cross-subtree operations.
 
 use eidetica::store::{DocStore, Table};
+use eidetica::Snapshot;
 
 use super::helpers::*;
 use crate::helpers::*;
@@ -255,7 +256,7 @@ async fn test_subtree_concurrent_access_patterns() {
     // Branch A: Modify Table data
     let op_branch_a = ctx
         .database()
-        .new_transaction_with_tips([base_entry_id.clone()])
+        .new_transaction_at(&Snapshot::from([base_entry_id.clone()]))
         .await
         .expect("Branch A: Failed to start");
     {
@@ -282,7 +283,7 @@ async fn test_subtree_concurrent_access_patterns() {
     // Branch B: Modify Doc data (parallel to Branch A)
     let op_branch_b = ctx
         .database()
-        .new_transaction_with_tips([base_entry_id])
+        .new_transaction_at(&Snapshot::from([base_entry_id]))
         .await
         .expect("Branch B: Failed to start");
     {
