@@ -311,7 +311,7 @@ When you delegate to another database:
 # extern crate eidetica;
 # extern crate tokio;
 # use eidetica::{Instance, backend::database::Sqlite, crdt::Doc};
-# use eidetica::auth::{DelegatedTreeRef, Permission, PermissionBounds, TreeReference};
+# use eidetica::{Snapshot, auth::{DelegatedTreeRef, Permission, PermissionBounds}};
 # use eidetica::store::SettingsStore;
 #
 # #[tokio::main]
@@ -326,23 +326,20 @@ When you delegate to another database:
 #
 # // Create main project database
 # let project_database = user.create_database(Doc::new(), &default_key).await?;
-// Get the user's database root and current tips
+// Get Alice's database root and current snapshot
 let user_root = alice_database.root_id().clone();
-let user_tips = alice_database.get_tips().await?;
+let user_snapshot = alice_database.current_snapshot().await?;
 
 // Add delegation reference to project database
 let transaction = project_database.new_transaction().await?;
 let settings = transaction.get_settings()?;
 
-settings.add_delegated_tree(DelegatedTreeRef {
+settings.add_delegated_tree(&user_root, DelegatedTreeRef {
     permission_bounds: PermissionBounds {
         max: Permission::Write(15),
         min: Some(Permission::Read),
     },
-    tree: TreeReference {
-        root: user_root,
-        tips: user_tips,
-    },
+    snapshot: user_snapshot,
 }).await?;
 
 transaction.commit().await?;
@@ -367,7 +364,7 @@ Delegations are stored in the **delegating database's** auth settings by the del
 # extern crate eidetica;
 # extern crate tokio;
 # use eidetica::{Instance, backend::database::Sqlite, crdt::Doc};
-# use eidetica::auth::{DelegatedTreeRef, Permission, PermissionBounds, TreeReference};
+# use eidetica::{Snapshot, auth::{DelegatedTreeRef, Permission, PermissionBounds}};
 # use eidetica::store::SettingsStore;
 #
 # #[tokio::main]
@@ -378,16 +375,13 @@ Delegations are stored in the **delegating database's** auth settings by the del
 # let default_key = user.get_default_key()?;
 # let alice_db = user.create_database(Doc::new(), &default_key).await?;
 # let alice_root = alice_db.root_id().clone();
-# let alice_tips = alice_db.get_tips().await?;
+# let alice_snapshot = alice_db.current_snapshot().await?;
 # let project_db = user.create_database(Doc::new(), &default_key).await?;
 # let transaction = project_db.new_transaction().await?;
 # let settings = transaction.get_settings()?;
 // In project database: delegation stored by Alice's database root ID
-settings.add_delegated_tree(DelegatedTreeRef {
-    tree: TreeReference {
-        root: alice_root,  // <- Root ID used as storage key
-        tips: alice_tips,
-    },
+settings.add_delegated_tree(&alice_root, DelegatedTreeRef {
+    snapshot: alice_snapshot,
     permission_bounds: PermissionBounds {
         max: Permission::Write(15),
         min: Some(Permission::Read),
@@ -463,7 +457,7 @@ A delegation path is a sequence of steps that traverses from the delegating data
 # let default_key = user.get_default_key()?;
 # let project_db = user.create_database(Doc::new(), &default_key).await?;
 # let user_db = user.create_database(Doc::new(), &default_key).await?;
-# let user_tips = user_db.get_tips().await?;
+# let user_tips = user_db.current_snapshot().await?.into_tips();
 // Create a delegation path:
 // - path: list of delegated trees to traverse (by root ID)
 // - hint: identifies the final signer in the last delegated tree

@@ -206,7 +206,7 @@ classDiagram
     AuthKey --> KeyStatus
 ```
 
-**Note**: Both direct keys and delegated databases are fully implemented and functional, including `DelegatedTreeRef`, `PermissionBounds`, and `TreeReference` types.
+**Note**: Both direct keys and delegated databases are fully implemented and functional, including `DelegatedTreeRef` and `PermissionBounds` types. The delegated tree's pinned state is carried as a `Snapshot` directly on `DelegatedTreeRef` (the previous wrapping `TreeReference` type has been folded into `Snapshot`).
 
 ### Direct Key Example
 

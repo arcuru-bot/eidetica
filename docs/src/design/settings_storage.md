@@ -67,8 +67,10 @@ Every entry includes metadata tracking settings state:
 ```rust,ignore
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EntryMetadata {
-    /// Tips of the _settings store at the time this entry was created
-    settings_tips: Vec<ID>,
+    /// Snapshot of the _settings store at the time this entry was created.
+    /// On-disk wire key remains `settings_tips` for backward compatibility.
+    #[serde(rename = "settings_tips")]
+    settings_snapshot: Snapshot,
     /// Random entropy for ensuring unique IDs for root entries
     entropy: Option<u64>,
 }

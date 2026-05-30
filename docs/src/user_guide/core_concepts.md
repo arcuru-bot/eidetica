@@ -134,13 +134,19 @@ Eidetica is designed with distributed systems in mind:
 
 These properties ensure that when Eidetica instances synchronize, they eventually reach a consistent state regardless of the order in which updates are received.
 
+## Snapshots: Naming a Database State
+
+A **Snapshot** is an immutable identifier for the state of a `Database` at a point in time. It is the user-facing name for the set of DAG tip entries that, together, fully determine the content reachable from that state — content-addressing makes the mapping bijective.
+
+You obtain a snapshot via `Database::current_snapshot()` and pass it back to anchor reads, transactions, or delegations (e.g. `Database::new_transaction_at(&snapshot)`). Snapshots are sorted-and-deduplicated by construction, so equality and hashing have set semantics. Internally a snapshot is a set of tips; "tips" is the structural noun used inside the DAG layer, while `Snapshot` is the API surface.
+
 ## History Tracking and Time Travel
 
 One of Eidetica's most powerful features is comprehensive history tracking:
 
 - All changes are preserved in the Entry DAG
-- "Tips" represent the latest state of a Database or Store
-- Historical states can be reconstructed by traversing the DAG
+- A `Snapshot` identifies the current state of a Database or Store
+- Historical states can be reconstructed by traversing the DAG from any snapshot
 
 This design allows for future capabilities like:
 
