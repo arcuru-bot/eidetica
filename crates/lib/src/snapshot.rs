@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn iter_yields_sorted_tips() {
-        let mut expected = vec![id(1), id(2), id(3)];
+        let mut expected = [id(1), id(2), id(3)];
         expected.sort();
         let snap = Snapshot::new(vec![id(3), id(1), id(2)]);
         let collected: Vec<&ID> = (&snap).into_iter().collect();

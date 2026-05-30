@@ -432,7 +432,7 @@ impl Transaction {
         let mut metadata = builder
             .metadata()
             .and_then(|m| serde_json::from_str::<EntryMetadata>(m).ok())
-            .unwrap_or_else(|| EntryMetadata {
+            .unwrap_or(EntryMetadata {
                 settings_snapshot: Snapshot::EMPTY,
                 entropy: None,
             });
@@ -1093,7 +1093,7 @@ impl Transaction {
         let mut metadata = builder
             .metadata()
             .and_then(|m| serde_json::from_str::<EntryMetadata>(m).ok())
-            .unwrap_or_else(|| EntryMetadata {
+            .unwrap_or(EntryMetadata {
                 settings_snapshot: Snapshot::EMPTY,
                 entropy: None,
             });

@@ -279,7 +279,7 @@ pub fn bench_tips_finding(c: &mut Criterion) {
         .enable_all()
         .build()
         .expect("Failed to build Tokio runtime");
-    let mut group = c.benchmark_group("get_tips");
+    let mut group = c.benchmark_group("current_snapshot");
 
     for num_tips in [5, 10, 25] {
         group.bench_with_input(
@@ -297,11 +297,11 @@ pub fn bench_tips_finding(c: &mut Criterion) {
                     |(_instance, tree)| {
                         rt.block_on(async {
                             let backend = tree.backend().expect("Failed to get backend");
-                            let tips = backend
-                                .get_tips(tree.root_id())
+                            let snapshot = backend
+                                .current_snapshot(tree.root_id())
                                 .await
-                                .expect("Failed to get tips");
-                            black_box(tips);
+                                .expect("Failed to get snapshot");
+                            black_box(snapshot);
                         });
                     },
                 );
