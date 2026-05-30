@@ -4,13 +4,14 @@
 //! authentication, including tree creation, key delegation, permission
 //! clamping, and various authorization scenarios.
 
+use eidetica::Snapshot;
 use eidetica::{
     Database, Instance, Result,
     auth::{
         crypto::{PrivateKey, PublicKey},
         types::{
             AuthKey, DelegatedTreeRef, DelegationStep, KeyHint, KeyStatus, Permission,
-            PermissionBounds, SigKey, TreeReference,
+            PermissionBounds, SigKey,
         },
         validation::AuthValidator,
     },
@@ -65,7 +66,7 @@ async fn test_delegated_tree_basic_validation() -> Result<()> {
         Some(Permission::Read),
     )
     .await?;
-    settings.add_delegated_tree(delegation_ref).await?;
+    settings.add_delegated_tree(delegated_tree.root_id(), delegation_ref).await?;
     txn.commit().await?;
 
     // Test delegated tree validation
@@ -119,7 +120,7 @@ async fn test_delegated_tree_permission_clamping() -> Result<()> {
     let settings = txn.get_settings()?;
 
     let delegation_ref = create_delegation_ref(&delegated_tree, Permission::Read, None).await?;
-    settings.add_delegated_tree(delegation_ref).await?;
+    settings.add_delegated_tree(delegated_tree.root_id(), delegation_ref).await?;
     txn.commit().await?;
 
     // Test permission clamping
@@ -186,7 +187,7 @@ async fn test_nested_delegation() -> Result<()> {
     {
         let settings = txn.get_settings()?;
         let delegation_ref = create_delegation_ref(&user_tree, Permission::Write(20), None).await?;
-        settings.add_delegated_tree(delegation_ref).await?;
+        settings.add_delegated_tree(user_tree.root_id(), delegation_ref).await?;
     }
     txn.commit().await?;
 
@@ -211,7 +212,7 @@ async fn test_nested_delegation() -> Result<()> {
         let settings = txn.get_settings()?;
         let delegation_ref =
             create_delegation_ref(&org_tree, Permission::Write(15), Some(Permission::Read)).await?;
-        settings.add_delegated_tree(delegation_ref).await?;
+        settings.add_delegated_tree(org_tree.root_id(), delegation_ref).await?;
     }
     txn.commit().await?;
 
@@ -293,7 +294,7 @@ async fn test_delegated_tree_with_revoked_keys() -> Result<()> {
         let settings = txn.get_settings()?;
         let delegation_ref =
             create_delegation_ref(&delegated_tree, Permission::Write(10), None).await?;
-        settings.add_delegated_tree(delegation_ref).await?;
+        settings.add_delegated_tree(delegated_tree.root_id(), delegation_ref).await?;
     }
     txn.commit().await?;
 
@@ -382,7 +383,7 @@ async fn test_delegation_depth_limits() -> Result<()> {
         let settings = txn.get_settings()?;
         let delegation_ref =
             create_delegation_ref(&delegated_tree, Permission::Write(10), None).await?;
-        settings.add_delegated_tree(delegation_ref).await?;
+        settings.add_delegated_tree(delegated_tree.root_id(), delegation_ref).await?;
     }
     txn.commit().await?;
 
@@ -475,7 +476,7 @@ async fn test_delegated_tree_min_bound_upgrade() -> Result<()> {
             Some(Permission::Write(7)), // min: Minimum permission level
         )
         .await?;
-        settings.add_delegated_tree(delegation_ref).await?;
+        settings.add_delegated_tree(delegated_tree.root_id(), delegation_ref).await?;
     }
     txn.commit().await?;
 
@@ -557,7 +558,7 @@ async fn test_delegated_tree_priority_preservation() -> Result<()> {
         let settings = txn.get_settings()?;
         let delegation_ref =
             create_delegation_ref(&delegated_tree, Permission::Write(8), None).await?;
-        settings.add_delegated_tree(delegation_ref).await?;
+        settings.add_delegated_tree(delegated_tree.root_id(), delegation_ref).await?;
     }
     txn.commit().await?;
 
@@ -689,12 +690,9 @@ async fn test_delegated_tree_invalid_tips() -> Result<()> {
                 max: Permission::Write(5),
                 min: None,
             },
-            tree: TreeReference {
-                root: delegated_tree_root.clone(),
-                tips: vec![bogus_tip.clone()],
-            },
+            snapshot: Snapshot::from(vec![bogus_tip.clone()]),
         };
-        settings.add_delegated_tree(delegation_ref).await?;
+        settings.add_delegated_tree(delegated_tree.root_id(), delegation_ref).await?;
     }
     txn.commit().await?;
 
@@ -801,7 +799,7 @@ async fn setup_delegation_pair(
         Database::open(instance.clone(), target_db.root_id(), admin_db_key).await?;
     let txn = target_db_authed.new_transaction().await?;
     txn.get_settings()?
-        .add_delegated_tree(delegation_ref)
+        .add_delegated_tree(identity_db.root_id(), delegation_ref)
         .await?;
     txn.commit().await?;
 
@@ -1049,7 +1047,7 @@ async fn test_delegated_write_secondary_identity_key() -> Result<()> {
         Database::open(instance.clone(), target_db.root_id(), admin_db_key).await?;
     let txn = target_db_authed.new_transaction().await?;
     txn.get_settings()?
-        .add_delegated_tree(delegation_ref)
+        .add_delegated_tree(identity_db.root_id(), delegation_ref)
         .await?;
     txn.commit().await?;
 

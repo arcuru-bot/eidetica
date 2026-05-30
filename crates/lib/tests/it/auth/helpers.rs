@@ -5,7 +5,7 @@ use eidetica::{
         settings::AuthSettings,
         types::{
             AuthKey, DelegatedTreeRef, DelegationStep, KeyHint, KeyStatus, Permission,
-            PermissionBounds, SigKey, TreeReference,
+            PermissionBounds, SigKey,
         },
         validation::AuthValidator,
     },
@@ -258,16 +258,12 @@ pub async fn create_delegation_ref(
     max_permission: Permission,
     min_permission: Option<Permission>,
 ) -> Result<DelegatedTreeRef> {
-    let tips = tree.current_snapshot().await?.into_tips();
     Ok(DelegatedTreeRef {
         permission_bounds: PermissionBounds {
             max: max_permission,
             min: min_permission,
         },
-        tree: TreeReference {
-            root: tree.root_id().clone(),
-            tips,
-        },
+        snapshot: tree.current_snapshot().await?,
     })
 }
 

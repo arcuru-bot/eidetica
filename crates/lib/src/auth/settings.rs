@@ -176,13 +176,15 @@ impl AuthSettings {
 
     // ==================== Delegation Operations ====================
 
-    /// Add or update a delegated tree reference
+    /// Add or update a delegated tree reference.
     ///
-    /// The delegation is stored by root tree ID, extracted from `tree_ref.tree.root`.
-    /// This ensures collision-resistant storage similar to key storage by pubkey.
-    pub fn add_delegated_tree(&mut self, tree_ref: DelegatedTreeRef) -> Result<()> {
-        let root_id = tree_ref.tree.root.to_string();
-        self.inner.set(format!("delegations.{root_id}"), tree_ref);
+    /// The delegation is stored by the delegated tree's root ID, which is
+    /// provided by the caller (typically known from `Database::root_id()`).
+    /// The root could alternatively be recovered from `tree_ref.snapshot.root(backend)`,
+    /// but requiring an explicit `root` keeps this call synchronous.
+    pub fn add_delegated_tree(&mut self, root: &ID, tree_ref: DelegatedTreeRef) -> Result<()> {
+        self.inner
+            .set(format!("delegations.{root}"), tree_ref);
         Ok(())
     }
 

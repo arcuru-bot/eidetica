@@ -62,10 +62,11 @@ impl DelegationResolver {
 
         // Process all delegation steps (tree traversal)
         for step in steps {
-            // Load delegated tree (step.tree contains the root ID)
+            // Load delegated tree (step.tree contains the root ID — same as the
+            // settings key used by AuthSettings).
             let delegated_tree_ref = current_auth_settings.get_delegated_tree(&step.tree)?;
 
-            let root_id = delegated_tree_ref.tree.root.clone();
+            let root_id = step.tree.clone();
             let delegated_tree = Database::open_unauthenticated(root_id.clone(), instance)
                 .map_err(|e| AuthError::DelegatedTreeLoadFailed {
                     tree_id: root_id.clone(),

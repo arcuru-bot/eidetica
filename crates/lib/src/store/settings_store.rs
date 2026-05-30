@@ -12,6 +12,7 @@ use crate::{
         types::{AuthKey, DelegatedTreeRef, KeyStatus},
     },
     crdt::{CRDTError, Doc, doc},
+    entry::ID,
     height::HeightStrategy,
     store::DocStore,
 };
@@ -253,19 +254,17 @@ impl SettingsStore {
         self.set_auth_key(pubkey, key).await
     }
 
-    /// Add a delegated tree reference to the settings
+    /// Add a delegated tree reference to the settings.
     ///
-    /// The delegation is stored by root tree ID, extracted from `tree_ref.tree.root`.
+    /// The delegation is stored by the delegated tree's root ID, which the
+    /// caller provides directly (typically from `Database::root_id()`).
     ///
     /// # Arguments
+    /// * `root` - The delegated database's root ID, used as the storage key
     /// * `tree_ref` - The delegated tree reference to add
-    ///
-    /// # Returns
-    /// Result indicating success or failure
-    pub async fn add_delegated_tree(&self, tree_ref: DelegatedTreeRef) -> Result<()> {
-        let root_id = tree_ref.tree.root.to_string();
+    pub async fn add_delegated_tree(&self, root: &ID, tree_ref: DelegatedTreeRef) -> Result<()> {
         self.inner
-            .set(format!("auth.delegations.{root_id}"), tree_ref)
+            .set(format!("auth.delegations.{root}"), tree_ref)
             .await
     }
 

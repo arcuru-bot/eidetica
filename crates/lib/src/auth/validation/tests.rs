@@ -320,8 +320,8 @@ async fn test_basic_delegated_tree_resolution() {
 #[tokio::test]
 async fn test_complete_delegation_workflow() {
     use crate::{
-        Instance,
-        auth::types::{DelegatedTreeRef, PermissionBounds, TreeReference},
+        Instance, Snapshot,
+        auth::types::{DelegatedTreeRef, PermissionBounds},
         backend::database::InMemory,
     };
 
@@ -371,15 +371,12 @@ async fn test_complete_delegation_workflow() {
     let txn = main_tree.new_transaction().await.unwrap();
     let settings = txn.get_settings().unwrap();
     settings
-        .add_delegated_tree(DelegatedTreeRef {
+        .add_delegated_tree(&delegated_tree.root_id().clone(),DelegatedTreeRef {
             permission_bounds: PermissionBounds {
                 max: Permission::Write(10),
                 min: Some(Permission::Read),
             },
-            tree: TreeReference {
-                root: delegated_tree.root_id().clone(),
-                tips: delegated_tips.clone(),
-            },
+            snapshot: Snapshot::from(delegated_tips.clone()),
         })
         .await
         .unwrap();
@@ -422,8 +419,8 @@ async fn test_complete_delegation_workflow() {
 #[tokio::test]
 async fn test_delegated_tree_requires_tips() {
     use crate::{
-        Instance,
-        auth::types::{DelegatedTreeRef, PermissionBounds, TreeReference},
+        Instance, Snapshot,
+        auth::types::{DelegatedTreeRef, PermissionBounds},
         backend::database::InMemory,
     };
 
@@ -455,15 +452,12 @@ async fn test_delegated_tree_requires_tips() {
     let txn = main_tree.new_transaction().await.unwrap();
     let settings = txn.get_settings().unwrap();
     settings
-        .add_delegated_tree(DelegatedTreeRef {
+        .add_delegated_tree(&delegated_tree.root_id().clone(),DelegatedTreeRef {
             permission_bounds: PermissionBounds {
                 max: Permission::Write(10),
                 min: Some(Permission::Read),
             },
-            tree: TreeReference {
-                root: delegated_tree.root_id().clone(),
-                tips: vec![ID::from_bytes("some_tip")],
-            },
+            snapshot: Snapshot::from(vec![ID::from_bytes("some_tip")]),
         })
         .await
         .unwrap();
@@ -506,8 +500,8 @@ async fn test_delegated_tree_requires_tips() {
 #[tokio::test]
 async fn test_nested_delegation_with_permission_clamping() {
     use crate::{
-        Instance,
-        auth::types::{DelegatedTreeRef, PermissionBounds, TreeReference},
+        Instance, Snapshot,
+        auth::types::{DelegatedTreeRef, PermissionBounds},
         backend::database::InMemory,
     };
 
@@ -557,15 +551,12 @@ async fn test_nested_delegation_with_permission_clamping() {
     let txn = intermediate_tree.new_transaction().await.unwrap();
     let settings = txn.get_settings().unwrap();
     settings
-        .add_delegated_tree(DelegatedTreeRef {
+        .add_delegated_tree(&user_tree.root_id().clone(),DelegatedTreeRef {
             permission_bounds: PermissionBounds {
                 max: Permission::Write(8), // Clamp Admin(3) to Write(8)
                 min: Some(Permission::Read),
             },
-            tree: TreeReference {
-                root: user_tree.root_id().clone(),
-                tips: user_tips.clone(),
-            },
+            snapshot: Snapshot::from(user_tips.clone()),
         })
         .await
         .unwrap();
@@ -587,15 +578,12 @@ async fn test_nested_delegation_with_permission_clamping() {
     let txn = main_tree.new_transaction().await.unwrap();
     let settings = txn.get_settings().unwrap();
     settings
-        .add_delegated_tree(DelegatedTreeRef {
+        .add_delegated_tree(&intermediate_tree.root_id().clone(),DelegatedTreeRef {
             permission_bounds: PermissionBounds {
                 max: Permission::Write(5), // Less restrictive than Write(8)
                 min: Some(Permission::Read),
             },
-            tree: TreeReference {
-                root: intermediate_tree.root_id().clone(),
-                tips: intermediate_tips.clone(),
-            },
+            snapshot: Snapshot::from(intermediate_tips.clone()),
         })
         .await
         .unwrap();

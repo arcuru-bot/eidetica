@@ -3,13 +3,14 @@
 //! These tests cover error propagation, validation failures, backend issues,
 //! and security edge cases in the delegation system.
 
+use eidetica::Snapshot;
 use eidetica::{
     Result,
     auth::{
         AuthSettings,
         types::{
             AuthKey, DelegatedTreeRef, DelegationStep, KeyHint, KeyStatus, Permission,
-            PermissionBounds, SigKey, TreeReference,
+            PermissionBounds, SigKey,
         },
         validation::AuthValidator,
     },
@@ -65,10 +66,7 @@ async fn test_delegation_nonexistent_tree() -> Result<()> {
             min: None,
             max: Permission::Write(10),
         },
-        tree: TreeReference {
-            root: nonexistent_root_id.clone(),
-            tips: vec![ID::from_bytes("nonexistent_tip")],
-        },
+        snapshot: Snapshot::from(vec![ID::from_bytes("nonexistent_tip")]),
     };
 
     let mut new_auth_settings = tree.get_settings().await?.get_all().await?;
@@ -184,15 +182,12 @@ async fn test_privilege_escalation_through_delegation() -> Result<()> {
     let settings_store = txn.get_settings()?;
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
-        .add_delegated_tree(DelegatedTreeRef {
+        .add_delegated_tree(&delegated_tree_root.clone(),DelegatedTreeRef {
             permission_bounds: PermissionBounds {
                 min: None,
                 max: Permission::Write(10), // Restrict to Write only
             },
-            tree: TreeReference {
-                root: delegated_tree_root.clone(),
-                tips: delegated_tips.clone(),
-            },
+            snapshot: Snapshot::from(delegated_tips.clone()),
         })
         .await?;
     txn.commit().await?;
@@ -262,15 +257,12 @@ async fn test_delegation_with_tampered_tips() -> Result<()> {
     let settings_store = txn.get_settings()?;
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
-        .add_delegated_tree(DelegatedTreeRef {
+        .add_delegated_tree(&delegated_tree_root.clone(),DelegatedTreeRef {
             permission_bounds: PermissionBounds {
                 min: None,
                 max: Permission::Write(10),
             },
-            tree: TreeReference {
-                root: delegated_tree_root.clone(),
-                tips: real_tips.clone(),
-            },
+            snapshot: Snapshot::from(real_tips.clone()),
         })
         .await?;
     txn.commit().await?;
@@ -346,15 +338,12 @@ async fn test_delegation_mixed_key_statuses() -> Result<()> {
     let settings_store = txn.get_settings()?;
     let delegated_tree_root = delegated_tree.root_id().clone();
     settings_store
-        .add_delegated_tree(DelegatedTreeRef {
+        .add_delegated_tree(&delegated_tree_root.clone(),DelegatedTreeRef {
             permission_bounds: PermissionBounds {
                 min: None,
                 max: Permission::Write(10),
             },
-            tree: TreeReference {
-                root: delegated_tree_root.clone(),
-                tips: delegated_tips.clone(),
-            },
+            snapshot: Snapshot::from(delegated_tips.clone()),
         })
         .await?;
     txn.commit().await?;
