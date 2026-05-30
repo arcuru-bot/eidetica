@@ -21,8 +21,22 @@ use serde::{Deserialize, Serialize};
 use crate::entry::ID;
 
 /// Identifier for a database state — a sorted, deduplicated set of DAG tips.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+///
+/// Serialization is transparent (the wire form is a JSON/DAG-CBOR array of IDs,
+/// identical to a `Vec<ID>`). Deserialization normalizes via `Snapshot::new`,
+/// so unsorted or duplicated input is canonicalized on read.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Default)]
 pub struct Snapshot(Vec<ID>);
+
+impl<'de> Deserialize<'de> for Snapshot {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let tips = Vec::<ID>::deserialize(deserializer)?;
+        Ok(Self::new(tips))
+    }
+}
 
 impl Snapshot {
     /// A snapshot containing no tips — the state of a database with no entries.
@@ -214,5 +228,40 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let parsed: Snapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, snap);
+    }
+
+    #[test]
+    fn deserialize_normalizes_unsorted_wire_data() {
+        // Simulate wire data written without the sorted invariant
+        // (e.g. by an older client). The Snapshot deserializer must canonicalize.
+        let a = id(1);
+        let b = id(2);
+        let canonical = Snapshot::new(vec![a.clone(), b.clone()]);
+        let unsorted_json = serde_json::to_string(&vec![b, a]).unwrap();
+        let parsed: Snapshot = serde_json::from_str(&unsorted_json).unwrap();
+        assert_eq!(parsed, canonical);
+    }
+
+    #[test]
+    fn deserialize_dedups_wire_data() {
+        let a = id(1);
+        let b = id(2);
+        let canonical = Snapshot::new(vec![a.clone(), b.clone()]);
+        let duped_json = serde_json::to_string(&vec![a.clone(), b, a]).unwrap();
+        let parsed: Snapshot = serde_json::from_str(&duped_json).unwrap();
+        assert_eq!(parsed, canonical);
+    }
+
+    #[test]
+    fn serializes_as_bare_id_array() {
+        // Snapshot must be wire-compatible with Vec<ID> — same JSON shape.
+        // This matters for in-place migration of fields that were previously
+        // typed `Vec<ID>` (e.g. EntryMetadata.settings_tips).
+        let a = id(1);
+        let b = id(2);
+        let snap = Snapshot::new(vec![a.clone(), b.clone()]);
+        let snap_json = serde_json::to_string(&snap).unwrap();
+        let vec_json = serde_json::to_string(snap.tips()).unwrap();
+        assert_eq!(snap_json, vec_json);
     }
 }
