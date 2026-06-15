@@ -30,7 +30,9 @@ use crate::{
     },
 };
 
+// LINT.IfChange(sync_alpn)
 const SYNC_ALPN: &[u8] = b"eidetica/v0";
+// LINT.ThenChange(//docs/src/design/synchronization.md:sync_alpn)
 
 /// Serializable relay mode setting for transport configuration.
 ///

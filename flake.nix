@@ -96,12 +96,17 @@
         # Import package groups
         mainPkgs = import ./nix/packages/main.nix {inherit craneLib releaseArgs debugArgs;};
 
+        # External tool: ifttt-lint (cross-file drift linter, packaged via crane).
+        # Consumed by the structural lint check and the impure CI diff job.
+        iftttPkgs = import ./nix/packages/ifttt-lint.nix {inherit craneLib pkgs lib;};
+
         testPkgs = import ./nix/packages/test.nix {inherit craneLib debugArgs baseArgs pkgs lib;};
         coveragePkgs = import ./nix/packages/coverage.nix {inherit craneLibNightly baseArgsNightly fenixNightly toolChainNightly eidLib pkgs lib;};
         sanitizePkgs = import ./nix/packages/sanitize.nix {inherit craneLibNightly debugArgsNightly asanArgs lsanArgs fenixNightly pkgs lib;};
         docPkgs = import ./nix/packages/doc.nix {inherit craneLib debugArgs pkgs lib;};
         lintPkgs = import ./nix/packages/lint.nix {
           inherit craneLib craneLibNightly baseArgs baseArgsNightly debugArgs eidLib pkgs lib;
+          inherit (iftttPkgs) ifttt-lint;
           treefmtWrapper = config.treefmt.build.wrapper;
         };
         benchPkgs = import ./nix/packages/bench.nix {inherit craneLib benchArgs eidLib;};
@@ -237,6 +242,8 @@
         packages = {
           default = mainPkgs.eidetica-bin;
           inherit (mainPkgs) eidetica-bin;
+          # `nix run .#ifttt-lint -- --diff <range>` drives the impure CI diff job.
+          inherit (iftttPkgs) ifttt-lint;
         };
 
         # CI checks - packages that run during `nix flake check`

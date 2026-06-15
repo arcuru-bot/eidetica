@@ -284,6 +284,15 @@ pub struct IrohTransport {
 - Handler integration in stream processing
 - JsonHandler for serialization consistency
 
+<!-- LINT.IfChange(sync_alpn) -->
+
+The Iroh transport negotiates connections under the ALPN identifier `eidetica/v0`.
+Peers with mismatched ALPN strings cannot connect, so this value is a wire-format
+constant: bumping it is a breaking protocol change and must be coordinated across
+every implementation and interop client.
+
+<!-- LINT.ThenChange(//crates/lib/src/sync/transports/iroh.rs:sync_alpn) -->
+
 **Use cases:**
 
 - Production deployments

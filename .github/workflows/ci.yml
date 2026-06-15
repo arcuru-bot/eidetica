@@ -7,6 +7,9 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   ci:
     name: CI (x86_64-linux)
@@ -50,3 +53,32 @@ jobs:
       - name: Checks
         run: |
           nix-fast-build --skip-cached --no-nom --no-link
+
+  # Impure half of ifttt-lint: did both ends of a guarded IfChange/ThenChange
+  # block co-change in this PR? Can't be a Nix flake check — it needs two real
+  # git revs, so it lives here rather than in the `lint` check set (the pure
+  # structural half rides nix-fast-build above). Read-only, no secrets, so no
+  # fork-fence is needed. Escape hatch: put `NO_IFTTT=<reason>` in a commit
+  # message to suppress the diff check for a deliberately-unpaired change (the
+  # structural check still runs regardless).
+  ifttt-diff:
+    name: ifttt-lint (diff)
+    if: github.event_name == 'pull_request'
+    runs-on: ubicloud-standard-8
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Need both PR base and head reachable for the diff range.
+          fetch-depth: 0
+
+      - name: Setup Nix
+        uses: ./.github/actions/setup-nix
+
+      - name: Validate guarded blocks co-changed
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}...${{ github.sha }}
+        run: |
+          nix run .#ifttt-lint -- --diff "$RANGE"

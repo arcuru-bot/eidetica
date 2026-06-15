@@ -11,6 +11,7 @@
   baseArgsNightly,
   debugArgs,
   eidLib,
+  ifttt-lint,
   treefmtWrapper,
   pkgs,
   lib,
@@ -173,6 +174,28 @@
       packages = [pkgs.gitleaks pkgs.git];
       src = sources.all;
       command = "gitleaks detect --source . --no-git --verbose --config .config/gitleaks.toml";
+    };
+
+    # Structural validation of IfChange/ThenChange directives: every ThenChange
+    # target file + label resolves, blocks are paired, syntax is valid. This is
+    # the PURE half of ifttt-lint — it never needs two revs, so it folds into the
+    # check set and rides ci.yml's nix-fast-build (the impure diff half lives in
+    # a separate CI job). Wrinkle: ifttt-lint shells out to `git ls-files`, but
+    # the Nix `src` has no `.git`, so we copy to a writable tree and `git init`.
+    ifttt-structural = mkSimpleLinter {
+      name = "ifttt-structural";
+      packages = [ifttt-lint pkgs.git pkgs.coreutils];
+      src = sources.all;
+      command = ''
+        export HOME="$TMPDIR"
+        work="$(mktemp -d)"
+        cp -a . "$work/repo"
+        cd "$work/repo"
+        chmod -R u+w .
+        git init -q
+        git add -A
+        ifttt-lint $(git ls-files)
+      '';
     };
   };
 

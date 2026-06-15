@@ -25,7 +25,9 @@ use super::{SqlxBackend, SqlxResultExt};
 ///
 /// Increment this when making schema changes that require migration.
 /// Version 0 is fully unstable and should not be used in production.
+// LINT.IfChange(schema_version)
 pub const SCHEMA_VERSION: i64 = 0;
+// LINT.ThenChange(:run_migration)
 
 /// SQL statements to create the schema tables.
 ///
@@ -230,6 +232,7 @@ async fn migrate(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
 ///     _ => { /* error handling */ }
 /// }
 /// ```
+// LINT.IfChange(run_migration)
 async fn run_migration(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
     // When adding the first migration, replace this with:
     //
@@ -252,3 +255,4 @@ async fn run_migration(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> 
     }
     .into())
 }
+// LINT.ThenChange(:schema_version)
