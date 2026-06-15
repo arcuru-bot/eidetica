@@ -12,17 +12,26 @@
   pkgs,
   lib,
 }: let
-  src = pkgs.fetchFromGitHub {
-    owner = "simonepri";
-    repo = "ifttt-lint";
-    rev = "v0.10.6";
-    hash = "sha256-yx3GvQshf2L8QU5HurRQVFTrJ+ei7wCeVXxRt3EnM6E=";
+  # DEMO PIN (verification commit for ifttt-lint's --patch mode): build the
+  # local fork that adds `--patch`, so the CI diff step can drive the hermetic
+  # `git diff | ifttt-lint --patch -` path instead of `--diff <range>`. This is
+  # an intentionally impure, machine-local pin — Patrick replaces it with the
+  # released fetchFromGitHub once --patch lands upstream. Released pin for
+  # reference:
+  #   pkgs.fetchFromGitHub {
+  #     owner = "simonepri"; repo = "ifttt-lint"; rev = "v0.10.6";
+  #     hash = "sha256-yx3GvQshf2L8QU5HurRQVFTrJ+ei7wCeVXxRt3EnM6E=";
+  #   };
+  src = builtins.fetchGit {
+    url = "file:///home/ava/code/ifttt-lint";
+    ref = "patch-input-mode";
+    rev = "2136f8c96be58ba5ad3e9760882f62757504cd55";
   };
 
   commonArgs = {
     inherit src;
     pname = "ifttt-lint";
-    version = "0.10.6";
+    version = "0.10.6-patch";
     strictDeps = true;
     # Pure-Rust CLI; no system libraries to link.
     doCheck = false;
