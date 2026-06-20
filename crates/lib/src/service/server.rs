@@ -293,6 +293,44 @@ async fn dispatch_inner(
             instance.persist_blob(&cid, data).await?;
             Ok(ServiceResponse::Ok)
         }
+        ServiceRequest::GetBlobRange { cid, start, end } => {
+            require_authenticated(state, "GetBlobRange")?;
+            // Local windowed serve: read only `[start, end)` from the daemon's
+            // store (codec-gated, no peer fetch — same local-only semantics as
+            // `GetBlob`), never whole-loading a large blob.
+            let blob = instance.get_blob_range_local(&cid, start..end).await?;
+            Ok(ServiceResponse::Blob(blob))
+        }
+        ServiceRequest::PinBlob {
+            user_id,
+            database,
+            cid,
+        } => {
+            require_authenticated(state, "PinBlob")?;
+            instance.pin_blob(&user_id, database.as_ref(), &cid).await?;
+            Ok(ServiceResponse::Ok)
+        }
+        ServiceRequest::UnpinBlob {
+            user_id,
+            database,
+            cid,
+        } => {
+            require_authenticated(state, "UnpinBlob")?;
+            let existed = instance
+                .unpin_blob(&user_id, database.as_ref(), &cid)
+                .await?;
+            Ok(ServiceResponse::Bool(existed))
+        }
+        ServiceRequest::PinnedSizeByUser { user_id } => {
+            require_authenticated(state, "PinnedSizeByUser")?;
+            let size = instance.pinned_size_by_user(&user_id).await?;
+            Ok(ServiceResponse::Size(size))
+        }
+        ServiceRequest::GcBlobs { opts } => {
+            require_authenticated(state, "GcBlobs")?;
+            let report = instance.gc_blobs(opts).await?;
+            Ok(ServiceResponse::GcReport(report))
+        }
 
         // === Authenticated storage operations ===
         //

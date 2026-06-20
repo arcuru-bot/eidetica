@@ -711,6 +711,87 @@ impl RemoteConnection {
             other => Err(unexpected_response("Ok", &other)),
         }
     }
+
+    /// Read a byte range of a global blob from the daemon (`GetBlobRange`). The
+    /// daemon serves only the requested window, so this never whole-loads a
+    /// large blob. `None` on miss.
+    pub(crate) async fn get_blob_range_remote(
+        &self,
+        cid: ID,
+        start: u64,
+        end: u64,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        let resp = self
+            .request_ok(ServiceRequest::GetBlobRange { cid, start, end })
+            .await?;
+        match resp {
+            ServiceResponse::Blob(blob) => Ok(blob),
+            other => Err(unexpected_response("Blob", &other)),
+        }
+    }
+
+    /// Pin a global blob on the daemon (`PinBlob`).
+    pub(crate) async fn pin_blob_remote(
+        &self,
+        user_id: String,
+        database: Option<ID>,
+        cid: ID,
+    ) -> crate::Result<()> {
+        let resp = self
+            .request_ok(ServiceRequest::PinBlob {
+                user_id,
+                database,
+                cid,
+            })
+            .await?;
+        match resp {
+            ServiceResponse::Ok => Ok(()),
+            other => Err(unexpected_response("Ok", &other)),
+        }
+    }
+
+    /// Remove a blob pin on the daemon (`UnpinBlob`). Returns whether it existed.
+    pub(crate) async fn unpin_blob_remote(
+        &self,
+        user_id: String,
+        database: Option<ID>,
+        cid: ID,
+    ) -> crate::Result<bool> {
+        let resp = self
+            .request_ok(ServiceRequest::UnpinBlob {
+                user_id,
+                database,
+                cid,
+            })
+            .await?;
+        match resp {
+            ServiceResponse::Bool(existed) => Ok(existed),
+            other => Err(unexpected_response("Bool", &other)),
+        }
+    }
+
+    /// Total pinned bytes for a user on the daemon (`PinnedSizeByUser`).
+    pub(crate) async fn pinned_size_by_user_remote(&self, user_id: String) -> crate::Result<u64> {
+        let resp = self
+            .request_ok(ServiceRequest::PinnedSizeByUser { user_id })
+            .await?;
+        match resp {
+            ServiceResponse::Size(size) => Ok(size),
+            other => Err(unexpected_response("Size", &other)),
+        }
+    }
+
+    /// Run a blob GC pass on the daemon (`GcBlobs`).
+    pub(crate) async fn gc_blobs_remote(
+        &self,
+        opts: crate::instance::GcOptions,
+    ) -> crate::Result<crate::instance::GcReport> {
+        let resp = self.request_ok(ServiceRequest::GcBlobs { opts }).await?;
+        match resp {
+            ServiceResponse::GcReport(report) => Ok(report),
+            other => Err(unexpected_response("GcReport", &other)),
+        }
+    }
 }
 
 fn unexpected_response(expected: &str, actual: &ServiceResponse) -> crate::Error {

@@ -1468,3 +1468,149 @@ async fn test_blob_ops_require_authentication() {
         "expected an auth error, got: {get_err}"
     );
 }
+
+// === Service-socket parity: range reads, pinning, and GC (§7.5) ===
+//
+// A client over the service socket is meant to be as functional as a local
+// embedded instance. These exercise the off-seam blob ops — windowed range
+// reads, pin/unpin, pinned-size, and GC — over the wire and assert they match
+// embedded semantics.
+
+#[tokio::test]
+async fn test_blob_range_over_service() {
+    // A connected client gets a true windowed read: the daemon serves only the
+    // requested range (`GetBlobRange`), never the whole blob, and the bytes
+    // match what an embedded instance reads from its own engine.
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (client, _root, _identity) = setup_db(&server, &socket_path, "blobuser").await;
+
+    // Larger than the inline threshold so the range is a genuine window.
+    let data: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+    let cid = client.put_blob(data.clone()).await.unwrap();
+
+    let range = 10_000u64..25_000u64;
+    let got = client.get_blob_range(&cid, range.clone()).await.unwrap();
+    assert_eq!(
+        got.as_deref(),
+        Some(&data[range.start as usize..range.end as usize]),
+        "client range read must equal the blob slice"
+    );
+
+    // Parity: the embedded (server-side) instance reads the identical window.
+    let server_side = server.get_blob_range(&cid, range).await.unwrap();
+    assert_eq!(got, server_side, "remote range read must match embedded");
+
+    // An over-long `end` clamps to the blob tail, same as a local read.
+    let tail = client
+        .get_blob_range(&cid, 39_000..1_000_000)
+        .await
+        .unwrap();
+    assert_eq!(tail.as_deref(), Some(&data[39_000..]));
+
+    // Missing blob → None (not an error).
+    let missing = eidetica::entry::ID::from_bytes(b"never stored");
+    assert!(
+        client
+            .get_blob_range(&missing, 0..10)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn test_blob_pin_and_gc_over_service() {
+    // A connected client pins a blob on the daemon and runs GC over the wire,
+    // with embedded retention semantics: pinned survives the sweep, unpinned is
+    // evicted. Pinned-size accounting matches too.
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (client, _root, _identity) = setup_db(&server, &socket_path, "blobuser").await;
+
+    let keep = b"pinned blob that must survive gc".to_vec();
+    let drop = b"unpinned blob that gc should evict".to_vec();
+    let keep_cid = client.put_blob(keep.clone()).await.unwrap();
+    let drop_cid = client.put_blob(drop.clone()).await.unwrap();
+
+    // Pin one over the wire; pinned-size reflects exactly that blob.
+    client.pin_blob("blobuser", None, &keep_cid).await.unwrap();
+    let pinned = client.pinned_size_by_user("blobuser").await.unwrap();
+    assert_eq!(
+        pinned,
+        keep.len() as u64,
+        "pinned size must match the one pinned blob"
+    );
+
+    // GC every unpinned blob (no grace window).
+    let report = client
+        .gc_blobs(eidetica::GcOptions {
+            max_total_bytes: None,
+            min_age_ms: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(report.evicted_count, 1, "only the unpinned blob is evicted");
+    assert_eq!(report.reclaimed_bytes, drop.len() as u64);
+    assert_eq!(report.pinned_bytes, keep.len() as u64);
+
+    // The daemon store reflects the sweep: pinned kept, unpinned gone.
+    assert!(server.get_blob_local(&keep_cid).await.unwrap().is_some());
+    assert!(server.get_blob_local(&drop_cid).await.unwrap().is_none());
+
+    // Unpin reports the pin existed; a second unpin reports it does not.
+    assert!(
+        client
+            .unpin_blob("blobuser", None, &keep_cid)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !client
+            .unpin_blob("blobuser", None, &keep_cid)
+            .await
+            .unwrap(),
+        "second unpin reports the pin no longer exists"
+    );
+
+    // Now-unpinned blob is reclaimed by the next sweep.
+    let report2 = client
+        .gc_blobs(eidetica::GcOptions {
+            max_total_bytes: None,
+            min_age_ms: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(report2.evicted_count, 1);
+    assert!(server.get_blob_local(&keep_cid).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_blob_pin_gc_require_authentication() {
+    // The new off-seam blob ops are gated by an authenticated connection, like
+    // GetBlob/PutBlob.
+    let (socket_path, _tx, _server, _dir) = start_test_server().await;
+    let client = Instance::connect(format!("unix://{}", socket_path.display()))
+        .await
+        .unwrap();
+
+    let cid = eidetica::entry::ID::from_bytes(b"x");
+    let pin_err = client
+        .pin_blob("u", None, &cid)
+        .await
+        .expect_err("unauthenticated pin_blob must be rejected");
+    assert!(
+        !pin_err.is_not_found(),
+        "expected an auth error, got: {pin_err}"
+    );
+
+    let gc_err = client
+        .gc_blobs(eidetica::GcOptions {
+            max_total_bytes: None,
+            min_age_ms: 0,
+        })
+        .await
+        .expect_err("unauthenticated gc_blobs must be rejected");
+    assert!(
+        !gc_err.is_not_found(),
+        "expected an auth error, got: {gc_err}"
+    );
+}

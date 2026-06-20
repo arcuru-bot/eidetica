@@ -403,7 +403,7 @@ fn database_pin_key(database: Option<&ID>) -> String {
 }
 
 /// Options for [`Instance::gc_blobs`](Instance::gc_blobs) (Phase 1.5, §6).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GcOptions {
     /// Evict least-recently-used unpinned blobs until total blob bytes are at
     /// or below this. `None` evicts every collectable unpinned blob.
@@ -425,7 +425,7 @@ impl Default for GcOptions {
 
 /// Outcome of a [`Instance::gc_blobs`](Instance::gc_blobs) pass — aggregate
 /// counts only; the swept CID list is never returned (§10.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GcReport {
     /// Number of blobs evicted.
     pub evicted_count: usize,
@@ -1320,13 +1320,13 @@ impl Instance {
     /// for a non-raw `cid`.
     ///
     /// An in-process engine reads only the requested window from storage (§7) —
-    /// a range read of a large blob never whole-loads it. A thin remote client,
-    /// whose seam offers only whole-blob reads, falls back to fetching the whole
-    /// blob from its daemon and slicing. On a local miss, if sync is enabled,
-    /// only the requested range is streamed from a peer (bao-verified, bounded
-    /// memory) — the bytes are returned but not persisted (a partial range can't
-    /// be stored under the whole-blob CID; use [`get_blob`](Self::get_blob) to
-    /// fetch and persist the whole blob).
+    /// a range read of a large blob never whole-loads it. A thin remote client
+    /// gets the same windowed read: the daemon serves just the range over the
+    /// service wire (`GetBlobRange`), never the whole blob. On a local miss, if
+    /// sync is enabled, only the requested range is streamed from a peer
+    /// (bao-verified, bounded memory) — the bytes are returned but not persisted
+    /// (a partial range can't be stored under the whole-blob CID; use
+    /// [`get_blob`](Self::get_blob) to fetch and persist the whole blob).
     pub async fn get_blob_range(
         &self,
         cid: &ID,
@@ -1338,25 +1338,50 @@ impl Instance {
             }
             .into());
         }
-        // In-process engine → true windowed read (bounded by the range, not the
-        // blob). Stamp last-access on a hit so LRU eviction (§6) reflects reads.
-        if let Some(engine) = self.inner.backend.local_engine() {
-            if let Some(bytes) = engine.get_blob_range(cid, range.clone()).await? {
-                let now = self.inner.clock.now_millis() as i64;
-                engine.touch_blob_accessed(cid, now).await?;
-                return Ok(Some(bytes));
-            }
-        } else if let Some(bytes) = self.get_blob_local(cid).await? {
-            // Thin remote client: the seam only offers whole-blob reads, so
-            // fetch whole (clamped by the daemon) and slice locally.
-            let len = bytes.len() as u64;
-            let start = range.start.min(len);
-            let end = range.end.clamp(start, len);
-            return Ok(Some(bytes[start as usize..end as usize].to_vec()));
+        // Read the window from local storage — the in-process engine, or the
+        // daemon for a remote instance (both bounded by the range, not the
+        // blob). A hit returns immediately.
+        let local = if let Some(conn) = self.remote_connection() {
+            conn.get_blob_range_remote(cid.clone(), range.start, range.end)
+                .await?
+        } else {
+            self.get_blob_range_local(cid, range.clone()).await?
+        };
+        if let Some(bytes) = local {
+            return Ok(Some(bytes));
         }
         // Local miss → stream just the range from a peer, if sync is enabled.
         match self.sync() {
             Some(sync) => sync.fetch_blob_range(cid, range).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Windowed blob range read from **local storage only** (the in-process
+    /// engine; never sync peers, never the whole blob). `Ok(None)` if this
+    /// instance has no local engine or the blob is absent. Stamps last-access on
+    /// a hit so LRU eviction (§6) reflects reads. This is the daemon's serve
+    /// path for a client's [`get_blob_range`](Self::get_blob_range).
+    pub(crate) async fn get_blob_range_local(
+        &self,
+        cid: &ID,
+        range: std::ops::Range<u64>,
+    ) -> Result<Option<Vec<u8>>> {
+        if !cid.is_raw() {
+            return Err(crate::backend::errors::BackendError::BlobInvalidCodec {
+                cid: cid.clone(),
+            }
+            .into());
+        }
+        let Some(engine) = self.inner.backend.local_engine() else {
+            return Ok(None);
+        };
+        match engine.get_blob_range(cid, range).await? {
+            Some(bytes) => {
+                let now = self.inner.clock.now_millis() as i64;
+                engine.touch_blob_accessed(cid, now).await?;
+                Ok(Some(bytes))
+            }
             None => Ok(None),
         }
     }
@@ -1406,8 +1431,10 @@ impl Instance {
 
     // === Blob pinning / garbage collection (Phase 1.5, §6) ===
 
-    /// The local storage engine, or an error if this is a thin remote client.
-    /// Pins and GC are local-engine concerns (the daemon owns its blobs).
+    /// The in-process storage engine. Used by the local leg of pin/GC, which
+    /// operate directly on this node's store; a remote instance routes those
+    /// ops to its daemon instead of reaching here. The error is a guard for a
+    /// degenerate instance with neither a local engine nor a connection.
     fn local_blob_engine(&self) -> Result<std::sync::Arc<dyn crate::backend::BackendImpl>> {
         self.inner
             .backend
@@ -1424,15 +1451,20 @@ impl Instance {
     /// specific database. Pinning is idempotent. A blob is retained while *any*
     /// pin names its CID. Errors with
     /// [`BlobInvalidCodec`](crate::backend::errors::BackendError::BlobInvalidCodec)
-    /// for a non-raw `cid`, and with
-    /// [`BlobOpRequiresLocalEngine`](crate::instance::errors::InstanceError::BlobOpRequiresLocalEngine)
-    /// on a thin remote client.
+    /// for a non-raw `cid`. On a remote (daemon-backed) instance the pin is
+    /// recorded on the daemon — the node that owns the bytes — so the API works
+    /// the same whether the instance is embedded or connected.
     pub async fn pin_blob(&self, user_id: &str, database: Option<&ID>, cid: &ID) -> Result<()> {
         if !cid.is_raw() {
             return Err(crate::backend::errors::BackendError::BlobInvalidCodec {
                 cid: cid.clone(),
             }
             .into());
+        }
+        if let Some(conn) = self.remote_connection() {
+            return conn
+                .pin_blob_remote(user_id.to_string(), database.cloned(), cid.clone())
+                .await;
         }
         let engine = self.local_blob_engine()?;
         engine
@@ -1441,8 +1473,14 @@ impl Instance {
     }
 
     /// Remove a `(user_id, database, cid)` pin. Returns whether the pin existed.
-    /// Once a blob has no pins it becomes eligible for GC eviction.
+    /// Once a blob has no pins it becomes eligible for GC eviction. Routes to
+    /// the daemon on a remote instance.
     pub async fn unpin_blob(&self, user_id: &str, database: Option<&ID>, cid: &ID) -> Result<bool> {
+        if let Some(conn) = self.remote_connection() {
+            return conn
+                .unpin_blob_remote(user_id.to_string(), database.cloned(), cid.clone())
+                .await;
+        }
         let engine = self.local_blob_engine()?;
         engine
             .unpin_blob(user_id, &database_pin_key(database), cid)
@@ -1451,8 +1489,11 @@ impl Instance {
 
     /// Total bytes of the distinct blobs pinned by `user_id` — data-provenance /
     /// quota accounting. A blob pinned under several databases for the same user
-    /// is counted once.
+    /// is counted once. Routes to the daemon on a remote instance.
     pub async fn pinned_size_by_user(&self, user_id: &str) -> Result<u64> {
+        if let Some(conn) = self.remote_connection() {
+            return conn.pinned_size_by_user_remote(user_id.to_string()).await;
+        }
         let engine = self.local_blob_engine()?;
         engine.pinned_size_by_user(user_id).await
     }
@@ -1470,8 +1511,13 @@ impl Instance {
     ///
     /// Deletion is complete-only (a blob is removed whole). Returns a
     /// [`GcReport`] of aggregate counts/bytes — never the list of swept CIDs
-    /// (§10.1: no enumeration is exposed). Requires a local engine.
+    /// (§10.1: no enumeration is exposed). On a remote instance the pass runs on
+    /// the daemon, which owns the blobs and evaluates the grace window against
+    /// its own clock.
     pub async fn gc_blobs(&self, opts: GcOptions) -> Result<GcReport> {
+        if let Some(conn) = self.remote_connection() {
+            return conn.gc_blobs_remote(opts).await;
+        }
         let engine = self.local_blob_engine()?;
         let now = self.inner.clock.now_millis() as i64;
         let min_age = opts.min_age_ms as i64;

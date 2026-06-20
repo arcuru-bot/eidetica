@@ -38,6 +38,7 @@ use crate::auth::crypto::PublicKey;
 use crate::auth::types::{Permission, SigKey};
 use crate::backend::InstanceMetadata;
 use crate::entry::{Entry, ID};
+use crate::instance::{GcOptions, GcReport};
 use crate::service::error::ServiceError;
 use crate::user::UserInfo;
 
@@ -309,6 +310,33 @@ pub enum ServiceRequest {
     /// Store raw blob bytes under their content address. The daemon re-verifies
     /// `cid == hash(data)` and enforces the size cap; a mismatch is rejected.
     PutBlob { cid: ID, data: Vec<u8> },
+    /// Read a half-open byte range `[start, end)` of a blob by content address.
+    /// The daemon reads only the requested window from its store (§7), so a
+    /// thin client gets a true windowed read instead of fetch-whole-and-slice.
+    /// `None` on miss; the range is clamped to the blob's length.
+    GetBlobRange { cid: ID, start: u64, end: u64 },
+    /// Pin a blob on the daemon so its GC never evicts it. Pins are the daemon's
+    /// own local retention assertions, keyed by `(user_id, database, cid)`; a
+    /// connected client asks the daemon — which owns the bytes — to hold them.
+    PinBlob {
+        user_id: String,
+        database: Option<ID>,
+        cid: ID,
+    },
+    /// Remove a `(user_id, database, cid)` pin on the daemon. Returns whether
+    /// the pin existed.
+    UnpinBlob {
+        user_id: String,
+        database: Option<ID>,
+        cid: ID,
+    },
+    /// Total bytes of the distinct blobs pinned by `user_id` on the daemon
+    /// (quota / provenance accounting).
+    PinnedSizeByUser { user_id: String },
+    /// Run a GC pass on the daemon's blob store. The daemon evaluates the grace
+    /// window against *its own* clock (the blobs and their access stamps live
+    /// there), so no client timestamp crosses the wire.
+    GcBlobs { opts: GcOptions },
 }
 
 /// Response from server to client.
@@ -336,9 +364,18 @@ pub enum ServiceResponse {
     /// does not synthesize a value, so the client falls back to recomputing
     /// from store entries.
     CachedCrdtState(Option<Vec<u8>>),
-    /// Raw blob bytes by content address (response to `ServiceRequest::GetBlob`).
-    /// `None` on miss. Bytes are guaranteed to hash to the requested CID.
+    /// Raw blob bytes by content address (response to `ServiceRequest::GetBlob`
+    /// or `GetBlobRange`). `None` on miss. Whole-blob bytes are guaranteed to
+    /// hash to the requested CID; a range is the verified window of that blob.
     Blob(Option<Vec<u8>>),
+    /// Boolean result (response to `ServiceRequest::UnpinBlob` — whether the pin
+    /// existed).
+    Bool(bool),
+    /// Unsigned size in bytes (response to `ServiceRequest::PinnedSizeByUser`).
+    Size(u64),
+    /// Aggregate outcome of a blob GC pass (response to
+    /// `ServiceRequest::GcBlobs`). Counts only — never the swept CID list (§10.1).
+    GcReport(GcReport),
     /// Error response
     Error(ServiceError),
     /// Challenge bytes returned in response to `TrustedLoginUser`, plus the
