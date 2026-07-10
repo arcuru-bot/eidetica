@@ -526,9 +526,9 @@ async fn handle_track_database(
         }
     };
 
-    let (key_id, signing_key) = {
+    let key_id = {
         let user = user_lock.read().await;
-        let key_id = match user.get_default_key() {
+        match user.get_default_key() {
             Ok(key) => key,
             Err(e) => {
                 return (
@@ -537,27 +537,18 @@ async fn handle_track_database(
                 )
                     .into_response();
             }
-        };
-        // Taken under the same lock: the bootstrap request is signed with this
-        // key to prove we hold it.
-        match user.get_signing_key(&key_id) {
-            Ok(signing_key) => (key_id, signing_key),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to get signing key: {e}"),
-                )
-                    .into_response();
-            }
         }
     };
 
-    // Run the network bootstrap WITHOUT holding the per-session user lock — a
-    // slow or hung peer must not freeze the rest of this session's requests.
-    let key_name = key_id.to_string();
-    let network_result = sync
-        .bootstrap_with_ticket(&ticket, &signing_key, &key_name, permission, None)
-        .await;
+    // Run the network bootstrap WITHOUT holding the per-session user *write*
+    // lock — a slow or hung peer must not freeze the rest of this session's
+    // requests. The network phase only reads key material, so a read lock
+    // suffices; the write lock is taken below solely for the mapping write.
+    let network_result = {
+        let user = user_lock.read().await;
+        user.request_database_access_network(&sync, &ticket, &key_id, permission, None)
+            .await
+    };
 
     // Re-acquire only for the cheap, local SigKey-mapping write.
     let bootstrap_result = {
