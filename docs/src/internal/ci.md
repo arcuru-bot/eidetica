@@ -199,6 +199,20 @@ The publish workflow builds artifacts (binary and container image) from source u
 
 Releases are automated via [release-plz](https://release-plz.dev/) and configured in [`.config/release-plz.toml`](https://github.com/arcuru/eidetica/blob/main/.config/release-plz.toml). The process uses unified workspace versioning — all crates share a single version and tags follow the `v<major>.<minor>.<patch>` format.
 
+### Release Smoke Tests
+
+Only `ci.yml` runs on `pull_request`, so actions used exclusively by the release path would otherwise first execute during a real release. Two mechanisms cover them before merge:
+
+- [`release-smoke.yml`](https://github.com/arcuru/eidetica/blob/main/.github/workflows/release-smoke.yml) runs on any pull request touching `.github/workflows/**`, `.github/actions/**`, or `Dockerfile*`. It exercises `docker/login-action` (GHCR, via `GITHUB_TOKEN`) and `docker/setup-buildx-action` with a push-free buildx build. A `workflow_dispatch`-only job additionally exercises Docker Hub login with the publish credentials.
+
+- crates.io OIDC (`rust-lang/crates-io-auth-action`) cannot run from another workflow file: crates.io trusted publishing pins the workflow filename and the `publish` environment. `release-plz-release.yml` therefore takes a `smoke_only` dispatch input that performs the OIDC exchange, verifies the resulting token against the crates.io API, and stops before release-plz runs:
+
+  ```bash
+  gh workflow run release-plz-release.yml --ref <pr-branch> -f smoke_only=true
+  ```
+
+  `workflow_dispatch` resolves the workflow file from the dispatched ref, so a pull request branch is tested with its own version of the file. Nothing is published.
+
 ### Publish Workflow
 
 A single [`publish.yml`](https://github.com/arcuru/eidetica/blob/main/.github/workflows/publish.yml) workflow handles all artifact publishing. It is triggered in three ways:

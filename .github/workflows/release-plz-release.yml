@@ -12,6 +12,18 @@
 # on every push to main, even when nothing will be published. Approving with
 # nothing pending is a safe no-op. Reducing that to release-only prompts
 # requires a separate detector job — tracked separately, not done here.
+#
+# Smoke mode: `workflow_dispatch` with `smoke_only=true` performs the crates.io
+# OIDC exchange and stops before release-plz runs — nothing is published. This
+# is the only way to exercise a `rust-lang/crates-io-auth-action` bump before
+# merging it, because crates.io trusted publishing pins the workflow *filename*
+# (plus the `publish` environment); the exchange cannot succeed from any other
+# workflow file. workflow_dispatch resolves the file from the dispatched ref, so
+# a PR branch can be smoke-tested directly:
+#
+#     gh workflow run release-plz-release.yml --ref <pr-branch> -f smoke_only=true
+#
+# Docker-side release actions are covered by release-smoke.yml on pull_request.
 name: Release-plz release
 
 on:
@@ -19,6 +31,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      smoke_only:
+        description: "Only exercise crates.io OIDC auth; do not release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -27,7 +45,11 @@ jobs:
   release:
     name: Release-plz release
     runs-on: ubicloud-standard-2
-    if: github.repository_owner == 'arcuru' && (github.event_name == 'push' || github.ref == 'refs/heads/main')
+    # Smoke runs are allowed from any ref (that is the point — validating an
+    # action bump on the PR branch); real releases stay pinned to main.
+    if: >-
+      github.repository_owner == 'arcuru' &&
+      (github.event_name == 'push' || github.ref == 'refs/heads/main' || inputs.smoke_only)
     environment: publish
     permissions:
       contents: write
@@ -49,8 +71,32 @@ jobs:
         uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
         id: cratesio-auth
 
+      # Smoke mode ends here: the OIDC exchange above either produced a usable
+      # token or the step already failed. Confirm the token is non-empty and
+      # accepted by crates.io, then stop without publishing. The token is never
+      # echoed; the auth action revokes it in its post step.
+      - name: Verify crates.io token (smoke only)
+        if: inputs.smoke_only
+        env:
+          CRATES_TOKEN: ${{ steps.cratesio-auth.outputs.token }}
+        run: |
+          if [[ -z "$CRATES_TOKEN" ]]; then
+            echo "::error::crates.io OIDC exchange returned an empty token"
+            exit 1
+          fi
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: $CRATES_TOKEN" \
+            https://crates.io/api/v1/me)
+          echo "crates.io /api/v1/me responded ${STATUS}"
+          if [[ "$STATUS" != "200" ]]; then
+            echo "::error::crates.io rejected the trusted-publishing token"
+            exit 1
+          fi
+          echo "Smoke only — skipping release-plz."
+
       - name: Run release-plz
         id: release-plz
+        if: ${{ !inputs.smoke_only }}
         uses: release-plz/action@f708778669256143d984cce4b23592637532e040 # v0.5.127
         with:
           command: release
@@ -60,7 +106,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.cratesio-auth.outputs.token }}
 
       - name: Trigger publish workflow
-        if: steps.release-plz.outputs.releases_created == 'true'
+        if: ${{ !inputs.smoke_only && steps.release-plz.outputs.releases_created == 'true' }}
         env:
           RELEASES: ${{ steps.release-plz.outputs.releases }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

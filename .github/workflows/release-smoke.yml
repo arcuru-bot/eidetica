@@ -1,0 +1,109 @@
+# Release smoke — exercises release-only actions outside of an actual release.
+#
+# Problem this solves: only ci.yml runs on `pull_request`, so the actions that
+# live in publish.yml and release-plz-release.yml (docker/login-action,
+# docker/setup-buildx-action, rust-lang/crates-io-auth-action) first execute
+# during a real release. A green PR says nothing about a bump to any of them.
+#
+# What runs where:
+#   * docker  — this workflow, on every PR that touches workflow/action files.
+#     Exercises docker/login-action (GHCR, via GITHUB_TOKEN) and
+#     docker/setup-buildx-action end to end, without pushing anything.
+#   * docker-hub — this workflow, workflow_dispatch only. Exercises
+#     docker/login-action against Docker Hub with the real publish credentials.
+#     Dispatch-only + `environment: publish` because it reads publish secrets.
+#   * crates.io OIDC — NOT here, and cannot be. crates.io trusted publishing
+#     pins the *workflow filename*, so `rust-lang/crates-io-auth-action` only
+#     authenticates from `release-plz-release.yml`. That workflow carries a
+#     `smoke_only` dispatch input which performs the OIDC exchange and stops
+#     before release-plz runs. To smoke-test a bump to it from a PR branch:
+#
+#         gh workflow run release-plz-release.yml --ref <pr-branch> -f smoke_only=true
+#
+#     workflow_dispatch resolves the workflow file from the dispatched ref, so
+#     the branch's version of the file is what runs. It still requires the
+#     `publish` environment approval; nothing is published.
+
+name: Release smoke
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - "Dockerfile*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    name: Docker login + buildx
+    runs-on: ubicloud-standard-2
+    if: github.repository_owner == 'arcuru'
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Mirrors the shape publish.yml uses: a wrapper Dockerfile over a base
+      # image pulled from GHCR, built through buildx. `--output=type=cacheonly`
+      # keeps it push-free and load-free, so this is a pure exercise of the
+      # login + buildx actions. publish.yml additionally passes `--sbom` and
+      # `--provenance`; those exporters require a real image output and are
+      # deliberately omitted here.
+      - name: Build through buildx (no push)
+        env:
+          BASE_IMAGE: ghcr.io/${{ github.repository }}:dev
+        run: |
+          printf 'FROM %s\n' "$BASE_IMAGE" > Dockerfile.smoke
+          docker buildx build \
+            --file Dockerfile.smoke \
+            --output=type=cacheonly \
+            .
+
+      - name: Inspect published manifest
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:dev
+        run: |
+          docker buildx imagetools inspect "$IMAGE"
+
+  docker-hub:
+    name: Docker Hub login
+    runs-on: ubicloud-standard-2
+    if: github.event_name == 'workflow_dispatch' && github.repository_owner == 'arcuru'
+    environment: publish
+    permissions:
+      contents: read
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Verify credential store
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          # Reads the published manifest through the credentials login-action
+          # wrote. Fails if those credentials are missing or unusable.
+          docker buildx imagetools inspect "docker.io/${REPO}:dev" > /dev/null
+          echo "Docker Hub credentials usable."
