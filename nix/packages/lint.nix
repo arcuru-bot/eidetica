@@ -153,6 +153,15 @@
       command = ''find .github/workflows -name "*.yml" -exec actionlint -config-file .github/actionlint.yaml {} +'';
     };
 
+    zizmor = mkSimpleLinter {
+      name = "zizmor";
+      packages = [pkgs.zizmor];
+      src = sources.github-actions;
+      # --min-severity=high: tight to start; tighten further once medium
+      # findings (artipacked, secrets-inherit, template-injection) are fixed.
+      command = "zizmor --offline --min-severity high .github/workflows";
+    };
+
     hadolint = mkSimpleLinter {
       name = "hadolint";
       packages = [pkgs.hadolint];
