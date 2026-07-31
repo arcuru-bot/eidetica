@@ -40,3 +40,10 @@ The `service` backend starts a fresh in-process daemon with an InMemory backend 
 2. Test both happy path and error cases
 3. Use helpers from `tests/it/helpers.rs`
 4. Follow `test_<component>_<functionality>` naming
+
+## Multi-instance sync harness
+
+Multi-peer convergence tests build on `eidetica::testing::Cluster` — a harness
+for standing up several `Instance`s that sync a shared database, with a
+controllable transport and seeded fault-injecting fuzzers. It has its own page:
+see [Multi-Instance Test Harness](test_harness.md).

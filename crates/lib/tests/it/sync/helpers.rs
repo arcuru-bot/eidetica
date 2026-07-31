@@ -7,7 +7,7 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use eidetica::{
-    Database, Entry, Error, Instance, Result,
+    Cluster, Database, Entry, Error, Instance, Result,
     auth::{AuthKey, Permission as AuthPermission, crypto::PublicKey},
     crdt::Doc,
     entry::ID,
@@ -373,7 +373,7 @@ pub fn create_bootstrap_request(
 ) -> SyncRequest {
     SyncRequest::SyncTree(SyncTreeRequest {
         tree_id: tree_id.clone(),
-        our_tips: vec![], // Empty tips = bootstrap needed
+        our_tips: Vec::new().into(), // Empty tips = bootstrap needed
         peer_pubkey: None,
         requesting_key: Some(PublicKey::from_prefixed_string(requesting_key).unwrap()),
         requesting_key_name: Some(key_name.to_string()),
@@ -800,6 +800,130 @@ pub async fn enable_sync_for_instance_database(sync: &Sync, database_id: &ID) ->
     tx.commit().await?;
 
     Ok(())
+}
+
+// ===== CLUSTER (multi-peer harness) HELPERS =====
+
+/// Build a database shared across an entire [`Cluster`].
+///
+/// Peer 0 creates the database with a global-wildcard admin policy and serves
+/// it; every other peer in the cluster bootstraps and serves it; each peer opens
+/// its own handle. Returns the room id and one open [`Database`] per peer,
+/// indexed by peer number.
+///
+/// The shared starting point for multi-peer convergence tests: after this, any
+/// peer can write to its handle and the cluster can be driven to convergence via
+/// [`Cluster::converge`] (or a subset via [`Cluster::exchange`]).
+///
+/// Auth is the test layer's choice here (admin keys for peer 0 + a global
+/// wildcard so every joiner can write); the harness itself stays auth-neutral.
+pub async fn cluster_shared_database(
+    net: &mut Cluster,
+    db_name: &str,
+) -> Result<(ID, Vec<Database>)> {
+    let key0 = net.peer(0).key_id().clone();
+    let device0 = net.peer(0).instance().id();
+
+    let mut settings = Doc::new();
+    settings.set("name", db_name);
+    let db0 = net
+        .peer_mut(0)
+        .user_mut()
+        .create_database(settings, &key0)
+        .await?;
+    let room = db0.root_id().clone();
+
+    eidetica::testing::add_auth_keys(
+        &db0,
+        &[
+            (
+                &key0,
+                AuthKey::active(Some("admin"), AuthPermission::Admin(10)),
+            ),
+            (
+                &device0,
+                AuthKey::active(Some("device"), AuthPermission::Admin(10)),
+            ),
+        ],
+    )
+    .await?;
+    eidetica::testing::set_global_auth_key(&db0, AuthKey::active(None, AuthPermission::Admin(10)))
+        .await?;
+
+    // Seed the `data` store before anyone bootstraps, so every peer's later
+    // writes to it descend from a common ancestor. Without this, each peer's
+    // first write would root an independent `data` subtree and merging the
+    // concurrent histories fails with NoCommonAncestor.
+    cluster_put(&db0, "seed", "seed").await?;
+
+    net.peer_mut(0).serve(&room).await?;
+
+    let mut dbs = vec![db0];
+    for j in 1..net.len() {
+        net.bootstrap(0, j, &room, AuthPermission::Write(10))
+            .await?;
+        net.peer_mut(j).serve(&room).await?;
+        let db = net.peer_mut(j).user_mut().open_database(&room).await?;
+        dbs.push(db);
+    }
+    Ok((room, dbs))
+}
+
+/// Write `value` at `key` in the database's `data` [`DocStore`] — the write side
+/// of the cluster convergence tests.
+pub async fn cluster_put(db: &Database, key: &str, value: &str) -> Result<()> {
+    let tx = db.new_transaction().await?;
+    tx.get_store::<DocStore>("data")
+        .await?
+        .set_string(key, value)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Read the string at `key` from the database's `data` [`DocStore`].
+pub async fn cluster_get(db: &Database, key: &str) -> Result<String> {
+    let tx = db.new_transaction().await?;
+    tx.get_store::<DocStore>("data")
+        .await?
+        .get_string(key)
+        .await
+}
+
+/// Deterministic xorshift64* — a self-contained, dependency-free PRNG so a seed
+/// reproduces a schedule exactly. Not cryptographic; just a stable bit source
+/// the simulation fuzzers ([`super::sim_schedule_tests`],
+/// [`super::sim_fault_tests`]) drive their randomized schedules from. Seeded so
+/// a failing run replays its exact interleaving, and clock-free so nothing here
+/// reads wall time or a real RNG.
+pub struct Prng(u64);
+
+impl Prng {
+    /// Creates a PRNG from `seed`, spreading it to a non-zero internal state.
+    pub fn new(seed: u64) -> Self {
+        // Spread the seed and force a non-zero state (xorshift fixes on zero).
+        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+    }
+
+    /// Advances the state and returns the next 64-bit value.
+    pub fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Returns a value in `0..n` (caller guarantees `n > 0`).
+    pub fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+
+    /// Returns a fair coin flip — `true` or `false` with equal probability.
+    pub fn coin(&mut self) -> bool {
+        self.next() & 1 == 0
+    }
 }
 
 /// Creates a public (unauthenticated) sync-enabled database with global permission.
