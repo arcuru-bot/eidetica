@@ -211,6 +211,28 @@ to a future sync-API revision; until then the client completes the flow by
 retrying normal sync after waiting or polling periodically. If access was
 granted, the sync succeeds and the client can use the database.
 
+#### Retrying Without Amplifying
+
+Request storage is **idempotent per (tree, requesting key, permission)**. An
+approver holds at most one record per distinct ask: a re-request reuses the
+existing record and returns its id rather than appending a new one. Without this
+a client that retries appends a row to the approver's `_sync` tree per attempt,
+growing without bound and burying the real request among duplicates.
+
+The permission belongs in the key. A retry re-sends the same one, so
+amplification still collapses; but asking for `Admin` after a pending `Read` is a
+materially different request, and collapsing those would answer the escalation
+with the weaker record — approving it would silently grant less than was asked
+for. An `Approved` record is likewise not reused: reaching the store path means
+the auth check found no live grant, so the approval was revoked and a genuinely
+new request is correct.
+
+Rejection is **terminal**. A rejected requester receives `BootstrapRejected`
+rather than another `BootstrapPending`, so a client that retries indefinitely
+cannot re-queue itself on the approver forever and thereby undo the rejection.
+Getting access after a rejection requires the approver to act out of band, not
+the requester to keep asking.
+
 ### Key Requirements
 
 **For Bootstrap Request:**
