@@ -93,4 +93,22 @@ grant, meaning the approval was revoked and a new request is correct.
 A `Rejected` record answers subsequent requests with `BootstrapRejected`, a
 terminal answer, rather than another pending wait.
 
+## Tree-Peer Registration
+
+`handle_sync_tree` registers the caller in the tree's peer set only when it
+returns `Bootstrap` or `Incremental` — i.e. only when data was actually served.
+`Pending`, `Rejected`, and error outcomes register nothing. The peer set is the
+push list (`sync_on_commit` fan-out and the approval broadcast both iterate it),
+so a refused peer must not be on it.
+
+`BootstrapRequest.peer_device_pubkey` carries the requester's handshake device key
+so `approve_bootstrap_request_with_key` can register it at approval time and then
+broadcast. It is `Option` and `#[serde(default)]`: requests stored before this
+field existed, or arriving without an authenticated connection, approve normally
+and converge on the requester's next sync.
+
+One gap remains here, tracked outside this flow: `queue_entry_for_sync` applies
+no authorization filter of its own, so this is registration-time hygiene rather
+than a send-time check.
+
 See `src/sync/bootstrap_request_manager.rs` and `src/sync/handler.rs` for implementation.

@@ -13,7 +13,7 @@ use eidetica::{
     crdt::{Doc, doc::path},
     store::DocStore,
     sync::{
-        Address, PeerId,
+        Address, DatabaseTicket, PeerId,
         handler::{SyncHandler, SyncHandlerImpl},
         protocol::{
             HandshakeRequest, PROTOCOL_VERSION, RequestContext, SyncRequest, SyncRequestAuth,
@@ -221,35 +221,76 @@ async fn test_bootstrap_sync_tracks_tree_peer_relationship() {
         .unwrap();
 
     let sync_tree_id = sync.sync_tree_root_id().clone();
+    let server_pubkey = instance.id();
     let handler = SyncHandlerImpl::new(instance, sync_tree_id);
 
     // Generate peer credentials
-    let (_, peer_verifying_key) = generate_keypair();
+    let (peer_signing_key, peer_verifying_key) = generate_keypair();
 
     // Register the peer first (would normally happen during handshake)
     sync.register_peer(&peer_verifying_key, Some("Test Peer"))
         .await
         .unwrap();
 
-    // Create bootstrap request (empty tips)
-    let sync_request = SyncTreeRequest {
-        tree_id: tree_id.clone(),
-        our_tips: Vec::new().into(), // Empty tips = bootstrap
-        peer_pubkey: None,
-        requesting_key: Some(peer_verifying_key.clone()),
-        requesting_key_name: Some("peer_key".to_string()),
-        requested_permission: None,
-        metadata: None,
-        auth: None,
-    };
-
     let context = RequestContext {
         remote_address: Some(Address::http("203.0.113.42:54321")),
         peer_pubkey: Some(peer_verifying_key.clone()),
     };
 
-    let request = SyncRequest::SyncTree(sync_request);
-    let _response = handler.handle_request(&request, &context).await;
+    let bootstrap_request = || {
+        let our_tips: eidetica::Snapshot = Vec::new().into(); // Empty tips = bootstrap
+        SyncRequest::SyncTree(SyncTreeRequest {
+            tree_id: tree_id.clone(),
+            our_tips: our_tips.clone(),
+            peer_pubkey: None,
+            requesting_key: Some(peer_verifying_key.clone()),
+            requesting_key_name: Some("peer_key".to_string()),
+            requested_permission: None,
+            metadata: None,
+            auth: Some(SyncRequestAuth::sign(
+                &peer_signing_key,
+                &server_pubkey,
+                &tree_id,
+                &our_tips,
+                FixedClock::default().now_millis(),
+            )),
+        })
+    };
+
+    // A peer we refuse must NOT be tracked: the tree/peer set is the push list,
+    // so tracking a refused peer would feed it every subsequent commit.
+    let refused = handler.handle_request(&bootstrap_request(), &context).await;
+    assert!(
+        matches!(refused, SyncResponse::Error(_)),
+        "unauthorized key should be refused, got: {refused:?}"
+    );
+    assert!(
+        !sync
+            .is_tree_synced_with_peer(&peer_verifying_key, &tree_id)
+            .await
+            .unwrap(),
+        "a refused peer must not be tracked as a sync target"
+    );
+
+    // Authorize the key, and the same request is served — and now tracked.
+    {
+        let tx = db.new_transaction().await.unwrap();
+        let settings_store = tx.get_settings().unwrap();
+        settings_store
+            .set_auth_key(
+                &peer_verifying_key,
+                AuthKey::active(Some("peer_key"), Permission::Write(5)),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let served = handler.handle_request(&bootstrap_request(), &context).await;
+    assert!(
+        matches!(served, SyncResponse::Bootstrap(_)),
+        "authorized key should be served, got: {served:?}"
+    );
 
     // Verify tree/peer relationship was tracked
     assert!(
@@ -301,15 +342,31 @@ async fn test_incremental_sync_tracks_tree_peer_relationship() {
     tx.commit().await.unwrap();
 
     let sync_tree_id = sync.sync_tree_root_id().clone();
+    let server_pubkey = instance.id();
     let handler = SyncHandlerImpl::new(instance.clone(), sync_tree_id);
 
     // Generate peer credentials
-    let (_, peer_verifying_key) = generate_keypair();
+    let (peer_signing_key, peer_verifying_key) = generate_keypair();
 
     // Register the peer first (would normally happen during handshake)
     sync.register_peer(&peer_verifying_key, Some("Test Peer"))
         .await
         .unwrap();
+
+    // The incremental path serves entries only to a proven, authorized key, and
+    // registration follows the serve — so the peer has to actually hold access.
+    {
+        let tx = db.new_transaction().await.unwrap();
+        let settings_store = tx.get_settings().unwrap();
+        settings_store
+            .set_auth_key(
+                &peer_verifying_key,
+                AuthKey::active(Some("peer_key"), Permission::Write(5)),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
 
     // Get current tips for incremental sync
     let tips = instance.backend().snapshot(&tree_id).await.unwrap();
@@ -317,13 +374,19 @@ async fn test_incremental_sync_tracks_tree_peer_relationship() {
     // Create incremental sync request (non-empty tips)
     let sync_request = SyncTreeRequest {
         tree_id: tree_id.clone(),
-        our_tips: tips, // Non-empty tips = incremental
+        our_tips: tips.clone(), // Non-empty tips = incremental
         peer_pubkey: None,
         requesting_key: Some(peer_verifying_key.clone()),
         requesting_key_name: Some("peer_key".to_string()),
         requested_permission: None,
         metadata: None,
-        auth: None,
+        auth: Some(SyncRequestAuth::sign(
+            &peer_signing_key,
+            &server_pubkey,
+            &tree_id,
+            &tips,
+            FixedClock::default().now_millis(),
+        )),
     };
 
     let context = RequestContext {
@@ -462,9 +525,10 @@ async fn test_multiple_trees_tracked_with_same_peer() {
         .unwrap();
 
     let sync_tree_id = sync.sync_tree_root_id().clone();
+    let server_pubkey = instance.id();
     let handler = SyncHandlerImpl::new(instance, sync_tree_id);
 
-    let (_, peer_verifying_key) = generate_keypair();
+    let (peer_signing_key, peer_verifying_key) = generate_keypair();
 
     // Register the peer first (would normally happen during handshake)
     sync.register_peer(&peer_verifying_key, Some("Test Peer"))
@@ -476,29 +540,58 @@ async fn test_multiple_trees_tracked_with_same_peer() {
         peer_pubkey: Some(peer_verifying_key.clone()),
     };
 
+    // Authorize the peer on both databases. Tracking follows being served the
+    // tree, so an unauthorized peer would be refused and correctly not tracked.
+    for db in [&db1, &db2] {
+        let tx = db.new_transaction().await.unwrap();
+        let settings_store = tx.get_settings().unwrap();
+        settings_store
+            .set_auth_key(
+                &peer_verifying_key,
+                AuthKey::active(Some("peer_key"), Permission::Write(5)),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
     // Request first tree
+    let our_tips1: eidetica::Snapshot = Vec::new().into();
     let request1 = SyncRequest::SyncTree(SyncTreeRequest {
         tree_id: tree_id1.clone(),
-        our_tips: Vec::new().into(),
+        our_tips: our_tips1.clone(),
         peer_pubkey: None,
         requesting_key: Some(peer_verifying_key.clone()),
         requesting_key_name: Some("peer_key".to_string()),
         requested_permission: None,
         metadata: None,
-        auth: None,
+        auth: Some(SyncRequestAuth::sign(
+            &peer_signing_key,
+            &server_pubkey,
+            &tree_id1,
+            &our_tips1,
+            FixedClock::default().now_millis(),
+        )),
     });
     let _response1 = handler.handle_request(&request1, &context).await;
 
     // Request second tree
+    let our_tips2: eidetica::Snapshot = Vec::new().into();
     let request2 = SyncRequest::SyncTree(SyncTreeRequest {
         tree_id: tree_id2.clone(),
-        our_tips: Vec::new().into(),
+        our_tips: our_tips2.clone(),
         peer_pubkey: None,
         requesting_key: Some(peer_verifying_key.clone()),
         requesting_key_name: Some("peer_key".to_string()),
         requested_permission: None,
         metadata: None,
-        auth: None,
+        auth: Some(SyncRequestAuth::sign(
+            &peer_signing_key,
+            &server_pubkey,
+            &tree_id2,
+            &our_tips2,
+            FixedClock::default().now_millis(),
+        )),
     });
     let _response2 = handler.handle_request(&request2, &context).await;
 
@@ -932,4 +1025,113 @@ async fn test_bootstrap_uses_highest_permission_when_key_has_multiple() {
         }
         other => panic!("Expected Bootstrap response, got: {other:?}"),
     }
+}
+
+/// An unapproved requester must not be on the database's tree-peer set — that
+/// set is the push list, feeding both the `sync_on_commit` fan-out and the
+/// approval broadcast. Approval is what puts it there.
+///
+/// Regression — registration used to happen unconditionally at the top of
+/// `handle_sync_tree`, before the bootstrap policy ran, so a peer that was told
+/// "pending" (or refused outright) still received every entry subsequently
+/// committed to a database it had no access to.
+#[tokio::test]
+async fn pending_requester_is_not_on_the_push_list_until_approved() {
+    let (server_instance, server_user, server_key_id, _server_database, server_sync, tree_id) =
+        setup_manual_approval_server().await;
+    let server_addr = start_sync_server(&server_sync).await;
+
+    let (_client_instance, mut client_user, client_key_id, client_sync) =
+        setup_sync_enabled_client("client_user", "client_key").await;
+    client_sync
+        .register_transport("http", HttpTransport::builder())
+        .await
+        .unwrap();
+
+    let ticket = DatabaseTicket::with_addresses(tree_id.clone(), vec![server_addr]);
+    let result = client_user
+        .request_database_access(
+            &client_sync,
+            &ticket,
+            &client_key_id,
+            Permission::Write(5),
+            None,
+        )
+        .await;
+    assert!(result.is_err(), "request should be pending");
+
+    // Pending: the requester is not a push target for this tree.
+    let peers_while_pending = server_sync.get_tree_peers(&tree_id).await.unwrap();
+    assert!(
+        peers_while_pending.is_empty(),
+        "an unapproved requester must not be on the tree's push list, found: {peers_while_pending:?}"
+    );
+
+    // Approve, and it becomes one — otherwise the broadcast has nowhere to go.
+    let pending = server_sync.pending_bootstrap_requests().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let (request_id, record) = &pending[0];
+    assert!(
+        record.peer_device_pubkey.is_some(),
+        "the requester's device key is recorded so approval can reach it"
+    );
+    server_user
+        .approve_bootstrap_request(&server_sync, request_id, &server_key_id)
+        .await
+        .expect("approval should succeed");
+
+    let peers_after_approval = server_sync.get_tree_peers(&tree_id).await.unwrap();
+    assert_eq!(
+        peers_after_approval.len(),
+        1,
+        "approval registers the requester as a push target"
+    );
+
+    server_sync.stop_server().await.unwrap();
+    drop(server_instance);
+}
+
+/// A rejected requester is never added to the push list at all.
+#[tokio::test]
+async fn rejected_requester_never_joins_the_push_list() {
+    let (server_instance, server_user, server_key_id, _server_database, server_sync, tree_id) =
+        setup_manual_approval_server().await;
+    let server_addr = start_sync_server(&server_sync).await;
+
+    let (_client_instance, mut client_user, client_key_id, client_sync) =
+        setup_sync_enabled_client("client_user", "client_key").await;
+    client_sync
+        .register_transport("http", HttpTransport::builder())
+        .await
+        .unwrap();
+
+    let ticket = DatabaseTicket::with_addresses(tree_id.clone(), vec![server_addr]);
+    let _ = client_user
+        .request_database_access(
+            &client_sync,
+            &ticket,
+            &client_key_id,
+            Permission::Write(5),
+            None,
+        )
+        .await;
+
+    let pending = server_sync.pending_bootstrap_requests().await.unwrap();
+    let (request_id, _) = &pending[0];
+    server_user
+        .reject_bootstrap_request(&server_sync, request_id, &server_key_id)
+        .await
+        .expect("rejection should succeed");
+
+    assert!(
+        server_sync
+            .get_tree_peers(&tree_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected requester must never become a push target"
+    );
+
+    server_sync.stop_server().await.unwrap();
+    drop(server_instance);
 }
