@@ -481,18 +481,6 @@ mod tests {
         let (_instance, sync_tree, clock) = create_test_sync_tree().await;
         let request = create_test_request(&clock);
 
-        // Seed an unrelated request so the store exists before the two writers
-        // fork. Racers that also create the store itself concurrently root two
-        // disjoint store histories, which is a defect in the subtree merge
-        // rather than in this queue — see the fix that merges disjoint store
-        // histories from the empty base.
-        let seed = sync_tree.new_transaction().await.unwrap();
-        let seed_id = BootstrapRequestManager::new(&seed)
-            .store_request(create_test_request(&clock))
-            .await
-            .unwrap();
-        seed.commit().await.unwrap();
-
         // Both transactions open before either commits, so neither sees the
         // other's lookup — the same position two racing hints reach.
         let first = sync_tree.new_transaction().await.unwrap();
@@ -546,16 +534,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            pending.iter().filter(|(id, _)| *id == first_id).count(),
-            1,
-            "the racing writers leave one row between them, found: {pending:#?}"
-        );
-        assert_eq!(
             pending.len(),
-            2,
-            "and the unrelated seeded request is untouched, found: {pending:#?}"
+            1,
+            "racers that also create the store converge on one row, found: {pending:#?}"
         );
-        assert!(pending.iter().any(|(id, _)| *id == seed_id));
+        assert_eq!(pending[0].0, first_id);
     }
 
     /// The id is a function of the ask, and a different ask is a different row.
