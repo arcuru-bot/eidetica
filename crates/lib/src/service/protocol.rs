@@ -45,6 +45,13 @@ use crate::user::UserInfo;
 
 /// Protocol version. Version 0 indicates an unstable protocol that may change
 /// without notice between releases.
+///
+/// This constant is the compatibility gate for serialized types in this
+/// protocol. `#[non_exhaustive]` does **not** protect wire compatibility: a
+/// peer on an older version fails to deserialize an unknown variant. Adding a
+/// variant to a serialized enum (e.g. [`WriteSource`](crate::instance::WriteSource)
+/// inside [`Notification::DatabaseWrite`]) is therefore a protocol version
+/// bump, not a backward-compatible addition.
 pub const PROTOCOL_VERSION: u32 = 0;
 
 /// Maximum frame size: 64 MiB.
