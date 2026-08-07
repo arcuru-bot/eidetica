@@ -42,6 +42,8 @@ Each frame is a 4-byte big-endian length prefix followed by a JSON-serialized pa
 
 `PROTOCOL_VERSION` is currently `0`, indicating an unstable protocol that may change without notice.
 
+`#[non_exhaustive]` does not protect wire compatibility — it only covers Rust source compatibility (exhaustive `match` arms in downstream code). Serialized enums like `WriteSource` (carried by `Notification::DatabaseWrite`) are versioned by `PROTOCOL_VERSION`: a peer on an older version fails to deserialize an unknown variant, so adding a variant is a version bump, not a backward-compatible addition.
+
 ### Connection Lifecycle
 
 ```mermaid

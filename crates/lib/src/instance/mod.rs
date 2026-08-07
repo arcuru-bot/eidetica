@@ -50,10 +50,18 @@ pub use new_user::NewUser;
 /// This distinction allows different callbacks to be triggered based on the write source,
 /// enabling behaviors like "only trigger sync for local writes" or "only update UI for remote writes".
 ///
-/// Marked `#[non_exhaustive]` so additional source variants can be added in the
-/// future (e.g. a distinct `Promoted` for verify-pass fires that surface
-/// already-stored entries) without breaking exhaustive `match` arms in user
-/// code. Always include a wildcard arm when matching.
+/// `#[non_exhaustive]` covers Rust source compatibility only: downstream code
+/// that matches on this enum must include a wildcard arm, so a new variant
+/// does not break their builds. It does **not** cover wire compatibility —
+/// `WriteSource` is serialized into service-protocol frames
+/// ([`Notification::DatabaseWrite`](crate::service::protocol::Notification::DatabaseWrite)
+/// carries a `source`), and a peer on an older protocol version fails to
+/// deserialize a variant it does not know. Adding a variant is therefore a
+/// protocol change, not a backward-compatible addition: bump
+/// [`crate::service::protocol::PROTOCOL_VERSION`] (and
+/// [`crate::sync::protocol::PROTOCOL_VERSION`], which guards the sync wire)
+/// and treat old peers as incompatible. Always include a wildcard arm when
+/// matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum WriteSource {
