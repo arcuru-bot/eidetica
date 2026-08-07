@@ -51,3 +51,12 @@
   - [Key Management](design/key_management.md)
   - [Bootstrap & Access Control](design/bootstrap.md)
   - [Error Handling](design/error_handling.md)
+
+# Specifications
+
+- [Overview](spec/index.md)
+- [SPEC-0: Conventions & Versioning](spec/spec-0-conventions.md)
+- [SPEC-1: Entry Format & Content Addressing](spec/spec-1-entry.md)
+- [SPEC-2: Merkle-DAG & Height](spec/spec-2-dag.md)
+- [SPEC-3: CRDT & Merge Semantics](spec/spec-3-crdt.md)
+- [SPEC-4: Authentication & Authorization](spec/spec-4-auth.md)
