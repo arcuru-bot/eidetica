@@ -52,40 +52,70 @@ const CLIENT_CACHE_CAPACITY_BYTES: usize = 64 * 1024 * 1024;
 /// than "user closes the app, comes back tomorrow." 60s is plenty for
 /// the churn case and small enough that abandoned subscriptions don't
 /// linger.
-///
-/// Tests override this via the `EIDETICA_TEST_IDLE_GRACE_MS` env var
-/// (see [`idle_grace_window`]) so the lazy-unsubscribe path is
-/// exercisable without making test suites wait the full minute.
 const IDLE_GRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How often the sweep task wakes up to check for expired `Idle`
 /// entries. Half the grace window so an entry that becomes Idle right
 /// after a sweep tick still gets unsubscribed within roughly one grace
 /// window's worth of clock time.
-///
-/// Tests override this via the `EIDETICA_TEST_SWEEP_INTERVAL_MS` env
-/// var (see [`sweep_interval`]).
 const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Test-overridable grace window. Reads `EIDETICA_TEST_IDLE_GRACE_MS`
-/// (milliseconds) if set; otherwise [`IDLE_GRACE_WINDOW`].
+/// Returns the idle grace window.
+///
+/// Production callers get [`IDLE_GRACE_WINDOW`]. Under the `testing`
+/// feature, [`set_idle_grace_window_for_test`] can install an override
+/// so the lazy-unsubscribe sweep path is exercisable without waiting
+/// the full production grace window.
 fn idle_grace_window() -> std::time::Duration {
-    std::env::var("EIDETICA_TEST_IDLE_GRACE_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(IDLE_GRACE_WINDOW)
+    #[cfg(feature = "testing")]
+    {
+        if let Some(d) = TEST_IDLE_GRACE_WINDOW.get() {
+            return *d;
+        }
+    }
+    IDLE_GRACE_WINDOW
 }
 
-/// Test-overridable sweep interval. Reads
-/// `EIDETICA_TEST_SWEEP_INTERVAL_MS` (milliseconds) if set; otherwise
-/// [`SWEEP_INTERVAL`].
+/// Returns the sweep interval.
+///
+/// Production callers get [`SWEEP_INTERVAL`]. Under the `testing`
+/// feature, [`set_sweep_interval_for_test`] can install an override
+/// so the sweep fires promptly in test suites.
 fn sweep_interval() -> std::time::Duration {
-    std::env::var("EIDETICA_TEST_SWEEP_INTERVAL_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(SWEEP_INTERVAL)
+    #[cfg(feature = "testing")]
+    {
+        if let Some(d) = TEST_SWEEP_INTERVAL.get() {
+            return *d;
+        }
+    }
+    SWEEP_INTERVAL
+}
+
+#[cfg(feature = "testing")]
+static TEST_IDLE_GRACE_WINDOW: std::sync::OnceLock<std::time::Duration> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "testing")]
+static TEST_SWEEP_INTERVAL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+
+/// Override the idle grace window for tests.
+///
+/// Call once, before any connection that spawns the sweep task. The
+/// value is process-global (a `OnceLock`); subsequent calls are
+/// no-ops.
+#[cfg(feature = "testing")]
+pub fn set_idle_grace_window_for_test(d: std::time::Duration) {
+    let _ = TEST_IDLE_GRACE_WINDOW.set(d);
+}
+
+/// Override the sweep interval for tests.
+///
+/// Call once, before any connection that spawns the sweep task. The
+/// value is process-global (a `OnceLock`); subsequent calls are
+/// no-ops.
+#[cfg(feature = "testing")]
+pub fn set_sweep_interval_for_test(d: std::time::Duration) {
+    let _ = TEST_SWEEP_INTERVAL.set(d);
 }
 
 /// Process-lifetime LRU of materialized CRDT states for this connection.
