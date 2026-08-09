@@ -1821,29 +1821,23 @@ async fn test_on_write_concurrent_registrations_both_observe_commit() {
 /// avoids a wire round-trip; once the grace window elapses the sweep
 /// sends `UnsubscribeWrites` to the daemon.
 ///
-/// Uses the `EIDETICA_TEST_IDLE_GRACE_MS` and
-/// `EIDETICA_TEST_SWEEP_INTERVAL_MS` env vars to shrink the windows so
-/// the test runs in ~250ms instead of waiting the production-default
-/// 60s grace.
+/// Uses `set_idle_grace_window_for_test` and
+/// `set_sweep_interval_for_test` (gated behind the `testing` feature)
+/// to shrink the windows so the test runs in ~250ms instead of waiting
+/// the production-default 60s grace.
 #[tokio::test]
 async fn test_lazy_unsubscribe_after_grace_window() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-    // Shrink the grace + sweep windows for this test. `set_var` is
-    // unsafe in current edition but contained here — the env reads
-    // happen inside `Instance::connect`'s child tasks. Both vars are
-    // module-private to the service::client module's helpers.
-    //
-    // Safety: setting env vars is process-wide and not thread-safe.
-    // No other concurrent test mutates these vars; nextest runs
-    // each integration-test binary in its own process and we'd not
-    // expect another test in this binary to depend on the prod
-    // defaults at the same instant.
-    unsafe {
-        std::env::set_var("EIDETICA_TEST_IDLE_GRACE_MS", "100");
-        std::env::set_var("EIDETICA_TEST_SWEEP_INTERVAL_MS", "50");
-    }
+    // Shrink the grace + sweep windows for this test. The setters are
+    // process-global OnceLocks gated behind the `testing` feature;
+    // nextest runs each integration-test binary in its own process so
+    // no other test sees the override.
+    eidetica::service::client::set_idle_grace_window_for_test(std::time::Duration::from_millis(
+        100,
+    ));
+    eidetica::service::client::set_sweep_interval_for_test(std::time::Duration::from_millis(50));
 
     let (socket_path, _tx, server, _dir) = start_test_server().await;
     create_user_via_admin(&server, "alice").await;
@@ -1943,13 +1937,6 @@ async fn test_lazy_unsubscribe_after_grace_window() {
         received2.load(AtomicOrdering::Relaxed) >= 1,
         "re-registered callback after sweep must fire on subsequent commit"
     );
-
-    // Cleanup: reset env vars so subsequent tests in the same
-    // binary see prod defaults again.
-    unsafe {
-        std::env::remove_var("EIDETICA_TEST_IDLE_GRACE_MS");
-        std::env::remove_var("EIDETICA_TEST_SWEEP_INTERVAL_MS");
-    }
 }
 
 /// Regression: per-tree dispatch on the client means a slow callback on
