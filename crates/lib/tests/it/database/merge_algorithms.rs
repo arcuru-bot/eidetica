@@ -66,6 +66,115 @@ async fn test_simple_linear_chain() {
 }
 
 #[tokio::test]
+async fn test_criss_cross_merge_converges_from_empty_base() {
+    let (_instance, tree) = setup_tree().await;
+    let genesis = tree
+        .snapshot()
+        .await
+        .expect("Failed to get genesis snapshot")
+        .into_tips()
+        .into_iter()
+        .next()
+        .expect("Tree should have a genesis entry");
+
+    let root1 = tree
+        .new_transaction_at(&Snapshot::from([genesis.clone()]))
+        .await
+        .expect("Failed to create root1 transaction");
+    root1
+        .get_store::<DocStore>("data")
+        .await
+        .expect("Failed to get root1 store")
+        .set("root1", "value")
+        .await
+        .expect("Failed to write root1");
+    let mut tip1 = root1.commit().await.expect("Failed to commit root1");
+
+    let root2 = tree
+        .new_transaction_at(&Snapshot::from([genesis]))
+        .await
+        .expect("Failed to create root2 transaction");
+    root2
+        .get_store::<DocStore>("data")
+        .await
+        .expect("Failed to get root2 store")
+        .set("root2", "value")
+        .await
+        .expect("Failed to write root2");
+    let mut tip2 = root2.commit().await.expect("Failed to commit root2");
+
+    for index in 0..2 {
+        let txn = tree
+            .new_transaction_at(&Snapshot::from([tip1]))
+            .await
+            .expect("Failed to extend first chain");
+        txn.get_store::<DocStore>("data")
+            .await
+            .expect("Failed to get first chain store")
+            .set(format!("c1_{index}"), "value")
+            .await
+            .expect("Failed to write first chain");
+        tip1 = txn.commit().await.expect("Failed to commit first chain");
+    }
+
+    for index in 0..2 {
+        let txn = tree
+            .new_transaction_at(&Snapshot::from([tip2]))
+            .await
+            .expect("Failed to extend second chain");
+        txn.get_store::<DocStore>("data")
+            .await
+            .expect("Failed to get second chain store")
+            .set(format!("c2_{index}"), "value")
+            .await
+            .expect("Failed to write second chain");
+        tip2 = txn.commit().await.expect("Failed to commit second chain");
+    }
+
+    let merge1 = tree
+        .new_transaction_at(&Snapshot::from([tip1.clone(), tip2.clone()]))
+        .await
+        .expect("Failed to create first merge");
+    merge1
+        .get_store::<DocStore>("data")
+        .await
+        .expect("Failed to get first merge store")
+        .set("merge1", "value")
+        .await
+        .expect("Failed to write first merge");
+    merge1.commit().await.expect("Failed to commit first merge");
+
+    let merge2 = tree
+        .new_transaction_at(&Snapshot::from([tip1, tip2]))
+        .await
+        .expect("Failed to create second merge");
+    merge2
+        .get_store::<DocStore>("data")
+        .await
+        .expect("Failed to get second merge store")
+        .set("merge2", "value")
+        .await
+        .expect("Failed to write second merge");
+    merge2
+        .commit()
+        .await
+        .expect("Failed to commit second merge");
+
+    let viewer = tree
+        .get_store_viewer::<DocStore>("data")
+        .await
+        .expect("Failed to get store viewer");
+    let state = viewer
+        .get_all()
+        .await
+        .expect("Criss-cross merge should materialize from the empty base");
+    for key in ["root1", "root2", "merge1", "merge2"] {
+        assert_eq!(state.get(key), Some(&Value::Text("value".to_string())));
+    }
+    assert_deterministic_reads(&tree, "data", 3).await;
+}
+
+#[tokio::test]
 async fn test_caching_consistency() {
     // Test that caching provides consistent results
     let (_instance, tree) = setup_tree().await;
