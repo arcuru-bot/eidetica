@@ -399,26 +399,6 @@ pub trait BackendImpl: Send + Sync + Any {
     async fn find_merge_base(&self, tree: &ID, store: &str, entry_ids: &[ID])
     -> Result<Option<ID>>;
 
-    /// Collects all entries from the tree root down to the target entry within a store.
-    ///
-    /// This method performs a complete traversal from the tree root to the target entry,
-    /// collecting all entries that are ancestors of the target within the specified store.
-    /// The result includes the tree root and the target entry itself.
-    ///
-    /// # Arguments
-    /// * `tree` - The root ID of the tree
-    /// * `store` - The name of the store context
-    /// * `target_entry` - The target entry to collect ancestors for
-    ///
-    /// # Returns
-    /// A `Result` containing a vector of entry IDs from root to target, sorted by height
-    async fn collect_root_to_target(
-        &self,
-        tree: &ID,
-        store: &str,
-        target_entry: &ID,
-    ) -> Result<Vec<ID>>;
-
     /// Returns a reference to the backend instance as a dynamic `Any` type.
     ///
     /// This allows for downcasting to a concrete backend implementation if necessary,

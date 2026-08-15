@@ -227,7 +227,7 @@ pub(crate) fn get_tree(inner: &InMemoryInner, tree: &ID) -> Result<Vec<Entry>> {
         .cloned()
         .collect();
 
-    super::cache::sort_entries_by_height(&mut tree_entries);
+    crate::backend::database::sorting::sort_entries_by_height(&mut tree_entries);
     Ok(tree_entries)
 }
 
@@ -240,7 +240,7 @@ pub(crate) fn get_store(inner: &InMemoryInner, tree: &ID, subtree: &str) -> Resu
         .cloned()
         .collect();
 
-    super::cache::sort_entries_by_subtree_height(subtree, &mut subtree_entries);
+    crate::backend::database::sorting::sort_entries_by_store_height(subtree, &mut subtree_entries);
     Ok(subtree_entries)
 }
 
@@ -304,7 +304,7 @@ pub(crate) fn get_tree_from_tips(
     }
 
     // Sort the result by height
-    super::cache::sort_entries_by_height(&mut result);
+    crate::backend::database::sorting::sort_entries_by_height(&mut result);
 
     Ok(result)
 }
@@ -362,7 +362,7 @@ pub(crate) fn store_at(
     }
 
     // Sort the result by subtree height
-    super::cache::sort_entries_by_subtree_height(subtree, &mut result);
+    crate::backend::database::sorting::sort_entries_by_store_height(subtree, &mut result);
 
     Ok(result)
 }

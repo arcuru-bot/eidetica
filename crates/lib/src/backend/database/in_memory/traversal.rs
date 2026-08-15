@@ -7,89 +7,21 @@
 use std::collections::{HashSet, VecDeque};
 
 use super::InMemoryInner;
-use crate::{Result, backend::errors::BackendError, entry::ID};
+use crate::{Result, backend::database::sorting, backend::errors::BackendError, entry::ID};
 
-/// Build the complete path from tree/subtree root to a target entry
-///
-/// This function traverses backwards through parent references to construct
-/// the complete path from the root to the specified target entry.
-///
-/// # Arguments
-/// * `inner` - Reference to the core data
-/// * `tree` - The ID of the tree to search in
-/// * `subtree` - The name of the subtree to search in (empty string for tree-level search)
-/// * `target_entry` - The ID of the target entry to build a path to
-///
-/// # Returns
-/// A `Result` containing a vector of entry IDs forming the path from root to target.
-pub(crate) fn build_path_from_root(
-    inner: &InMemoryInner,
-    tree: &ID,
-    subtree: &str,
-    target_entry: &ID,
-) -> Result<Vec<ID>> {
-    let mut path = Vec::new();
-    let mut current = target_entry.clone();
-    let mut visited = HashSet::new();
-
-    // Build path by following parents back to root
-    loop {
-        if visited.contains(&current) {
-            return Err(BackendError::CycleDetected { entry_id: current }.into());
-        }
-        visited.insert(current.clone());
-        path.push(current.clone());
-
-        // Get the entry
-        let entry = super::storage::get(inner, &current)?;
-
-        // Check if we've reached the tree root
-        if current == *tree || entry.is_root() {
-            break;
-        }
-
-        // Get subtree parents for this entry
-        let parents = if subtree.is_empty() || entry.subtree_parents(subtree).is_err() {
-            // If no subtree specified or no subtree parents, follow main parents
-            entry.parents()?
-        } else {
-            entry.subtree_parents(subtree)?
-        };
-
-        if parents.is_empty() {
-            // No parents - this must be a root entry
-            break;
-        } else {
-            // Follow the first parent (in height/ID sorted order)
-            current = parents[0].clone();
-        }
-    }
-
-    // Reverse to get root-to-target order
-    path.reverse();
-
-    Ok(path)
-}
-
-/// Collect all entry IDs from root to a target entry
-///
-/// This is a convenience wrapper around `build_path_from_root`.
-///
-/// # Arguments
-/// * `inner` - Reference to the core data
-/// * `tree` - The ID of the tree to search in
-/// * `subtree` - The name of the subtree to search in
-/// * `target_entry` - The ID of the target entry
-///
-/// # Returns
-/// A `Result` containing a vector of entry IDs from root to target.
-pub(crate) fn collect_root_to_target(
-    inner: &InMemoryInner,
-    tree: &ID,
-    subtree: &str,
-    target_entry: &ID,
-) -> Result<Vec<ID>> {
-    build_path_from_root(inner, tree, subtree, target_entry)
+/// Pair each ID with its embedded subtree height (0 when absent), for
+/// [`sorting::sort_ids_by_height`].
+fn ids_with_subtree_heights(inner: &InMemoryInner, subtree: &str, ids: Vec<ID>) -> Vec<(ID, u64)> {
+    ids.into_iter()
+        .map(|id| {
+            let height = inner
+                .entries
+                .get(&id)
+                .and_then(|e| e.subtree_height(subtree).ok())
+                .unwrap_or(0);
+            (id, height)
+        })
+        .collect()
 }
 
 /// Get all entry IDs on paths from a specific entry to multiple target entries
@@ -165,23 +97,10 @@ pub(crate) fn get_path_from_to(
 
     // Sort by subtree height then ID for deterministic ordering
     // Fetch entries to get their embedded heights
-    if !result.is_empty() {
-        result.sort_by(|a, b| {
-            let a_height = inner
-                .entries
-                .get(a)
-                .and_then(|e| e.subtree_height(subtree).ok())
-                .unwrap_or(0);
-            let b_height = inner
-                .entries
-                .get(b)
-                .and_then(|e| e.subtree_height(subtree).ok())
-                .unwrap_or(0);
-            a_height.cmp(&b_height).then_with(|| a.cmp(b))
-        });
-    }
+    let mut rows = ids_with_subtree_heights(inner, subtree, result);
+    sorting::sort_ids_by_height(&mut rows);
 
-    Ok(result)
+    Ok(rows.into_iter().map(|(id, _)| id).collect())
 }
 
 /// Get the subtree parent IDs for a specific entry and subtree, sorted by height then ID
@@ -214,30 +133,17 @@ pub(crate) fn get_sorted_store_parents(
         return Ok(Vec::new());
     }
 
-    let mut parents = match entry.subtree_parents(subtree) {
+    let parents = match entry.subtree_parents(subtree) {
         Ok(parents) => parents,
         Err(_) => return Ok(Vec::new()),
     };
 
     // Sort parents by height (ascending), then by ID for determinism
     // Heights are embedded in entries, so we read them directly
-    if !parents.is_empty() {
-        parents.sort_by(|a, b| {
-            let a_height = inner
-                .entries
-                .get(a)
-                .and_then(|e| e.subtree_height(subtree).ok())
-                .unwrap_or(0);
-            let b_height = inner
-                .entries
-                .get(b)
-                .and_then(|e| e.subtree_height(subtree).ok())
-                .unwrap_or(0);
-            a_height.cmp(&b_height).then_with(|| a.cmp(b))
-        });
-    }
+    let mut rows = ids_with_subtree_heights(inner, subtree, parents);
+    sorting::sort_ids_by_height(&mut rows);
 
-    Ok(parents)
+    Ok(rows.into_iter().map(|(id, _)| id).collect())
 }
 
 /// Find the merge base (common dominator) of multiple entries within a tree/subtree.

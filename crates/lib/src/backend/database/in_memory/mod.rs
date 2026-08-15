@@ -160,7 +160,7 @@ impl InMemory {
     /// * `_tree` - The ID of the tree context (unused, kept for API compatibility)
     /// * `entries` - The vector of entries to be sorted in place
     pub fn sort_entries_by_height(&self, _tree: &ID, entries: &mut [Entry]) {
-        cache::sort_entries_by_height(entries)
+        crate::backend::database::sorting::sort_entries_by_height(entries)
     }
 
     /// Sort entries by their height within a subtree (exposed for testing)
@@ -172,7 +172,7 @@ impl InMemory {
     /// * `subtree` - The name of the subtree context
     /// * `entries` - The vector of entries to be sorted in place
     pub fn sort_entries_by_subtree_height(&self, _tree: &ID, subtree: &str, entries: &mut [Entry]) {
-        cache::sort_entries_by_subtree_height(subtree, entries)
+        crate::backend::database::sorting::sort_entries_by_store_height(subtree, entries)
     }
 
     /// Check if an entry is a tip within its tree (exposed for benchmarks)
@@ -353,16 +353,6 @@ impl BackendImpl for InMemory {
     ) -> Result<Option<ID>> {
         let inner = self.inner.read().unwrap();
         traversal::find_merge_base(&inner, tree, subtree, entry_ids)
-    }
-
-    async fn collect_root_to_target(
-        &self,
-        tree: &ID,
-        subtree: &str,
-        target_entry: &ID,
-    ) -> Result<Vec<ID>> {
-        let inner = self.inner.read().unwrap();
-        traversal::collect_root_to_target(&inner, tree, subtree, target_entry)
     }
 
     fn as_any(&self) -> &dyn Any {
