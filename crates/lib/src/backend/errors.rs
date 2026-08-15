@@ -69,6 +69,13 @@ pub enum BackendError {
     },
 
     /// No common ancestor found for given entries.
+    ///
+    /// This engine never produces this error: `find_merge_base` reports
+    /// disjoint histories as `Ok(None)` (the empty-base merge) rather than
+    /// failing. The variant is kept because peers running older versions
+    /// still emit it over the service wire (see the decode table in
+    /// `service::error`), and removing an existing variant is a breaking
+    /// change.
     #[error("No common ancestor found for entries: {entry_ids:?}")]
     NoCommonAncestor {
         /// The entry IDs that have no common ancestor
