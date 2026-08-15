@@ -8,6 +8,7 @@ use crate::backend::{CacheScope, InstanceMetadata, InstanceSecrets, Verification
 use crate::entry::{Entry, ID};
 
 use super::{SqlxBackend, SqlxResultExt};
+use crate::backend::database::sorting;
 
 /// Get an entry by ID.
 pub async fn get(backend: &SqlxBackend, id: &ID) -> Result<Entry> {
@@ -432,7 +433,7 @@ pub async fn get_tree(backend: &SqlxBackend, tree: &ID) -> Result<Vec<Entry>> {
     }
 
     // Sort by height (heights are stored in entries)
-    super::cache::sort_entries_by_height(&mut entries);
+    sorting::sort_entries_by_height(&mut entries);
 
     Ok(entries)
 }
@@ -463,7 +464,7 @@ pub async fn get_store(backend: &SqlxBackend, tree: &ID, store: &str) -> Result<
         entries.push(entry);
     }
 
-    super::cache::sort_entries_by_store_height(store, &mut entries);
+    sorting::sort_entries_by_store_height(store, &mut entries);
 
     Ok(entries)
 }

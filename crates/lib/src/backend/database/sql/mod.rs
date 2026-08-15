@@ -21,7 +21,6 @@
 //!
 //! See [`schema`] module documentation for details on adding migrations.
 
-mod cache;
 mod storage;
 mod traversal;
 
@@ -435,15 +434,6 @@ impl BackendImpl for SqlxBackend {
         entry_ids: &[ID],
     ) -> Result<Option<ID>> {
         traversal::find_merge_base(self, tree, store, entry_ids).await
-    }
-
-    async fn collect_root_to_target(
-        &self,
-        tree: &ID,
-        store: &str,
-        target_entry: &ID,
-    ) -> Result<Vec<ID>> {
-        traversal::collect_root_to_target(self, tree, store, target_entry).await
     }
 
     fn as_any(&self) -> &dyn Any {

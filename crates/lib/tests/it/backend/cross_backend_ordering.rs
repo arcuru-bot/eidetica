@@ -124,6 +124,42 @@ async fn test_get_tree_order_matches_across_backends() {
     );
 }
 
+/// A merge-base query naming an entry the backend has never seen must error
+/// on every backend, never resolve as if the unknown tip were not there.
+///
+/// The frontier expansion in the SQL backend drops unknown IDs in its JOINs,
+/// so without up-front validation a phantom tip silently degrades to a
+/// partial merge — `Ok(None)` and a fold of only the known branch — where
+/// the in-memory backend rejects the same input.
+#[tokio::test]
+async fn test_find_merge_base_rejects_unknown_tip_across_backends() {
+    let mem = InMemory::new();
+    let sql = Sqlite::in_memory().await.expect("sqlite backend");
+
+    let root_id = build_fan_out(&[&mem, &sql]).await;
+
+    // A structurally valid entry that is never stored anywhere.
+    let phantom = Entry::builder(root_id.clone())
+        .add_parent(root_id.clone())
+        .set_subtree_data(STORE, r#"{"phantom":true}"#)
+        .build()
+        .expect("phantom entry should build")
+        .id();
+
+    for (label, backend) in [
+        ("in-memory", &mem as &dyn BackendImpl),
+        ("sqlite", &sql as &dyn BackendImpl),
+    ] {
+        let result = backend
+            .find_merge_base(&root_id, STORE, &[root_id.clone(), phantom.clone()])
+            .await;
+        assert!(
+            result.is_err(),
+            "{label} backend resolved a merge base over an unknown tip: {result:?}"
+        );
+    }
+}
+
 /// Pin the normative order itself, so a future change that makes both backends
 /// agree on the *wrong* order still fails.
 ///

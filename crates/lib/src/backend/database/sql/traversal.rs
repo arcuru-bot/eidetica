@@ -10,6 +10,7 @@ use crate::backend::errors::BackendError;
 use crate::entry::{Entry, ID};
 
 use super::{SqlxBackend, SqlxResultExt};
+use crate::backend::database::sorting;
 
 /// Get tree tips (entries with no children in the main tree).
 pub async fn snapshot(backend: &SqlxBackend, tree: &ID) -> Result<Vec<ID>> {
@@ -125,7 +126,7 @@ const MERGE_BASE_DEPTH_LIMIT: usize = 100;
 /// common ancestor and must merge from the empty base.
 pub async fn find_merge_base(
     backend: &SqlxBackend,
-    _tree: &ID,
+    tree: &ID,
     store: &str,
     entry_ids: &[ID],
 ) -> Result<Option<ID>> {
@@ -139,6 +140,10 @@ pub async fn find_merge_base(
     if entry_ids.len() == 1 {
         return Ok(Some(entry_ids[0].clone()));
     }
+
+    // An unknown or foreign tip must error like the in-memory backend does,
+    // not fall out of the frontier JOINs as a silent partial merge.
+    validate_tips_in_tree(backend, tree, entry_ids).await?;
 
     // Track all known ancestors per tip and their frontiers for continuation
     let mut ancestor_sets: Vec<HashSet<ID>> = vec![HashSet::new(); entry_ids.len()];
@@ -348,62 +353,13 @@ async fn is_dominator_cte(
     Ok(row.0 == 0)
 }
 
-/// Collect all entries from root to the target entry in a store.
-pub async fn collect_root_to_target(
-    backend: &SqlxBackend,
-    _tree: &ID,
-    store: &str,
-    target_entry: &ID,
-) -> Result<Vec<ID>> {
-    let pool = backend.pool();
-
-    // BFS from target back to root, then reverse
-    let mut path = Vec::new();
-    let mut current = target_entry.clone();
-    let mut visited: HashSet<ID> = HashSet::new();
-
-    loop {
-        if visited.contains(&current) {
-            return Err(BackendError::CycleDetected { entry_id: current }.into());
-        }
-        visited.insert(current.clone());
-        path.push(current.clone());
-
-        // Get parents in store
-        let parent_rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT parent_id FROM store_parents WHERE child_id = $1 AND store_name = $2",
-        )
-        .bind(current.to_string())
-        .bind(store)
-        .fetch_all(pool)
-        .await
-        .sql_context("Failed to get store parents")?;
-
-        if parent_rows.is_empty() {
-            // Reached root
-            break;
-        }
-
-        // Follow first parent (for a simple linear path)
-        // For complex DAGs, this should collect all ancestors
-        current = ID::parse(&parent_rows[0].0)?;
-    }
-
-    path.reverse();
-    Ok(path)
-}
-
-/// Get entries in a tree reachable from the given tips.
+/// Validate that every ID exists and belongs to `tree`, in one batch query.
 ///
-/// Returns an error if any tip doesn't exist locally (`EntryNotFound`) or
-/// belongs to a different tree (`EntryNotInTree`).
-pub async fn get_tree_from_tips(
-    backend: &SqlxBackend,
-    tree: &ID,
-    tips: &[ID],
-) -> Result<Vec<Entry>> {
+/// Returns `EntryNotFound` for an ID with no entry row at all, and
+/// `EntryNotInTree` for one that exists under a different tree.
+async fn validate_tips_in_tree(backend: &SqlxBackend, tree: &ID, tips: &[ID]) -> Result<()> {
     if tips.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let pool = backend.pool();
@@ -414,7 +370,6 @@ pub async fn get_tree_from_tips(
         .collect();
     let starts_union = start_selects.join(" UNION ALL ");
 
-    // Step 1: Validate all tips in a single batch query
     // For each tip, check: does it exist? is it in the right tree?
     // Uses CASE expressions returning 1/0 for SQLite compatibility (no native bool)
     let validation_sql = format!(
@@ -438,7 +393,6 @@ pub async fn get_tree_from_tips(
         .await
         .sql_context("Failed to validate tips")?;
 
-    // Check for validation errors
     for (tip_id_str, exists_at_all, in_tree) in &validation_rows {
         if *exists_at_all == 0 {
             return Err(BackendError::EntryNotFound {
@@ -454,6 +408,33 @@ pub async fn get_tree_from_tips(
             .into());
         }
     }
+
+    Ok(())
+}
+
+/// Get entries in a tree reachable from the given tips.
+///
+/// Returns an error if any tip doesn't exist locally (`EntryNotFound`) or
+/// belongs to a different tree (`EntryNotInTree`).
+pub async fn get_tree_from_tips(
+    backend: &SqlxBackend,
+    tree: &ID,
+    tips: &[ID],
+) -> Result<Vec<Entry>> {
+    if tips.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let pool = backend.pool();
+
+    // Step 1: Validate all tips
+    validate_tips_in_tree(backend, tree, tips).await?;
+
+    // Build UNION ALL clause for tip IDs (works in both SQLite and PostgreSQL)
+    let start_selects: Vec<String> = (1..=tips.len())
+        .map(|i| format!("SELECT ${} AS id", i + 1)) // +1 because $1 is tree_id
+        .collect();
+    let starts_union = start_selects.join(" UNION ALL ");
 
     // Step 2: Single recursive CTE query to traverse tree and fetch entries
     let sql = format!(
@@ -496,7 +477,7 @@ pub async fn get_tree_from_tips(
         entries.push(entry);
     }
 
-    super::cache::sort_entries_by_height(&mut entries);
+    sorting::sort_entries_by_height(&mut entries);
 
     Ok(entries)
 }
@@ -572,7 +553,7 @@ pub async fn store_at(
         entries.push(entry);
     }
 
-    super::cache::sort_entries_by_store_height(store, &mut entries);
+    sorting::sort_entries_by_store_height(store, &mut entries);
 
     Ok(entries)
 }
@@ -606,7 +587,7 @@ pub async fn get_sorted_store_parents(
         .map(|(id, height)| ID::parse(&id).map(|id| (id, height)))
         .collect::<Result<_>>()?;
 
-    super::cache::sort_ids_by_height(&mut parents);
+    sorting::sort_ids_by_height(&mut parents);
 
     Ok(parents.into_iter().map(|(id, _)| id).collect())
 }
@@ -689,7 +670,7 @@ pub async fn get_path_from_to(
         .map(|(id, height)| ID::parse(&id).map(|id| (id, height)))
         .collect::<Result<_>>()?;
 
-    super::cache::sort_ids_by_height(&mut path);
+    sorting::sort_ids_by_height(&mut path);
 
     Ok(path.into_iter().map(|(id, _)| id).collect())
 }
