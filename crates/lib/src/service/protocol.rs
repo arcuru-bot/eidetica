@@ -110,9 +110,12 @@ pub struct TransactionContext {
 /// Response for ComputeMergeState: lowest common ancestor + path to tips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeState {
-    /// `None` when the entries share no common ancestor and the path is the
-    /// full ancestry, to be folded from a default state.
+    /// `None` when the entries share no common ancestor: the state is folded
+    /// from a default over the tips' full ancestry, which the client fetches
+    /// as whole entries (`GetStoreEntries`) rather than as a path of IDs.
     pub merge_base: Option<ID>,
+    /// Entries between the base and the tips; empty when `merge_base` is
+    /// `None`.
     pub path: Vec<ID>,
 }
 
@@ -157,8 +160,9 @@ pub enum DatabaseOp {
     GetStoreTipsUpToEntries { store: String, up_to: Vec<ID> },
 
     /// Lowest common ancestor + path to tip entries in a store DAG.
-    /// Fused to one RPC: the only caller always calls find_merge_base
-    /// then get_path_from_to in sequence.
+    /// Fused to one RPC so base and path resolve against a single server
+    /// view; answered from separate requests they can straddle a sync
+    /// ingest and disagree.
     ComputeMergeState { store: String, entry_ids: Vec<ID> },
 
     /// Fetch a single entry by id (gated post-fetch by its owning tree). Gate

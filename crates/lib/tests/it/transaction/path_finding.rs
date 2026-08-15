@@ -614,7 +614,7 @@ async fn test_find_merge_base_with_bypass_path() {
     assert!(final_state.get("tip_f").is_some(), "Should have tip F data");
 
     // Directly test find_merge_base
-    let backend = ctx.database().backend().unwrap();
+    let backend = ctx.database().backend().unwrap().local_engine().unwrap();
     let merge_base = backend
         .find_merge_base(ctx.database().root_id(), "data", &[e_id, f_id])
         .await
