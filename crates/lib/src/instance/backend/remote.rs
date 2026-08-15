@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use super::Backend;
+use super::{Backend, MergeSlice};
 use crate::{
     Result,
     auth::SigKey,
@@ -138,12 +138,14 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn find_merge_base(
+    async fn compute_merge_state(
         &self,
         tree: &ID,
         store: &str,
         entry_ids: &[ID],
-    ) -> Result<Option<ID>> {
+    ) -> Result<MergeSlice> {
+        // One RPC resolves base and path against a single server-side view;
+        // see the trait doc for why they must not be two round-trips.
         let state = self
             .conn
             .compute_merge_state(
@@ -153,28 +155,10 @@ impl Backend for RemoteBackend {
                 entry_ids.to_vec(),
             )
             .await?;
-        Ok(state.merge_base)
-    }
-
-    async fn get_path_from_to(
-        &self,
-        tree: &ID,
-        store: &str,
-        _from_id: Option<&ID>,
-        to_ids: &[ID],
-    ) -> Result<Vec<ID>> {
-        // The server fuses LCA + path against `to_ids` in one round-trip, so a
-        // separately-supplied `from_id` LCA isn't replayed.
-        let state = self
-            .conn
-            .compute_merge_state(
-                tree.clone(),
-                self.identity(),
-                store.to_string(),
-                to_ids.to_vec(),
-            )
-            .await?;
-        Ok(state.path)
+        Ok(MergeSlice {
+            merge_base: state.merge_base,
+            path: state.path,
+        })
     }
 
     async fn get_cached_crdt_state(

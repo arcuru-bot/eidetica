@@ -826,42 +826,40 @@ impl Transaction {
             return Ok(result);
         }
 
-        // Cache miss: find merge base and compute state from there
-        let merge_base_id = self
+        // Cache miss: resolve the merge base and the path to fold in a
+        // single call, so both come from one view of the store.
+        let merge = self
             .db
             .ops()
-            .find_merge_base(self.db.root_id(), subtree_name, entry_ids)
+            .compute_merge_state(self.db.root_id(), subtree_name, entry_ids)
             .await?;
 
-        // With no merge base the histories are disjoint — a store created
-        // independently on both sides of a fork — so fold the full ancestry
-        // from a default state. Convergence must not depend on which peer
-        // created the store first.
-        let mut result = match &merge_base_id {
-            Some(id) => {
-                self.compute_single_entry_state_recursive(subtree_name, id)
+        let result = match &merge.merge_base {
+            Some(base) => {
+                // Compute the base state recursively, then fold the path
+                // entries (deduplicated, height/ID sorted) on top of it.
+                let state = self
+                    .compute_single_entry_state_recursive(subtree_name, base)
+                    .await?;
+                self.merge_path_entries(subtree_name, state, &merge.path)
                     .await?
             }
-            None => T::default(),
+            // With no merge base the histories are disjoint — a store
+            // created independently on both sides of a fork — so fold the
+            // full ancestry from a default state. Convergence must not
+            // depend on which peer created the store first. `store_at`
+            // batch-fetches the whole entries in fold order: one query
+            // instead of a per-ID fetch of the entire history.
+            None => {
+                let boundary = Snapshot::from(entry_ids.to_vec());
+                let entries = self
+                    .db
+                    .ops()
+                    .store_at(self.db.root_id(), subtree_name, &boundary)
+                    .await?;
+                self.fold_store_entries(subtree_name, &entries)?
+            }
         };
-
-        // Get all entries from merge base to all tip entries (deduplicated and sorted)
-        let path_entries = {
-            self.db
-                .ops()
-                .get_path_from_to(
-                    self.db.root_id(),
-                    subtree_name,
-                    merge_base_id.as_ref(),
-                    entry_ids,
-                )
-                .await?
-        };
-
-        // Merge all path entries in order
-        result = self
-            .merge_path_entries(subtree_name, result, &path_entries)
-            .await?;
 
         // Cache the computed merge result
         let serialized = serde_json::to_vec(&result)?;
@@ -926,17 +924,7 @@ impl Transaction {
                 .await?;
 
             // Step 3: Merge all entries in order (already sorted by height, root first)
-            let mut result = T::default();
-            for entry in &entries {
-                let local_data = if let Ok(data) = entry.data(subtree_name) {
-                    // Decrypt before deserializing
-                    let plaintext = self.decrypt_if_needed(subtree_name, data)?;
-                    serde_json::from_slice::<T>(&plaintext)?
-                } else {
-                    T::default()
-                };
-                result = result.merge(&local_data)?;
-            }
+            let result: T = self.fold_store_entries(subtree_name, &entries)?;
 
             // Step 4: Cache only the final result (encrypted if encryptor is registered)
             let serialized_state = serde_json::to_vec(&result)?;
@@ -948,6 +936,28 @@ impl Transaction {
 
             Ok(result)
         })
+    }
+
+    /// Folds already-fetched entries into a CRDT state from the default.
+    ///
+    /// The entries must be in fold order (height then ID, root first), as
+    /// `store_at` returns them.
+    fn fold_store_entries<T>(&self, subtree_name: &str, entries: &[Entry]) -> Result<T>
+    where
+        T: CRDT,
+    {
+        let mut result = T::default();
+        for entry in entries {
+            let local_data = if let Ok(data) = entry.data(subtree_name) {
+                // Decrypt before deserializing
+                let plaintext = self.decrypt_if_needed(subtree_name, data)?;
+                serde_json::from_slice::<T>(&plaintext)?
+            } else {
+                T::default()
+            };
+            result = result.merge(&local_data)?;
+        }
+        Ok(result)
     }
 
     /// Merges a sequence of entries into a CRDT state.
