@@ -717,15 +717,14 @@ async fn dispatch_database_op(
 
         DatabaseOp::ComputeMergeState { store, entry_ids } => {
             let db = Database::open(instance, &root_id).await?;
-            let merge_base = db
+            let slice = db
                 .ops()
-                .find_merge_base(&root_id, &store, &entry_ids)
+                .compute_merge_state(&root_id, &store, &entry_ids)
                 .await?;
-            let path = db
-                .ops()
-                .get_path_from_to(&root_id, &store, merge_base.as_ref(), &entry_ids)
-                .await?;
-            Ok(ServiceResponse::MergeState(MergeState { merge_base, path }))
+            Ok(ServiceResponse::MergeState(MergeState {
+                merge_base: slice.merge_base,
+                path: slice.path,
+            }))
         }
 
         DatabaseOp::GetCachedCrdtState { store, key } => {
