@@ -57,6 +57,8 @@ pub fn service_error_to_eidetica_error(err: ServiceError) -> crate::Error {
             tree_id: ID::default(),
         }
         .into(),
+        // Emitted only by peers running versions whose find_merge_base
+        // errored on disjoint histories; this engine returns Ok(None) there.
         ("backend", "NoCommonAncestor") => {
             BackendError::NoCommonAncestor { entry_ids: vec![] }.into()
         }

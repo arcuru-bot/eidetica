@@ -225,19 +225,19 @@ Errors serialize as `ServiceError { module, kind, message }`.
 
 **Client side**: `service_error_to_eidetica_error()` reconstructs the appropriate `crate::Error` from the `(module, kind)` pair:
 
-| Module     | Kind                         | Reconstructed Error                        |
-| ---------- | ---------------------------- | ------------------------------------------ |
-| `backend`  | `EntryNotFound`              | `BackendError::EntryNotFound`              |
-| `backend`  | `VerificationStatusNotFound` | `BackendError::VerificationStatusNotFound` |
-| `backend`  | `EntryNotInTree`             | `BackendError::EntryNotInTree`             |
-| `backend`  | `NoCommonAncestor`           | `BackendError::NoCommonAncestor`           |
-| `backend`  | `EmptyEntryList`             | `BackendError::EmptyEntryList`             |
-| `instance` | `DatabaseNotFound`           | `InstanceError::DatabaseNotFound`          |
-| `instance` | `EntryNotFound`              | `InstanceError::EntryNotFound`             |
-| `instance` | `InstanceAlreadyExists`      | `InstanceError::InstanceAlreadyExists`     |
-| `instance` | `DeviceKeyNotFound`          | `InstanceError::DeviceKeyNotFound`         |
-| `instance` | `AuthenticationRequired`     | `InstanceError::AuthenticationRequired`    |
-| (other)    | (other)                      | `Error::Io` with the original message      |
+| Module     | Kind                         | Reconstructed Error                                                                                                                             |
+| ---------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backend`  | `EntryNotFound`              | `BackendError::EntryNotFound`                                                                                                                   |
+| `backend`  | `VerificationStatusNotFound` | `BackendError::VerificationStatusNotFound`                                                                                                      |
+| `backend`  | `EntryNotInTree`             | `BackendError::EntryNotInTree`                                                                                                                  |
+| `backend`  | `NoCommonAncestor`           | `BackendError::NoCommonAncestor` (emitted only by older peers — current engines report disjoint histories as a `None` merge base, not an error) |
+| `backend`  | `EmptyEntryList`             | `BackendError::EmptyEntryList`                                                                                                                  |
+| `instance` | `DatabaseNotFound`           | `InstanceError::DatabaseNotFound`                                                                                                               |
+| `instance` | `EntryNotFound`              | `InstanceError::EntryNotFound`                                                                                                                  |
+| `instance` | `InstanceAlreadyExists`      | `InstanceError::InstanceAlreadyExists`                                                                                                          |
+| `instance` | `DeviceKeyNotFound`          | `InstanceError::DeviceKeyNotFound`                                                                                                              |
+| `instance` | `AuthenticationRequired`     | `InstanceError::AuthenticationRequired`                                                                                                         |
+| (other)    | (other)                      | `Error::Io` with the original message                                                                                                           |
 
 Unrecognized combinations fall back to an `Io` error carrying the original message, so callers use the same error-handling patterns (e.g. `err.is_not_found()`) regardless of local vs. remote. A compile-time exhaustive match over `crate::Error` forces a wire-mapping decision whenever a new variant is added, and a round-trip test asserts every mapped pair survives without hitting the fallback.
 
@@ -270,17 +270,17 @@ The server runs its own `Database` on a local `Instance`, so verification-on-rea
 
 `Transaction`, `Store`, `Database`, and `Instance` all drive I/O through a single `Backend` trait (`crate::instance::backend::Backend`) with no local-vs-remote branching at the call sites:
 
-| Method                                                                    | Purpose                                                                       |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `get(id)`                                                                 | Fetch a single entry                                                          |
-| `snapshot(tree)` / `store_snapshot(tree, store)`                          | Raw DAG tips (Verified-frontier filtering stays in `Database`)                |
-| `store_snapshot_at(tree, store, up_to)`                                   | Store tips reachable from given main-tree entries                             |
-| `store_at(tree, store, snapshot)`                                         | Every store entry reachable from `snapshot`                                   |
-| `find_merge_base(tree, store, ids)` / `get_path_from_to(tree, store, ..)` | LCA + path within a store                                                     |
-| `get_cached_crdt_state` / `cache_crdt_state`                              | CRDT merge cache (see [CRDT Cache](#crdt-cache))                              |
-| `put(entry)`                                                              | Persist an entry                                                              |
-| `write_entry(verification, entry, source)`                                | Persist a signed entry, applying verification and dispatching local callbacks |
-| `get_instance_metadata` / `set_instance_metadata`                         | Daemon-global system-DB pointers                                              |
+| Method                                            | Purpose                                                                       |
+| ------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `get(id)`                                         | Fetch a single entry                                                          |
+| `snapshot(tree)` / `store_snapshot(tree, store)`  | Raw DAG tips (Verified-frontier filtering stays in `Database`)                |
+| `store_snapshot_at(tree, store, up_to)`           | Store tips reachable from given main-tree entries                             |
+| `store_at(tree, store, snapshot)`                 | Every store entry reachable from `snapshot`                                   |
+| `compute_merge_state(tree, store, ids)`           | LCA + path within a store, resolved together against one view                 |
+| `get_cached_crdt_state` / `cache_crdt_state`      | CRDT merge cache (see [CRDT Cache](#crdt-cache))                              |
+| `put(entry)`                                      | Persist an entry                                                              |
+| `write_entry(verification, entry, source)`        | Persist a signed entry, applying verification and dispatching local callbacks |
+| `get_instance_metadata` / `set_instance_metadata` | Daemon-global system-DB pointers                                              |
 
 The trait is the _intersection_ of what both implementations can honor with the same meaning. Off-seam local-only operations (instance secrets, verification-status mutation, raw `all_roots`/`get_tree` listings, scope-keyed cache access) are deliberately **not** on the trait and live on the concrete in-process engine. They are reached only where one exists, via `Backend::local_engine() -> Option<Arc<dyn BackendImpl>>` (returns `None` on a remote backend).
 
