@@ -169,6 +169,12 @@ pub enum DatabaseOp {
     /// Read.
     GetEntry { id: ID },
 
+    /// Fetch multiple entries by id in one round-trip, preserving input
+    /// order. Each entry is gated post-fetch by its owning tree, exactly like
+    /// [`DatabaseOp::GetEntry`]; the caller must hold `Read` on every tree
+    /// involved. Gate Read.
+    GetEntries { ids: Vec<ID> },
+
     /// Look up a cached materialized CRDT state. Server returns the previously
     /// `CacheCrdtState`-submitted blob for `(session user, root_id, key, store)`,
     /// or `None` on miss. Gate Read.

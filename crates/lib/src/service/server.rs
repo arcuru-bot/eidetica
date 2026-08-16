@@ -640,6 +640,19 @@ async fn dispatch_database_op(
             Ok(ServiceResponse::Entry(entry))
         }
 
+        DatabaseOp::GetEntries { ids } => {
+            // Batch fetch collapses N client round-trips into one. Each entry
+            // is fetched in-process (cheap on the server's local backend) and
+            // gated post-fetch by its owning tree, exactly like `GetEntry`.
+            let mut entries = Vec::with_capacity(ids.len());
+            for id in ids {
+                let entry = instance.backend().get(&id).await?;
+                gate_entry_read(instance, acting_pubkey, identity, &entry).await?;
+                entries.push(entry);
+            }
+            Ok(ServiceResponse::Entries(entries))
+        }
+
         DatabaseOp::GetVerifiedTips => {
             // The server runs the Database layer, so `snapshot()` returns the
             // Verified frontier by construction — no client-side verify, no

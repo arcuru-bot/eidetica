@@ -63,6 +63,16 @@ impl Backend for RemoteBackend {
             .await
     }
 
+    async fn get_entries(&self, ids: &[ID]) -> Result<Vec<Entry>> {
+        // Same waved-through root as `get`: the server gates each entry
+        // post-fetch by its owning tree. Order is preserved, so callers that
+        // rely on the input order (e.g. a canonical CRDT replay path) get the
+        // entries back in that order.
+        self.conn
+            .db_get_entries(ID::default(), self.identity(), ids.to_vec())
+            .await
+    }
+
     async fn snapshot(&self, tree: &ID) -> Result<Snapshot> {
         match self
             .conn
