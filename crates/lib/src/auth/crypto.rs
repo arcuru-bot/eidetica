@@ -296,7 +296,11 @@ pub fn sign_entry(entry: &Entry, signing_key: &PrivateKey) -> Result<String, Err
 /// Returns `Ok(())` if the signature is valid, or `Err(AuthError)` if
 /// verification fails (missing signature, malformed data, or wrong key).
 pub fn verify_entry_signature(entry: &Entry, public_key: &PublicKey) -> Result<(), AuthError> {
-    let signature_base64 = entry.sig.sig.as_ref().ok_or(AuthError::InvalidSignature)?;
+    let signature_base64 = entry
+        .sig()
+        .sig
+        .as_ref()
+        .ok_or(AuthError::InvalidSignature)?;
 
     let signature_bytes =
         Base64::decode_vec(signature_base64).map_err(|_| AuthError::InvalidSignature)?;
@@ -433,15 +437,17 @@ mod tests {
             .expect("Root entry should build successfully");
 
         // Set auth ID without signature
-        entry.sig = SigInfo::builder()
-            .key(SigKey::from_name("KEY_LAPTOP"))
-            .build();
+        entry.set_sig(
+            SigInfo::builder()
+                .key(SigKey::from_name("KEY_LAPTOP"))
+                .build(),
+        );
 
         // Sign the entry
         let signature = sign_entry(&entry, &signing_key).unwrap();
 
         // Set the signature on the entry
-        entry.sig.sig = Some(signature);
+        entry.set_signature(Some(signature));
 
         // Verify the signature using algorithm-agnostic PublicKey
         verify_entry_signature(&entry, &verifying_key).unwrap();

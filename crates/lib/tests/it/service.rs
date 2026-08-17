@@ -568,7 +568,7 @@ async fn test_database_submit_signed_entry() {
         .build()
         .unwrap();
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.sig.sig = Some(signature);
+    entry.set_signature(Some(signature));
     let entry_id = entry.id();
 
     conn.submit_signed_entry(root_id.clone(), identity.clone(), entry)
@@ -942,7 +942,7 @@ async fn test_submit_cross_session_signed_by_tree_admin_becomes_verified() {
     let conn = remote_conn(&admin_inst);
 
     // Resolve bob's SigKey in his own tree (the same shape `setup_db`
-    // produces). The verifier reads `entry.sig.key` to look up bob's key
+    // produces). The verifier reads `entry.sig().key` to look up bob's key
     // in the tree's auth_settings; if we left this defaulted, the resolver
     // would find no candidates and verification would fail regardless of
     // signature validity.
@@ -993,9 +993,13 @@ async fn test_submit_cross_session_signed_by_tree_admin_becomes_verified() {
         .set_height(max_parent_height + 1)
         .build()
         .unwrap();
-    entry.sig.key = bob_identity.clone();
+    {
+        let mut sig = entry.sig().clone();
+        sig.key = bob_identity.clone();
+        entry.set_sig(sig);
+    }
     let signature = sign_entry(&entry, &bob_sk).unwrap();
-    entry.sig.sig = Some(signature);
+    entry.set_signature(Some(signature));
     let entry_id = entry.id();
 
     conn.submit_signed_entry(bob_root.clone(), bob_identity, entry)
@@ -1054,7 +1058,7 @@ async fn test_submit_unauthorized_signer_stays_invisible_in_default_reads() {
         .build()
         .unwrap();
     let signature = sign_entry(&entry, &admin_sk).unwrap();
-    entry.sig.sig = Some(signature);
+    entry.set_signature(Some(signature));
     let entry_id = entry.id();
     let admin_identity = eidetica::auth::types::SigKey::from_pubkey(&admin_pub);
 

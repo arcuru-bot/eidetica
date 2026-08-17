@@ -484,3 +484,115 @@ fn test_entry_to_dagcbor_method() {
     let id2 = entry.id();
     assert_eq!(id1, id2);
 }
+
+/// Compute an entry's ID without consulting the memo, so tests can compare the
+/// memoized value against ground truth.
+fn uncached_id(entry: &Entry) -> ID {
+    ID::from_dagcbor_bytes(entry.to_dagcbor().expect("serialization should succeed"))
+}
+
+#[test]
+fn test_id_memo_matches_uncached_computation() {
+    let entry = Entry::root_builder()
+        .set_subtree_data("test", b"value")
+        .build()
+        .expect("Root entry should build successfully");
+
+    let expected = uncached_id(&entry);
+    assert_eq!(entry.id(), expected, "first call must compute the true ID");
+    assert_eq!(entry.id(), expected, "memoized call must agree");
+}
+
+#[test]
+fn test_id_memo_is_invalidated_by_set_signature() {
+    let mut entry = Entry::root_builder()
+        .set_subtree_data("test", b"value")
+        .build()
+        .expect("Root entry should build successfully");
+
+    let unsigned_id = entry.id();
+    entry.set_signature(Some("c2lnbmF0dXJl".to_string()));
+
+    assert_eq!(
+        entry.id(),
+        uncached_id(&entry),
+        "setting a signature must invalidate the memoized ID"
+    );
+    assert_ne!(
+        entry.id(),
+        unsigned_id,
+        "a signed entry must not report the unsigned entry's ID"
+    );
+}
+
+#[test]
+fn test_id_memo_is_invalidated_by_set_sig() {
+    let mut entry = Entry::root_builder()
+        .set_subtree_data("test", b"value")
+        .build()
+        .expect("Root entry should build successfully");
+
+    let original_id = entry.id();
+    entry.set_sig(
+        SigInfo::builder()
+            .key(SigKey::from_name("KEY_LAPTOP"))
+            .build(),
+    );
+
+    assert_eq!(
+        entry.id(),
+        uncached_id(&entry),
+        "replacing the signature info must invalidate the memoized ID"
+    );
+    assert_ne!(entry.id(), original_id);
+}
+
+#[test]
+fn test_id_memo_does_not_leak_across_canonical_for_signing() {
+    let mut entry = Entry::root_builder()
+        .set_subtree_data("test", b"value")
+        .build()
+        .expect("Root entry should build successfully");
+    entry.set_signature(Some("c2lnbmF0dXJl".to_string()));
+
+    // Populate the memo before deriving the canonical form.
+    let signed_id = entry.id();
+
+    let canonical = entry.canonical_for_signing();
+    assert_eq!(
+        canonical.id(),
+        uncached_id(&canonical),
+        "the canonical copy must not inherit the signed entry's ID"
+    );
+    assert_ne!(canonical.id(), signed_id);
+    assert_eq!(
+        entry.id(),
+        signed_id,
+        "deriving a canonical copy must not disturb the original"
+    );
+}
+
+#[test]
+fn test_id_memo_is_not_serialized() {
+    let entry = Entry::root_builder()
+        .set_subtree_data("test", b"value")
+        .build()
+        .expect("Root entry should build successfully");
+
+    let before = entry.to_dagcbor().expect("serialization should succeed");
+    let id = entry.id();
+    let after = entry.to_dagcbor().expect("serialization should succeed");
+
+    assert_eq!(
+        before, after,
+        "the memo must not change the DAG-CBOR encoding"
+    );
+
+    let decoded: Entry = serde_ipld_dagcbor::from_slice(&after).unwrap();
+    assert_eq!(decoded, entry, "the memo must not participate in equality");
+    assert_eq!(
+        decoded.id(),
+        id,
+        "a decoded entry must compute the same content ID"
+    );
+}

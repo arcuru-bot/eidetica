@@ -99,7 +99,7 @@ pub async fn assert_subtree_data(tree: &Database, subtree_name: &str, expected: 
 /// Verify entry has expected authentication properties
 pub async fn assert_entry_authentication(tree: &Database, entry_id: &ID, expected_key: &str) {
     let entry = tree.get_entry(entry_id).await.expect("Failed to get entry");
-    let sig_info = &entry.sig;
+    let sig_info = entry.sig();
 
     // Check if the hint matches the expected key (could be pubkey or name)
     let hint = sig_info.hint();

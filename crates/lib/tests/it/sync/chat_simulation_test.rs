@@ -314,11 +314,11 @@ async fn test_global_key_bootstrap() {
         .into_tips();
     let latest_entry = client_instance.backend().get(&tips[0]).await.unwrap();
     assert!(
-        latest_entry.sig.key.is_global(),
+        latest_entry.sig().key.is_global(),
         "Entry should use global permission key"
     );
     // For global permission, the actual pubkey should be recorded in the hint
-    let hint = latest_entry.sig.hint();
+    let hint = latest_entry.sig().hint();
     assert!(
         hint.pubkey.is_some() || hint.name.is_some(),
         "SigInfo should have key hint"

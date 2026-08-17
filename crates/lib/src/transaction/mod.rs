@@ -1300,7 +1300,7 @@ impl Transaction {
         // Sign the entry if we have a signing key
         if let Some(signing_key) = signing_key {
             let signature = sign_entry(&entry, &signing_key)?;
-            entry.sig.sig = Some(signature);
+            entry.set_signature(Some(signature));
         }
 
         // Validate authentication (all entries must be authenticated)
