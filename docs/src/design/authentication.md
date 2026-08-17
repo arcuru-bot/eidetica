@@ -294,7 +294,7 @@ For delegation paths, the key includes a `path` array of delegation steps:
 }
 ```
 
-The `sig.sig` field contains the base64-encoded Ed25519 signature of the entry's content hash.
+The `auth.signature` field contains the base64-encoded Ed25519 signature of the entry's content hash. It serializes as `sig` inside the entry's `sig` map, which is the on-disk name.
 
 ## Key Management
 

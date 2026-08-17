@@ -562,13 +562,13 @@ async fn test_database_submit_signed_entry() {
 
     let parents: Vec<eidetica::entry::ID> =
         ctx.main_parents.iter().map(|(id, _)| id.clone()).collect();
-    let mut entry = Entry::builder(root_id.clone())
+    let entry = Entry::builder(root_id.clone())
         .set_parents(parents)
         .set_subtree_data("submitted", b"{\"submitted\":true}")
         .build()
         .unwrap();
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.set_signature(Some(signature));
+    let entry = entry.with_auth(|auth| auth.signature = Some(signature));
     let entry_id = entry.id();
 
     conn.submit_signed_entry(root_id.clone(), identity.clone(), entry)
@@ -942,7 +942,7 @@ async fn test_submit_cross_session_signed_by_tree_admin_becomes_verified() {
     let conn = remote_conn(&admin_inst);
 
     // Resolve bob's SigKey in his own tree (the same shape `setup_db`
-    // produces). The verifier reads `entry.sig().key` to look up bob's key
+    // produces). The verifier reads `entry.auth().key` to look up bob's key
     // in the tree's auth_settings; if we left this defaulted, the resolver
     // would find no candidates and verification would fail regardless of
     // signature validity.
@@ -986,20 +986,16 @@ async fn test_submit_cross_session_signed_by_tree_admin_becomes_verified() {
     // Set the identity hint to bob's, then sign — signing must happen
     // after `sig.key`, `metadata`, and `height` are set because the
     // canonical signing bytes include them all.
-    let mut entry = Entry::builder(bob_root.clone())
+    let entry = Entry::builder(bob_root.clone())
         .set_parents(parents)
         .set_subtree_data("note", b"{\"cross_session\":true}")
         .set_metadata(metadata_bytes)
         .set_height(max_parent_height + 1)
         .build()
         .unwrap();
-    {
-        let mut sig = entry.sig().clone();
-        sig.key = bob_identity.clone();
-        entry.set_sig(sig);
-    }
+    let entry = entry.with_auth(|auth| auth.key = bob_identity.clone());
     let signature = sign_entry(&entry, &bob_sk).unwrap();
-    entry.set_signature(Some(signature));
+    let entry = entry.with_auth(|auth| auth.signature = Some(signature));
     let entry_id = entry.id();
 
     conn.submit_signed_entry(bob_root.clone(), bob_identity, entry)
@@ -1052,13 +1048,13 @@ async fn test_submit_unauthorized_signer_stays_invisible_in_default_reads() {
     let admin_sk = admin_user.get_signing_key(&admin_pub).unwrap();
     let conn = remote_conn(&admin_inst);
 
-    let mut entry = Entry::builder(bob_root.clone())
+    let entry = Entry::builder(bob_root.clone())
         .set_parents(initial_tips.clone())
         .set_subtree_data("note", b"{\"unauthorized_signer\":true}")
         .build()
         .unwrap();
     let signature = sign_entry(&entry, &admin_sk).unwrap();
-    entry.set_signature(Some(signature));
+    let entry = entry.with_auth(|auth| auth.signature = Some(signature));
     let entry_id = entry.id();
     let admin_identity = eidetica::auth::types::SigKey::from_pubkey(&admin_pub);
 

@@ -38,7 +38,7 @@ async fn test_authenticated_operations() {
         .get_entry(&entry_id)
         .await
         .expect("Failed to get entry");
-    let hint = entry.sig().hint();
+    let hint = entry.auth().hint();
     assert!(
         hint.pubkey.as_ref() == Some(&test_key) || hint.name.as_deref() == Some("TEST_KEY"),
         "Entry should be signed by test key"
@@ -142,13 +142,13 @@ async fn test_validation_pipeline_with_concurrent_settings_changes() {
         .get_entry(&entry_id1)
         .await
         .expect("Failed to get entry1");
-    assert_eq!(entry1.sig().key, SigKey::from_pubkey(&key1_id));
+    assert_eq!(entry1.auth().key, SigKey::from_pubkey(&key1_id));
 
     let entry2 = tree_with_key2
         .get_entry(&entry_id2)
         .await
         .expect("Failed to get entry2");
-    assert_eq!(entry2.sig().key, SigKey::from_pubkey(&key2_id));
+    assert_eq!(entry2.auth().key, SigKey::from_pubkey(&key2_id));
 }
 
 #[tokio::test]

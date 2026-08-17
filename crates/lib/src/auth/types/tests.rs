@@ -43,7 +43,7 @@ fn test_auth_key_serialization() {
 fn test_sig_info_serialization() {
     let sig_info = SigInfo::builder()
         .key(SigKey::from_name("KEY_LAPTOP"))
-        .sig("signature_base64_encoded_string_here")
+        .signature("signature_base64_encoded_string_here")
         .build();
 
     let json = serde_json::to_string(&sig_info).unwrap();
@@ -53,7 +53,7 @@ fn test_sig_info_serialization() {
         serde_json::to_string(&sig_info.key).unwrap(),
         serde_json::to_string(&deserialized.key).unwrap()
     );
-    assert_eq!(sig_info.sig, deserialized.sig);
+    assert_eq!(sig_info.signature, deserialized.signature);
 }
 
 #[test]
@@ -174,13 +174,13 @@ fn test_sig_key_delegation_roundtrip() {
 fn test_sig_info_nested_value_roundtrip() {
     let original = SigInfo::builder()
         .key(SigKey::from_name("KEY_LAPTOP"))
-        .sig("signature_here")
+        .signature("signature_here")
         .build();
     let mut nested = Doc::new();
     nested.set_json("sig_info", &original).unwrap();
     let parsed: SigInfo = nested.get_json("sig_info").unwrap();
     assert_eq!(original.key, parsed.key);
-    assert_eq!(original.sig, parsed.sig);
+    assert_eq!(original.signature, parsed.signature);
 }
 
 #[test]
@@ -534,14 +534,14 @@ fn test_sig_info_with_global_serialization() {
     let pubkey = PublicKey::random();
     let sig_info = SigInfo::builder()
         .key(SigKey::global(&pubkey))
-        .sig("signature_base64_encoded_string_here")
+        .signature("signature_base64_encoded_string_here")
         .build();
 
     let json = serde_json::to_string(&sig_info).unwrap();
     let deserialized: SigInfo = serde_json::from_str(&json).unwrap();
 
     assert_eq!(sig_info.key, deserialized.key);
-    assert_eq!(sig_info.sig, deserialized.sig);
+    assert_eq!(sig_info.signature, deserialized.signature);
     assert!(sig_info.is_global());
 }
 
@@ -549,11 +549,11 @@ fn test_sig_info_with_global_serialization() {
 fn test_sig_info_builder_basic() {
     let sig_info = SigInfo::builder()
         .key(SigKey::from_name("KEY_LAPTOP"))
-        .sig("test_signature")
+        .signature("test_signature")
         .build();
 
     assert!(sig_info.key.has_name_hint("KEY_LAPTOP"));
-    assert_eq!(sig_info.sig, Some("test_signature".to_string()));
+    assert_eq!(sig_info.signature, Some("test_signature".to_string()));
 }
 
 #[test]
@@ -561,22 +561,22 @@ fn test_sig_info_builder_with_pubkey_hint() {
     let pubkey = PublicKey::random();
     let sig_info = SigInfo::builder()
         .pubkey_hint(&pubkey)
-        .sig("test_signature")
+        .signature("test_signature")
         .build();
 
     assert!(sig_info.key.has_pubkey_hint(&pubkey));
-    assert_eq!(sig_info.sig, Some("test_signature".to_string()));
+    assert_eq!(sig_info.signature, Some("test_signature".to_string()));
 }
 
 #[test]
 fn test_sig_info_builder_with_name_hint() {
     let sig_info = SigInfo::builder()
         .name_hint("my_key")
-        .sig("test_signature")
+        .signature("test_signature")
         .build();
 
     assert!(sig_info.key.has_name_hint("my_key"));
-    assert_eq!(sig_info.sig, Some("test_signature".to_string()));
+    assert_eq!(sig_info.signature, Some("test_signature".to_string()));
 }
 
 #[test]
@@ -584,11 +584,11 @@ fn test_sig_info_builder_with_global_hint() {
     let pubkey = PublicKey::random();
     let sig_info = SigInfo::builder()
         .global_hint(&pubkey)
-        .sig("test_signature")
+        .signature("test_signature")
         .build();
 
     assert!(sig_info.is_global());
-    assert_eq!(sig_info.sig, Some("test_signature".to_string()));
+    assert_eq!(sig_info.signature, Some("test_signature".to_string()));
 }
 
 #[test]
@@ -598,13 +598,13 @@ fn test_sig_info_builder_minimal() {
         .build();
 
     assert!(sig_info.key.has_name_hint("KEY_LAPTOP"));
-    assert_eq!(sig_info.sig, None);
+    assert_eq!(sig_info.signature, None);
 }
 
 #[test]
 #[should_panic(expected = "key is required for SigInfo")]
 fn test_sig_info_builder_missing_key() {
-    SigInfo::builder().sig("test_signature").build();
+    SigInfo::builder().signature("test_signature").build();
 }
 
 #[test]
@@ -619,18 +619,18 @@ fn test_sig_info_builder_delegation() {
 
     let sig_info = SigInfo::builder()
         .key(delegation.clone())
-        .sig("test_signature")
+        .signature("test_signature")
         .build();
 
     assert_eq!(sig_info.key, delegation);
-    assert_eq!(sig_info.sig, Some("test_signature".to_string()));
+    assert_eq!(sig_info.signature, Some("test_signature".to_string()));
 }
 
 #[test]
 fn test_sig_info_default() {
     let default_sig_info = SigInfo::default();
     assert_eq!(default_sig_info.key, SigKey::default());
-    assert_eq!(default_sig_info.sig, None);
+    assert_eq!(default_sig_info.signature, None);
 }
 
 #[test]
@@ -650,14 +650,14 @@ fn test_sig_info_is_unsigned() {
 
     // With signature - not unsigned
     let with_sig = SigInfo {
-        sig: Some("signature".to_string()),
+        signature: Some("signature".to_string()),
         ..Default::default()
     };
     assert!(!with_sig.is_unsigned());
 
     // Delegation is never unsigned (even with empty hint and no sig)
     let delegation = SigInfo {
-        sig: None,
+        signature: None,
         key: SigKey::Delegation {
             path: vec![],
             hint: KeyHint::default(),
@@ -676,14 +676,14 @@ fn test_sig_info_malformed_reason() {
 
     // Valid states: properly signed with hint
     let signed = SigInfo {
-        sig: Some("signature".to_string()),
+        signature: Some("signature".to_string()),
         key: SigKey::from_pubkey(&test_pubkey),
     };
     assert!(signed.malformed_reason().is_none());
 
     // Valid states: properly signed delegation
     let signed_delegation = SigInfo {
-        sig: Some("signature".to_string()),
+        signature: Some("signature".to_string()),
         key: SigKey::Delegation {
             path: vec![],
             hint: KeyHint::from_name("key"),
@@ -700,7 +700,7 @@ fn test_sig_info_malformed_reason() {
 
     // Malformed: signature but no hint (Direct with empty hint)
     let sig_no_hint = SigInfo {
-        sig: Some("signature".to_string()),
+        signature: Some("signature".to_string()),
         key: SigKey::Direct {
             hint: KeyHint::default(),
         },
@@ -712,7 +712,7 @@ fn test_sig_info_malformed_reason() {
 
     // Malformed: delegation without signature
     let delegation_no_sig = SigInfo {
-        sig: None,
+        signature: None,
         key: SigKey::Delegation {
             path: vec![],
             hint: KeyHint::from_name("key"),

@@ -170,18 +170,16 @@ async fn test_entry_validation_success() {
     let settings = create_test_auth_with_key(&pubkey, &auth_key);
 
     // Create a test entry using Entry::builder
-    let mut entry = Entry::root_builder()
+    let entry = Entry::root_builder()
+        .set_auth(SigInfo::builder().key(SigKey::from_pubkey(&pubkey)).build())
         .build()
         .expect("Root entry should build successfully");
-
-    // Set auth info without signature - use pubkey hint
-    entry.set_sig(SigInfo::builder().key(SigKey::from_pubkey(&pubkey)).build());
 
     // Sign the entry
     let signature = sign_entry(&entry, &signing_key).unwrap();
 
     // Set the signature on the entry
-    entry.set_signature(Some(signature));
+    let entry = entry.with_auth(|auth| auth.signature = Some(signature));
 
     // Validate the entry
     let result = validator.validate_entry(&entry, &settings, None).await;
@@ -236,14 +234,14 @@ async fn test_validate_entry_with_auth_info_against_empty_settings() {
     let (signing_key, pubkey) = generate_keypair();
 
     // Create an entry with auth info (signed)
-    let mut entry = Entry::root_builder()
+    let entry = Entry::root_builder()
+        .set_auth(SigInfo::builder().key(SigKey::from_pubkey(&pubkey)).build())
         .build()
         .expect("Root entry should build successfully");
-    entry.set_sig(SigInfo::builder().key(SigKey::from_pubkey(&pubkey)).build());
 
     // Sign the entry
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.set_signature(Some(signature));
+    let entry = entry.with_auth(|auth| auth.signature = Some(signature));
 
     // Validate against empty settings (no auth configuration)
     let empty_auth_settings = AuthSettings::new();
@@ -274,18 +272,16 @@ async fn test_entry_validation_with_revoked_key() {
     let settings = create_test_auth_with_key(&pubkey, &revoked_key);
 
     // Create a test entry using Entry::builder
-    let mut entry = Entry::root_builder()
+    let entry = Entry::root_builder()
+        .set_auth(SigInfo::builder().key(SigKey::from_pubkey(&pubkey)).build())
         .build()
         .expect("Root entry should build successfully");
-
-    // Set auth info without signature
-    entry.set_sig(SigInfo::builder().key(SigKey::from_pubkey(&pubkey)).build());
 
     // Sign the entry
     let signature = sign_entry(&entry, &signing_key).unwrap();
 
     // Set the signature on the entry
-    entry.set_signature(Some(signature));
+    let entry = entry.with_auth(|auth| auth.signature = Some(signature));
 
     // Validation should fail with revoked key - returns Ok(false) since no active key could verify
     let result = validator.validate_entry(&entry, &settings, None).await;
@@ -738,19 +734,19 @@ async fn test_global_permission_with_pubkey_hint() {
     let settings = create_test_auth_with_global(&global_auth_key);
 
     // Create an entry that uses global permission with actual signer pubkey in hint
-    let mut entry = Entry::root_builder()
+    let entry = Entry::root_builder()
+        .set_auth(SigInfo {
+            key: SigKey::global(&actual_pubkey),
+            signature: None,
+        })
         .build()
         .expect("Root entry should build successfully");
 
     // Use SigKey::global to indicate global permission with actual signer
-    entry.set_sig(SigInfo {
-        key: SigKey::global(&actual_pubkey),
-        sig: None,
-    });
 
     // Sign the entry with the client's key
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.set_signature(Some(signature));
+    let entry = entry.with_auth(|auth| auth.signature = Some(signature));
 
     // Validation should succeed
     let result = validator.validate_entry(&entry, &settings, None).await;
@@ -771,17 +767,16 @@ async fn test_global_permission_without_pubkey_fails() {
     let settings = create_test_auth_with_global(&global_auth_key);
 
     // Create an entry that uses a name hint "*" without pubkey - should fail
-    let mut entry = Entry::root_builder()
+    let entry = Entry::root_builder()
+        .set_auth(SigInfo {
+            key: SigKey::from_name("*"), // Just "*" without pubkey - should fail
+            signature: None,
+        })
         .build()
         .expect("Root entry should build successfully");
 
-    entry.set_sig(SigInfo {
-        key: SigKey::from_name("*"), // Just "*" without pubkey - should fail
-        sig: None,
-    });
-
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.set_signature(Some(signature));
+    let entry = entry.with_auth(|auth| auth.signature = Some(signature));
 
     // Validation should fail due to missing pubkey in global permission
     let result = validator.validate_entry(&entry, &settings, None).await;
@@ -842,17 +837,16 @@ async fn test_global_permission_insufficient_perms() {
     assert_eq!(resolved[0].effective_permission, Permission::Read); // Should have read permission
 
     // Create an entry that tries to write (requires Write permission)
-    let mut entry = Entry::root_builder()
+    let entry = Entry::root_builder()
+        .set_auth(SigInfo {
+            key: SigKey::global(&actual_pubkey),
+            signature: None,
+        })
         .build()
         .expect("Root entry should build successfully");
 
-    entry.set_sig(SigInfo {
-        key: SigKey::global(&actual_pubkey),
-        sig: None,
-    });
-
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.set_signature(Some(signature));
+    let _entry = entry.with_auth(|auth| auth.signature = Some(signature));
 
     // Even with valid signature and pubkey, should fail due to insufficient permissions
     // This test validates that permission checking still works with global permissions
@@ -876,16 +870,16 @@ async fn test_global_permission_vs_specific_key() {
     auth_settings.set_global_permission(global_key);
 
     // Test 1: Entry signed with specific key should work normally
-    let mut entry1 = Entry::root_builder()
+    let entry1 = Entry::root_builder()
+        .set_auth(
+            SigInfo::builder()
+                .key(SigKey::from_pubkey(&pubkey1))
+                .build(),
+        )
         .build()
         .expect("Root entry should build successfully");
-    entry1.set_sig(
-        SigInfo::builder()
-            .key(SigKey::from_pubkey(&pubkey1))
-            .build(),
-    );
     let signature1 = sign_entry(&entry1, &signing_key1).unwrap();
-    entry1.set_signature(Some(signature1));
+    let entry1 = entry1.with_auth(|auth| auth.signature = Some(signature1));
 
     let result1 = validator
         .validate_entry(&entry1, &auth_settings, None)
@@ -893,16 +887,16 @@ async fn test_global_permission_vs_specific_key() {
     assert!(result1.is_ok(), "Specific key validation should work");
 
     // Test 2: Entry using global permission should also work
-    let mut entry2 = Entry::root_builder()
+    let entry2 = Entry::root_builder()
+        .set_auth(
+            SigInfo::builder()
+                .key(SigKey::global(&pubkey2)) // Different key using global permission
+                .build(),
+        )
         .build()
         .expect("Root entry should build successfully");
-    entry2.set_sig(
-        SigInfo::builder()
-            .key(SigKey::global(&pubkey2)) // Different key using global permission
-            .build(),
-    );
     let signature2 = sign_entry(&entry2, &signing_key2).unwrap();
-    entry2.set_signature(Some(signature2));
+    let entry2 = entry2.with_auth(|auth| auth.signature = Some(signature2));
 
     // Global permissions should now work with the pubkey hint
     let result2 = validator

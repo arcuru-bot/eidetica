@@ -543,11 +543,11 @@ impl Cluster {
     pub async fn assert_all_signed(&self, peer: usize, tree: &ID) -> Result<()> {
         for e in self.entries(peer, tree).await? {
             assert!(
-                !e.sig().is_unsigned(),
+                !e.auth().is_unsigned(),
                 "peer {peer} holds an unsigned entry: {}",
                 e.id(),
             );
-            if let Some(reason) = e.sig().malformed_reason() {
+            if let Some(reason) = e.auth().malformed_reason() {
                 panic!(
                     "peer {peer} holds a malformed-signature entry {}: {reason}",
                     e.id(),

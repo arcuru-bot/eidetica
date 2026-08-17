@@ -133,7 +133,7 @@ impl SettingsStore {
 pub struct Entry {
     database: TreeNode,              // Main database node with metadata
     stores: Vec<SubTreeNode>,  // Named stores including _settings
-    sig: SigInfo,                // Signature information
+    auth: SigInfo,               // Signature and key hint
 }
 ```
 

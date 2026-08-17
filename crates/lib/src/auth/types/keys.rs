@@ -408,8 +408,11 @@ impl SigKey {
 pub struct SigInfo {
     /// Authentication signature - base64-encoded signature bytes
     /// Optional to allow for entry creation before signing
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sig: Option<String>,
+    ///
+    /// Serialized as `sig` to keep the wire format, and therefore every existing
+    /// entry ID, unchanged.
+    #[serde(rename = "sig", skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
     /// Key lookup hint
     pub key: SigKey,
 }
@@ -418,7 +421,7 @@ impl SigInfo {
     /// Create a new SigInfo with a pubkey hint
     pub fn from_pubkey(pubkey: &PublicKey) -> Self {
         Self {
-            sig: None,
+            signature: None,
             key: SigKey::from_pubkey(pubkey),
         }
     }
@@ -426,7 +429,7 @@ impl SigInfo {
     /// Create a new SigInfo with a name hint
     pub fn from_name(name: impl Into<String>) -> Self {
         Self {
-            sig: None,
+            signature: None,
             key: SigKey::from_name(name),
         }
     }
@@ -434,7 +437,7 @@ impl SigInfo {
     /// Create a new SigInfo for global permission
     pub fn global(actual_pubkey: &PublicKey) -> Self {
         Self {
-            sig: None,
+            signature: None,
             key: SigKey::global(actual_pubkey),
         }
     }
@@ -461,7 +464,8 @@ impl SigInfo {
     /// - Empty KeyHint (no pubkey, no name)
     /// - No signature
     pub fn is_unsigned(&self) -> bool {
-        matches!(self.key, SigKey::Direct { ref hint } if !hint.is_set()) && self.sig.is_none()
+        matches!(self.key, SigKey::Direct { ref hint } if !hint.is_set())
+            && self.signature.is_none()
     }
 
     /// Check if this represents a malformed/inconsistent signature state.
@@ -475,16 +479,16 @@ impl SigInfo {
     pub fn malformed_reason(&self) -> Option<&'static str> {
         match &self.key {
             SigKey::Direct { hint } => {
-                if hint.is_set() && self.sig.is_none() {
+                if hint.is_set() && self.signature.is_none() {
                     Some("entry has key hint but no signature")
-                } else if !hint.is_set() && self.sig.is_some() {
+                } else if !hint.is_set() && self.signature.is_some() {
                     Some("entry has signature but no key hint")
                 } else {
                     None
                 }
             }
             SigKey::Delegation { .. } => {
-                if self.sig.is_none() {
+                if self.signature.is_none() {
                     Some("delegation entry requires a signature")
                 } else {
                     None
@@ -499,7 +503,7 @@ impl SigInfo {
 /// This builder provides a fluent interface for creating SigInfo objects.
 #[derive(Debug, Clone, Default)]
 pub struct SigInfoBuilder {
-    sig: Option<String>,
+    signature: Option<String>,
     key: Option<SigKey>,
 }
 
@@ -510,8 +514,8 @@ impl SigInfoBuilder {
     }
 
     /// Set the signature (base64-encoded signature bytes)
-    pub fn sig(mut self, sig: impl Into<String>) -> Self {
-        self.sig = Some(sig.into());
+    pub fn signature(mut self, signature: impl Into<String>) -> Self {
+        self.signature = Some(signature.into());
         self
     }
 
@@ -545,7 +549,7 @@ impl SigInfoBuilder {
     /// Panics if key is not set, as it's a required field.
     pub fn build(self) -> SigInfo {
         SigInfo {
-            sig: self.sig,
+            signature: self.signature,
             key: self.key.expect("key is required for SigInfo"),
         }
     }
