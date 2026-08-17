@@ -60,7 +60,7 @@ impl AuthValidator {
         instance: Option<&Instance>,
     ) -> Result<bool> {
         // Malformed entries fail validation
-        if entry.sig.malformed_reason().is_some() {
+        if entry.sig().malformed_reason().is_some() {
             debug!("Malformed entry detected");
             return Ok(false);
         }
@@ -70,7 +70,7 @@ impl AuthValidator {
             !auth_settings.get_all_keys()?.is_empty() || auth_settings.has_global_permission();
 
         // Handle unsigned entries
-        if entry.sig.is_unsigned() {
+        if entry.sig().is_unsigned() {
             if has_auth {
                 // Auth is configured but entry is unsigned - invalid
                 debug!("Unsigned entry in authenticated database");
@@ -90,7 +90,7 @@ impl AuthValidator {
         // Resolve all matching keys
         let resolved_auths = match self
             .resolver
-            .resolve_sig_key(&entry.sig.key, auth_settings, instance)
+            .resolve_sig_key(&entry.sig().key, auth_settings, instance)
             .await
         {
             Ok(auths) => auths,

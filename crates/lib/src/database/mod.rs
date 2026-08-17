@@ -1463,7 +1463,7 @@ impl Database {
     /// let entry_id = txn.commit().await?;
     /// let entry = tree.get_entry(&entry_id).await?;           // Using &ID
     /// let entry = tree.get_entry(entry_id.clone()).await?;    // Using ID
-    /// println!("Entry signature: {:?}", entry.sig);
+    /// println!("Entry signature: {:?}", entry.sig());
     /// # Ok(())
     /// # }
     /// ```

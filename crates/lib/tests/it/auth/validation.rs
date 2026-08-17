@@ -181,7 +181,7 @@ async fn test_multiple_authenticated_entries() {
         .get_entry(&entry_id1)
         .await
         .expect("Failed to get entry1");
-    assert_eq!(entry1.sig.key, SigKey::from_pubkey(&key_id));
+    assert_eq!(entry1.sig().key, SigKey::from_pubkey(&key_id));
     assert!(
         tree.verify_entry_signature(&entry_id1)
             .await
@@ -192,7 +192,7 @@ async fn test_multiple_authenticated_entries() {
         .get_entry(&entry_id2)
         .await
         .expect("Failed to get entry2");
-    assert_eq!(entry2.sig.key, SigKey::from_pubkey(&key_id));
+    assert_eq!(entry2.sig().key, SigKey::from_pubkey(&key_id));
     assert!(
         tree.verify_entry_signature(&entry_id2)
             .await
@@ -209,11 +209,13 @@ async fn test_entry_validation_with_corrupted_auth_section() {
     let mut entry = Entry::root_builder()
         .build()
         .expect("Entry should build successfully");
-    entry.sig = SigInfo::builder()
-        .key(SigKey::from_name("TEST_KEY"))
-        .build();
+    entry.set_sig(
+        SigInfo::builder()
+            .key(SigKey::from_name("TEST_KEY"))
+            .build(),
+    );
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.sig.sig = Some(signature);
+    entry.set_signature(Some(signature));
 
     // Test with no auth section at all
     let empty_auth_settings = AuthSettings::new();
@@ -315,11 +317,13 @@ async fn test_entry_validation_cache_behavior() {
     let mut entry = Entry::root_builder()
         .build()
         .expect("Entry should build successfully");
-    entry.sig = SigInfo::builder()
-        .key(SigKey::from_pubkey(&verifying_key))
-        .build();
+    entry.set_sig(
+        SigInfo::builder()
+            .key(SigKey::from_pubkey(&verifying_key))
+            .build(),
+    );
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.sig.sig = Some(signature);
+    entry.set_signature(Some(signature));
 
     // Validate the entry - should work
     let result1 = validator.validate_entry(&entry, &auth_settings, None).await;
@@ -368,11 +372,13 @@ async fn test_entry_validation_with_malformed_keys() {
     let mut correct_entry = Entry::root_builder()
         .build()
         .expect("Entry should build successfully");
-    correct_entry.sig = SigInfo::builder()
-        .key(SigKey::from_pubkey(&verifying_key))
-        .build();
+    correct_entry.set_sig(
+        SigInfo::builder()
+            .key(SigKey::from_pubkey(&verifying_key))
+            .build(),
+    );
     let correct_signature = sign_entry(&correct_entry, &signing_key).unwrap();
-    correct_entry.sig.sig = Some(correct_signature);
+    correct_entry.set_signature(Some(correct_signature));
 
     // Should validate successfully with correct settings
     let result1 = validator
@@ -386,7 +392,7 @@ async fn test_entry_validation_with_malformed_keys() {
 
     // Sign with a different key than what's in settings
     let wrong_signature = sign_entry(&entry_with_wrong_sig, &wrong_signing_key).unwrap();
-    entry_with_wrong_sig.sig.sig = Some(wrong_signature);
+    entry_with_wrong_sig.set_signature(Some(wrong_signature));
 
     // Should fail validation because signature doesn't match the key in settings
     let result_wrong_sig = validator
@@ -399,7 +405,7 @@ async fn test_entry_validation_with_malformed_keys() {
 
     // Create entry with corrupted signature
     let mut corrupted_entry = correct_entry.clone();
-    corrupted_entry.sig.sig = Some("invalid_base64_signature!@#".to_string());
+    corrupted_entry.set_signature(Some("invalid_base64_signature!@#".to_string()));
 
     let result2 = validator
         .validate_entry(&corrupted_entry, &auth_settings, None)
@@ -416,13 +422,15 @@ async fn test_entry_validation_with_malformed_keys() {
     let mut wrong_signature_entry = Entry::root_builder()
         .build()
         .expect("Entry should build successfully");
-    wrong_signature_entry.sig = SigInfo::builder()
-        .key(SigKey::from_pubkey(&verifying_key))
-        .build();
+    wrong_signature_entry.set_sig(
+        SigInfo::builder()
+            .key(SigKey::from_pubkey(&verifying_key))
+            .build(),
+    );
 
     // Sign with wrong key but try to validate against correct key
     let wrong_signature = sign_entry(&wrong_signature_entry, &wrong_signing_key).unwrap();
-    wrong_signature_entry.sig.sig = Some(wrong_signature);
+    wrong_signature_entry.set_signature(Some(wrong_signature));
 
     let result3 = validator
         .validate_entry(&wrong_signature_entry, &auth_settings, None)
@@ -486,11 +494,13 @@ async fn test_entry_validation_with_invalid_signatures() {
     let mut correct_entry = Entry::root_builder()
         .build()
         .expect("Entry should build successfully");
-    correct_entry.sig = SigInfo::builder()
-        .key(SigKey::from_pubkey(&verifying_key))
-        .build();
+    correct_entry.set_sig(
+        SigInfo::builder()
+            .key(SigKey::from_pubkey(&verifying_key))
+            .build(),
+    );
     let correct_signature = sign_entry(&correct_entry, &signing_key).unwrap();
-    correct_entry.sig.sig = Some(correct_signature);
+    correct_entry.set_signature(Some(correct_signature));
 
     // Should validate successfully
     let result1 = validator
@@ -500,7 +510,7 @@ async fn test_entry_validation_with_invalid_signatures() {
 
     // Create entry with corrupted signature
     let mut corrupted_entry = correct_entry.clone();
-    corrupted_entry.sig.sig = Some("invalid_base64_signature!@#".to_string());
+    corrupted_entry.set_signature(Some("invalid_base64_signature!@#".to_string()));
 
     let result2 = validator
         .validate_entry(&corrupted_entry, &auth_settings, None)
@@ -532,11 +542,13 @@ async fn test_sigkey_tampering_invalidates_signature() {
     let mut entry = Entry::root_builder()
         .build()
         .expect("Entry should build successfully");
-    entry.sig = SigInfo::builder()
-        .key(SigKey::from_pubkey(&verifying_key))
-        .build();
+    entry.set_sig(
+        SigInfo::builder()
+            .key(SigKey::from_pubkey(&verifying_key))
+            .build(),
+    );
     let signature = sign_entry(&entry, &signing_key).unwrap();
-    entry.sig.sig = Some(signature);
+    entry.set_signature(Some(signature));
 
     // Original entry should verify with the correct key
     verify_entry_signature(&entry, &verifying_key)
@@ -544,7 +556,11 @@ async fn test_sigkey_tampering_invalidates_signature() {
 
     // Tamper with pubkey hint - should fail verification
     let mut tampered_pubkey = entry.clone();
-    tampered_pubkey.sig.key = SigKey::from_pubkey(&other_pubkey);
+    {
+        let mut sig = tampered_pubkey.sig().clone();
+        sig.key = SigKey::from_pubkey(&other_pubkey);
+        tampered_pubkey.set_sig(sig);
+    }
     assert!(
         verify_entry_signature(&tampered_pubkey, &verifying_key).is_err(),
         "Tampering with pubkey hint should invalidate signature"
@@ -552,7 +568,11 @@ async fn test_sigkey_tampering_invalidates_signature() {
 
     // Tamper with name hint - should fail verification
     let mut tampered_name = entry.clone();
-    tampered_name.sig.key = SigKey::from_name("tampered_name");
+    {
+        let mut sig = tampered_name.sig().clone();
+        sig.key = SigKey::from_name("tampered_name");
+        tampered_name.set_sig(sig);
+    }
     assert!(
         verify_entry_signature(&tampered_name, &verifying_key).is_err(),
         "Tampering with name hint should invalidate signature"
@@ -560,13 +580,17 @@ async fn test_sigkey_tampering_invalidates_signature() {
 
     // Tamper by changing from Direct to Delegation - should fail verification
     let mut tampered_delegation = entry.clone();
-    tampered_delegation.sig.key = SigKey::Delegation {
-        path: vec![DelegationStep {
-            tree: ID::from_bytes("fake_tree"),
-            tips: vec![],
-        }],
-        hint: KeyHint::from_pubkey(&verifying_key),
-    };
+    {
+        let mut sig = tampered_delegation.sig().clone();
+        sig.key = SigKey::Delegation {
+            path: vec![DelegationStep {
+                tree: ID::from_bytes("fake_tree"),
+                tips: vec![],
+            }],
+            hint: KeyHint::from_pubkey(&verifying_key),
+        };
+        tampered_delegation.set_sig(sig);
+    }
     assert!(
         verify_entry_signature(&tampered_delegation, &verifying_key).is_err(),
         "Changing SigKey variant should invalidate signature"

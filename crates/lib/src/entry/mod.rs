@@ -12,6 +12,8 @@ pub mod id;
 #[cfg(test)]
 mod tests;
 
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 pub use builder::EntryBuilder;
@@ -162,6 +164,44 @@ where
     Ok(version)
 }
 
+/// Lazily-computed cache of an `Entry`'s content-addressable ID.
+///
+/// The ID is a pure function of the entry's DAG-CBOR encoding, so it can be computed
+/// once and reused. The cache is derived state and deliberately invisible to everything
+/// that observes an entry's content: it is skipped by serde (so it never reaches the wire
+/// format or the hash input), ignored by equality, and hidden from `Debug`.
+///
+/// A clone carries the cached value, which is sound because the fields the ID is derived
+/// from are only reachable through methods that call [`IdCache::clear`].
+#[derive(Clone, Default)]
+struct IdCache(OnceLock<ID>);
+
+impl IdCache {
+    /// Return the cached ID, computing and storing it on first use.
+    fn get_or_init(&self, compute: impl FnOnce() -> ID) -> &ID {
+        self.0.get_or_init(compute)
+    }
+
+    /// Discard any cached ID. Must be called by every mutation of ID-bearing state.
+    fn clear(&mut self) {
+        self.0.take();
+    }
+}
+
+impl PartialEq for IdCache {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for IdCache {}
+
+impl std::fmt::Debug for IdCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IdCache")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Entry {
     /// Protocol version for this entry format.
@@ -178,8 +218,14 @@ pub struct Entry {
     /// A collection of named subtrees this entry contains data for.
     /// The vector is kept sorted alphabetically by subtree name during the build process.
     pub(super) subtrees: Vec<SubTreeNode>,
-    /// Authentication information for this entry
-    pub sig: SigInfo,
+    /// Authentication information for this entry.
+    ///
+    /// Private so that every write goes through [`Entry::set_sig`] or
+    /// [`Entry::set_signature`], which invalidate the cached ID.
+    sig: SigInfo,
+    /// Memoized content-addressable ID. Derived state; see [`IdCache`].
+    #[serde(skip)]
+    id_cache: IdCache,
 }
 
 impl Entry {
@@ -204,11 +250,40 @@ impl Entry {
     /// Get the content-addressable ID of the entry.
     ///
     /// The ID is the CID of the DAG-CBOR serialized representation of the Entry.
+    ///
+    /// The result is memoized: the encoding and hash are computed on the first call and
+    /// reused afterwards. Callers on hot paths (sorting, DAG traversal, map keys) can
+    /// therefore call this freely instead of threading an ID alongside the entry.
     pub fn id(&self) -> ID {
-        let bytes = self
-            .to_dagcbor()
-            .expect("Failed to serialize entry to DAG-CBOR for ID");
-        ID::from_dagcbor_bytes(bytes)
+        self.id_cache
+            .get_or_init(|| {
+                let bytes = self
+                    .to_dagcbor()
+                    .expect("Failed to serialize entry to DAG-CBOR for ID");
+                ID::from_dagcbor_bytes(bytes)
+            })
+            .clone()
+    }
+
+    /// Get the authentication information attached to this entry.
+    pub fn sig(&self) -> &SigInfo {
+        &self.sig
+    }
+
+    /// Replace this entry's authentication information.
+    ///
+    /// Changes the entry's content, and therefore its ID.
+    pub fn set_sig(&mut self, sig: SigInfo) {
+        self.sig = sig;
+        self.id_cache.clear();
+    }
+
+    /// Set (or clear) the base64-encoded signature on this entry's authentication information.
+    ///
+    /// Changes the entry's content, and therefore its ID.
+    pub fn set_signature(&mut self, signature: Option<String>) {
+        self.sig.sig = signature;
+        self.id_cache.clear();
     }
 
     /// Get the ID of the root `Entry` of the tree this entry belongs to.
@@ -333,7 +408,7 @@ impl Entry {
     /// The returned entry has deterministic field ordering for consistent signatures.
     pub fn canonical_for_signing(&self) -> Self {
         let mut canonical = self.clone();
-        canonical.sig.sig = None;
+        canonical.set_signature(None);
         canonical
     }
 

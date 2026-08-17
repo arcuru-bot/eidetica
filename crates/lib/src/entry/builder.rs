@@ -653,6 +653,7 @@ impl EntryBuilder {
             tree: self.tree,
             subtrees: self.subtrees,
             sig: self.sig,
+            id_cache: Default::default(),
         };
 
         // Validate the built entry before returning
