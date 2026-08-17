@@ -1110,3 +1110,364 @@ async fn test_find_merge_base_actually_called() {
 
     println!("✓ find_merge_base actually called and succeeded with deep chains");
 }
+
+/// PROBE (throwaway): cost of a sustained criss-cross topology.
+///
+/// Each round creates two entries whose store parents are BOTH current tips,
+/// so no single ancestor dominates the new tip pair and merge-base resolution
+/// keeps returning None. Prints entries folded per round.
+#[tokio::test]
+async fn probe_criss_cross_refold_cost() {
+    use eidetica::transaction::probe;
+
+    let (_instance, tree) = setup_tree().await;
+
+    // Seed two independent-ish tips from one root.
+    let root = {
+        let txn = tree.new_transaction().await.unwrap();
+        let s = txn.get_store::<DocStore>("data").await.unwrap();
+        s.set("seed", "0").await.unwrap();
+        txn.commit().await.unwrap()
+    };
+
+    let mut left = {
+        let txn = tree
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&root)))
+            .await
+            .unwrap();
+        let s = txn.get_store::<DocStore>("data").await.unwrap();
+        s.set("left", "0").await.unwrap();
+        txn.commit().await.unwrap()
+    };
+    let mut right = {
+        let txn = tree
+            .new_transaction_at(&Snapshot::from(std::slice::from_ref(&root)))
+            .await
+            .unwrap();
+        let s = txn.get_store::<DocStore>("data").await.unwrap();
+        s.set("right", "0").await.unwrap();
+        txn.commit().await.unwrap()
+    };
+
+    const ROUNDS: usize = 40;
+    probe::take(&probe::FOLDED_ENTRIES);
+    probe::take(&probe::MULTI_TIP_MISSES);
+    probe::take(&probe::EMPTY_BASE_REFOLDS);
+
+    let mut total = 0u64;
+    for i in 0..ROUNDS {
+        let tips = Snapshot::from(vec![left.clone(), right.clone()]);
+
+        // Two concurrent merges of the same tip pair: classic criss-cross.
+        let new_left = {
+            let txn = tree.new_transaction_at(&tips).await.unwrap();
+            let s = txn.get_store::<DocStore>("data").await.unwrap();
+            s.set("left", i.to_string()).await.unwrap();
+            txn.commit().await.unwrap()
+        };
+        let new_right = {
+            let txn = tree.new_transaction_at(&tips).await.unwrap();
+            let s = txn.get_store::<DocStore>("data").await.unwrap();
+            s.set("right", i.to_string()).await.unwrap();
+            txn.commit().await.unwrap()
+        };
+        left = new_left;
+        right = new_right;
+
+        // Read the merged state at the new tip pair — what any reader does.
+        let read_tips = Snapshot::from(vec![left.clone(), right.clone()]);
+        let txn = tree.new_transaction_at(&read_tips).await.unwrap();
+        let s = txn.get_store::<DocStore>("data").await.unwrap();
+        let state = s.get_all().await.unwrap();
+        assert!(state.get("seed").is_some());
+
+        let folded = probe::take(&probe::FOLDED_ENTRIES);
+        let misses = probe::take(&probe::MULTI_TIP_MISSES);
+        let empty = probe::take(&probe::EMPTY_BASE_REFOLDS);
+        total += folded;
+        println!(
+            "round {i:>3}  entries_in_store={:>4}  folded={folded:>6}  \
+             multi_tip_misses={misses}  empty_base_refolds={empty}  cumulative_folded={total}",
+            3 + 2 * (i + 1)
+        );
+    }
+    println!("PROBE total folded entries over {ROUNDS} rounds: {total}");
+}
+
+/// PROBE (throwaway): sustained criss-cross over two DISJOINT store roots.
+///
+/// The store is created independently on both sides of a main-tree fork, so
+/// the store history has two roots and merge-base resolution returns None
+/// every round.
+#[tokio::test]
+async fn probe_disjoint_root_refold_cost() {
+    use eidetica::transaction::probe;
+
+    let (_instance, tree) = setup_tree().await;
+
+    // Seed in a DIFFERENT store, so "data" does not exist yet.
+    let seed = {
+        let txn = tree.new_transaction().await.unwrap();
+        let s = txn.get_store::<DocStore>("other").await.unwrap();
+        s.set("seed", "0").await.unwrap();
+        txn.commit().await.unwrap()
+    };
+    let fork = Snapshot::from(std::slice::from_ref(&seed));
+
+    // Two independent first writes to "data": two store roots.
+    let mut left = {
+        let txn = tree.new_transaction_at(&fork).await.unwrap();
+        let s = txn.get_store::<DocStore>("data").await.unwrap();
+        s.set("left", "seed").await.unwrap();
+        txn.commit().await.unwrap()
+    };
+    let mut right = {
+        let txn = tree.new_transaction_at(&fork).await.unwrap();
+        let s = txn.get_store::<DocStore>("data").await.unwrap();
+        s.set("right", "seed").await.unwrap();
+        txn.commit().await.unwrap()
+    };
+
+    const ROUNDS: usize = 40;
+    probe::take(&probe::FOLDED_ENTRIES);
+    probe::take(&probe::MULTI_TIP_MISSES);
+    probe::take(&probe::EMPTY_BASE_REFOLDS);
+
+    let mut total = 0u64;
+    for i in 0..ROUNDS {
+        let tips = Snapshot::from(vec![left.clone(), right.clone()]);
+        let new_left = {
+            let txn = tree.new_transaction_at(&tips).await.unwrap();
+            let s = txn.get_store::<DocStore>("data").await.unwrap();
+            s.set("left", i.to_string()).await.unwrap();
+            txn.commit().await.unwrap()
+        };
+        let new_right = {
+            let txn = tree.new_transaction_at(&tips).await.unwrap();
+            let s = txn.get_store::<DocStore>("data").await.unwrap();
+            s.set("right", i.to_string()).await.unwrap();
+            txn.commit().await.unwrap()
+        };
+        left = new_left;
+        right = new_right;
+
+        let read_tips = Snapshot::from(vec![left.clone(), right.clone()]);
+        let txn = tree.new_transaction_at(&read_tips).await.unwrap();
+        let s = txn.get_store::<DocStore>("data").await.unwrap();
+        let state = s.get_all().await.unwrap();
+        assert!(state.get("left").is_some() && state.get("right").is_some());
+
+        let folded = probe::take(&probe::FOLDED_ENTRIES);
+        let misses = probe::take(&probe::MULTI_TIP_MISSES);
+        let empty = probe::take(&probe::EMPTY_BASE_REFOLDS);
+        total += folded;
+        println!(
+            "round {i:>3}  store_entries={:>4}  folded={folded:>6}  \
+             multi_tip_misses={misses}  empty_base_refolds={empty}  cumulative_folded={total}",
+            2 + 2 * (i + 1)
+        );
+    }
+    println!("PROBE(disjoint) total folded entries over {ROUNDS} rounds: {total}");
+}
+
+/// PROBE (throwaway): the segmentation law the incremental design rests on.
+///
+/// A fold over the total entry order is a monoid product, so any contiguous
+/// segmentation must give the same answer as the flat left fold:
+///     fold(s1 ++ s2 ++ ... ++ sk) == fold(s1) ⊕ fold(s2) ⊕ ... ⊕ fold(sk)
+/// with `Doc::default()` as the identity. Checked over a deterministic
+/// pseudo-random sequence including nested paths, tombstones and atomic docs.
+#[tokio::test]
+async fn probe_fold_segmentation_law() {
+    use eidetica::crdt::{CRDT, Doc};
+
+    // xorshift, so the sequence is deterministic without a dev-dependency.
+    let mut state: u64 = 0x2545F4914F6CDD1D;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    let keys = ["a", "b", "c", "n.x", "n.y", "n.deep.z"];
+    let mut deltas: Vec<Doc> = Vec::new();
+    for i in 0..200u64 {
+        let r = next();
+        let mut d = if r % 17 == 0 {
+            Doc::atomic()
+        } else {
+            Doc::new()
+        };
+        let k = keys[(r >> 8) as usize % keys.len()];
+        if r % 11 == 0 {
+            d.remove(k);
+        } else {
+            d.set(k, format!("v{i}"));
+        }
+        if r % 5 == 0 {
+            let k2 = keys[(r >> 16) as usize % keys.len()];
+            d.set(k2, format!("w{i}"));
+        }
+        deltas.push(d);
+    }
+
+    let flat = deltas
+        .iter()
+        .fold(Doc::default(), |acc, d| acc.merge(d).unwrap());
+
+    // Every prefix-split, plus a few multi-segment splits.
+    for cut in 0..=deltas.len() {
+        let l = deltas[..cut]
+            .iter()
+            .fold(Doc::default(), |acc, d| acc.merge(d).unwrap());
+        let r = deltas[cut..]
+            .iter()
+            .fold(Doc::default(), |acc, d| acc.merge(d).unwrap());
+        assert_eq!(
+            l.merge(&r).unwrap(),
+            flat,
+            "segmentation law broken at cut {cut}"
+        );
+    }
+
+    for chunk in [1usize, 2, 3, 7, 16, 64] {
+        let product = deltas
+            .chunks(chunk)
+            .map(|seg| {
+                seg.iter()
+                    .fold(Doc::default(), |acc, d| acc.merge(d).unwrap())
+            })
+            .fold(Doc::default(), |acc, seg| acc.merge(&seg).unwrap());
+        assert_eq!(
+            product, flat,
+            "segmentation law broken at chunk size {chunk}"
+        );
+    }
+
+    println!("PROBE: segmentation law holds over 200 deltas for every prefix cut and chunk size");
+}
+
+/// PROBE (throwaway): two things at once.
+///
+/// 1. Negative control — merging per-tip cached states is NOT a valid way to
+///    combine branches: interleaved writes give the wrong answer in either
+///    order. (This is why the fix is a segment product, not a state join.)
+/// 2. Cost simulation — a fanout-B product tree over the entry order, kept
+///    incrementally, versus the flat refold, counting merge operations per
+///    round of a sustained criss-cross.
+#[tokio::test]
+async fn probe_incremental_product_tree_simulation() {
+    use eidetica::crdt::{CRDT, Doc};
+
+    // --- 1. negative control -------------------------------------------------
+    // Global order e1 < e2 < e3 < e4. Branch A = {e1, e4}, branch B = {e2, e3}.
+    let mk = |k: &str, v: &str| {
+        let mut d = Doc::new();
+        d.set(k, v);
+        d
+    };
+    let (e1, e2, e3, e4) = (mk("k", "a1"), mk("k", "b2"), mk("m", "b3"), mk("m", "a4"));
+    let flat = [&e1, &e2, &e3, &e4]
+        .into_iter()
+        .fold(Doc::default(), |acc, d| acc.merge(d).unwrap());
+    let state_a = e1.merge(&e4).unwrap(); // fold of branch A alone
+    let state_b = e2.merge(&e3).unwrap(); // fold of branch B alone
+    assert_ne!(state_a.merge(&state_b).unwrap(), flat, "A⊕B should differ");
+    assert_ne!(state_b.merge(&state_a).unwrap(), flat, "B⊕A should differ");
+    println!(
+        "PROBE negative control: flat={flat:?} A⊕B={:?} B⊕A={:?}",
+        state_a.merge(&state_b).unwrap(),
+        state_b.merge(&state_a).unwrap()
+    );
+
+    // --- 2. cost simulation --------------------------------------------------
+    const B: usize = 8;
+    const ROUNDS: usize = 200;
+
+    let mut deltas: Vec<Doc> = Vec::new();
+    // levels[0] is deltas; levels[l] holds products of B nodes of level l-1.
+    let mut levels: Vec<Vec<Doc>> = Vec::new();
+    let mut dirty_from: Vec<usize> = Vec::new(); // per level, first stale index
+
+    let mut flat_merges_total = 0u64;
+    let mut tree_merges_total = 0u64;
+
+    for round in 0..ROUNDS {
+        // Two concurrent writers each append one entry to the order.
+        for side in 0..2 {
+            let mut d = Doc::new();
+            d.set(if side == 0 { "left" } else { "right" }, round.to_string());
+            deltas.push(d);
+        }
+        let first_new = deltas.len() - 2;
+
+        // Flat refold: one merge per entry in the store.
+        let flat_state = deltas
+            .iter()
+            .fold(Doc::default(), |acc, d| acc.merge(d).unwrap());
+        flat_merges_total += deltas.len() as u64;
+
+        // Incremental product tree: recompute only nodes covering new positions.
+        let mut tree_merges = 0u64;
+        let mut child_len = deltas.len();
+        let mut child_dirty = first_new;
+        let mut level = 0;
+        loop {
+            let node_count = child_len.div_ceil(B);
+            if levels.len() <= level {
+                levels.push(Vec::new());
+                dirty_from.push(0);
+            }
+            let start = child_dirty / B;
+            levels[level].resize(node_count, Doc::default());
+            for node in start..node_count {
+                let lo = node * B;
+                let hi = usize::min(lo + B, child_len);
+                let product = if level == 0 {
+                    deltas[lo..hi]
+                        .iter()
+                        .fold(Doc::default(), |acc, d| acc.merge(d).unwrap())
+                } else {
+                    levels[level - 1][lo..hi]
+                        .iter()
+                        .fold(Doc::default(), |acc, d| acc.merge(d).unwrap())
+                };
+                tree_merges += (hi - lo) as u64;
+                levels[level][node] = product;
+            }
+            if node_count <= 1 {
+                break;
+            }
+            child_len = node_count;
+            child_dirty = start;
+            level += 1;
+        }
+        let top = levels.len() - 1;
+        let tree_state = levels[top]
+            .iter()
+            .fold(Doc::default(), |acc, d| acc.merge(d).unwrap());
+        tree_merges += levels[top].len() as u64;
+        tree_merges_total += tree_merges;
+
+        assert_eq!(
+            tree_state, flat_state,
+            "product tree diverged at round {round}"
+        );
+
+        if round % 20 == 19 || round < 3 {
+            println!(
+                "round {round:>4}  entries={:>5}  flat_merges={:>6}  tree_merges={tree_merges:>4}  \
+                 cumulative flat={flat_merges_total:>8} tree={tree_merges_total:>7}",
+                deltas.len(),
+                deltas.len(),
+            );
+        }
+    }
+    println!(
+        "PROBE simulation: {ROUNDS} rounds, {} entries — flat {flat_merges_total} merges, \
+         incremental {tree_merges_total} merges ({:.1}x less)",
+        deltas.len(),
+        flat_merges_total as f64 / tree_merges_total as f64
+    );
+}

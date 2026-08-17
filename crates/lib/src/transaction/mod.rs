@@ -48,6 +48,26 @@ use crate::{
     store::{Registry, SettingsStore, StoreError},
 };
 
+/// PROBE (throwaway): counts entries folded into CRDT state, and how the
+/// multi-tip read path resolved. Not for landing.
+pub mod probe {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Entries whose local data was merged into a state.
+    pub static FOLDED_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    /// Multi-tip reads that missed the tip-set cache.
+    pub static MULTI_TIP_MISSES: AtomicU64 = AtomicU64::new(0);
+    /// Multi-tip reads that resolved with no merge base (full refold).
+    pub static EMPTY_BASE_REFOLDS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn bump(counter: &AtomicU64, n: u64) {
+        counter.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn take(counter: &AtomicU64) -> u64 {
+        counter.swap(0, Ordering::Relaxed)
+    }
+}
+
 /// Creates a synthetic entry ID for multi-tip merged CRDT state caching.
 ///
 /// Tips are sorted to ensure deterministic keys regardless of input order.
@@ -828,6 +848,7 @@ impl Transaction {
 
         // Cache miss: resolve the merge base and the path to fold in a
         // single call, so both come from one view of the store.
+        probe::bump(&probe::MULTI_TIP_MISSES, 1);
         let merge = self
             .db
             .ops()
@@ -851,6 +872,7 @@ impl Transaction {
             // batch-fetches the whole entries in fold order: one query
             // instead of a per-ID fetch of the entire history.
             None => {
+                probe::bump(&probe::EMPTY_BASE_REFOLDS, 1);
                 let boundary = Snapshot::from(entry_ids.to_vec());
                 let entries = self
                     .db
@@ -947,6 +969,7 @@ impl Transaction {
         T: CRDT,
     {
         let mut result = T::default();
+        probe::bump(&probe::FOLDED_ENTRIES, entries.len() as u64);
         for entry in entries {
             let local_data = if let Ok(data) = entry.data(subtree_name) {
                 // Decrypt before deserializing
@@ -978,6 +1001,7 @@ impl Transaction {
     where
         T: CRDT,
     {
+        probe::bump(&probe::FOLDED_ENTRIES, entry_ids.len() as u64);
         for entry_id in entry_ids {
             let entry = self.db.ops().get(entry_id).await?;
 
