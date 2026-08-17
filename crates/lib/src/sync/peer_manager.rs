@@ -230,6 +230,36 @@ impl<'a> PeerManager<'a> {
         Ok(())
     }
 
+    /// Record that a sync with a peer completed successfully.
+    ///
+    /// Sets both `last_successful_sync` and `last_seen` to the transaction's
+    /// current time. `last_seen` tracks any contact, `last_successful_sync`
+    /// only contact that transferred data, so a successful sync advances both.
+    ///
+    /// # Arguments
+    /// * `pubkey` - The peer's public key
+    ///
+    /// # Returns
+    /// A Result indicating success, or [`SyncError::PeerNotFound`] if the peer
+    /// is not registered.
+    pub(super) async fn record_successful_sync(&self, pubkey: &PublicKey) -> Result<()> {
+        let pk_str = pubkey.to_string();
+        let peers = self.txn.get_store::<DocStore>(PEERS_SUBTREE).await?;
+
+        if !peers.contains_path_str(&pk_str).await {
+            return Err(Error::Sync(Box::new(SyncError::PeerNotFound(pk_str))));
+        }
+
+        let now = self.txn.now_rfc3339()?;
+        peers
+            .set_path(path!(&pk_str, "last_successful_sync"), now.clone())
+            .await?;
+        peers.set_path(path!(&pk_str, "last_seen"), now).await?;
+
+        debug!(peer = %pk_str, "Recorded successful sync with peer");
+        Ok(())
+    }
+
     /// Get information about a registered peer.
     ///
     /// # Arguments

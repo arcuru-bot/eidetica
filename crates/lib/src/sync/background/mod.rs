@@ -470,7 +470,10 @@ impl BackgroundSync {
             .await?;
 
         match response {
-            SyncResponse::Ack | SyncResponse::Count(_) => Ok(()),
+            SyncResponse::Ack | SyncResponse::Count(_) => {
+                self.record_successful_sync(peer).await;
+                Ok(())
+            }
             SyncResponse::Error(msg) => Err(SyncError::SyncProtocolError(format!(
                 "Peer {peer} returned error: {msg}"
             ))
@@ -480,6 +483,29 @@ impl BackgroundSync {
                 actual: format!("{response:?}"),
             }
             .into()),
+        }
+    }
+
+    /// Record that a sync with a peer completed successfully.
+    ///
+    /// Advances the peer's `last_successful_sync` and `last_seen` timestamps in
+    /// the sync tree. Failures are logged rather than propagated: the sync they
+    /// describe already succeeded, and a bookkeeping write that fails must not
+    /// turn a delivered batch into a retry.
+    async fn record_successful_sync(&self, peer: &PeerId) {
+        let result = async {
+            let sync_tree = self.get_sync_tree().await?;
+            let txn = sync_tree.new_transaction().await?;
+            PeerManager::new(&txn)
+                .record_successful_sync(peer.public_key())
+                .await?;
+            txn.commit().await?;
+            Ok::<(), Error>(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            tracing::warn!("Failed to record successful sync with {peer}: {e}");
         }
     }
 
@@ -688,11 +714,20 @@ impl BackgroundSync {
 
             info!(peer = %peer_id, tree_count = sync_trees.len(), "Synchronizing trees with peer");
 
+            let mut any_tree_synced = false;
             for tree_id in sync_trees {
-                if let Err(e) = self.sync_tree_with_peer(peer_id, &tree_id, &address).await {
-                    // Log tree sync failure but continue with other trees
-                    tracing::error!("Failed to sync tree {tree_id} with peer {peer_id}: {e}");
+                match self.sync_tree_with_peer(peer_id, &tree_id, &address).await {
+                    Ok(()) => any_tree_synced = true,
+                    Err(e) => {
+                        // Log tree sync failure but continue with other trees
+                        tracing::error!("Failed to sync tree {tree_id} with peer {peer_id}: {e}");
+                    }
                 }
+            }
+
+            // One timestamp per peer synchronization, not one per tree.
+            if any_tree_synced {
+                self.record_successful_sync(peer_id).await;
             }
 
             info!(peer = %peer_id, "Completed peer synchronization");

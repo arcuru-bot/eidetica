@@ -109,6 +109,10 @@ impl Sync {
         // This allows on_local_write() to find this peer when queueing entries
         self.add_tree_sync(peer_pubkey, tree_id).await?;
 
+        if let Err(e) = self.record_successful_sync(peer_pubkey).await {
+            warn!(peer = %peer_pubkey, error = %e, "Failed to record successful sync timestamp");
+        }
+
         Ok(())
     }
 
@@ -742,6 +746,10 @@ impl Sync {
         // Track tree/peer relationship for sync_on_commit to work
         // This allows on_local_write() to find this peer when queueing entries
         self.add_tree_sync(peer_pubkey, tree_id).await?;
+
+        if let Err(e) = self.record_successful_sync(peer_pubkey).await {
+            warn!(peer = %peer_pubkey, error = %e, "Failed to record successful sync timestamp");
+        }
 
         Ok(())
     }

@@ -322,6 +322,26 @@ impl Sync {
         Ok(())
     }
 
+    /// Record that a sync with a peer completed successfully.
+    ///
+    /// Advances the peer's `last_successful_sync` and `last_seen` timestamps.
+    /// Callers treat a failure here as non-fatal: the sync itself already
+    /// succeeded, and losing the bookkeeping must not turn that into an error.
+    ///
+    /// # Arguments
+    /// * `pubkey` - The peer's public key
+    ///
+    /// # Returns
+    /// A Result indicating success or an error.
+    pub(super) async fn record_successful_sync(&self, pubkey: &PublicKey) -> Result<()> {
+        let txn = self.sync_tree.new_transaction().await?;
+        PeerManager::new(&txn)
+            .record_successful_sync(pubkey)
+            .await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
     /// Check if a tree is synced with a specific peer.
     ///
     /// # Arguments
