@@ -32,8 +32,8 @@ async fn test_get_entry_basic() {
         .await
         .expect("Failed to get entry");
     assert_eq!(entry.id(), entry_id);
-    assert_eq!(entry.sig().key, SigKey::from_pubkey(&key_id));
-    assert!(entry.sig().sig.is_some());
+    assert_eq!(entry.auth().key, SigKey::from_pubkey(&key_id));
+    assert!(entry.auth().signature.is_some());
 }
 
 /// Test get_entries with multiple entries
@@ -257,7 +257,7 @@ async fn test_auth_helpers_signed_entries() {
         .get_entry(&entry_id)
         .await
         .expect("Failed to get entry");
-    let sig_info = entry.sig();
+    let sig_info = entry.auth();
     let hint = sig_info.hint();
     let pubkey_str_opt = hint.pubkey.as_ref().map(|k| k.to_string());
     assert!(
@@ -286,7 +286,7 @@ async fn test_auth_helpers_default_authenticated_entries() {
         .get_entry(&entry_id)
         .await
         .expect("Failed to get entry");
-    let sig_info = entry.sig();
+    let sig_info = entry.auth();
     let hint = sig_info.hint();
     let pubkey_str_opt = hint.pubkey.as_ref().map(|k| k.to_string());
     assert!(
@@ -472,7 +472,7 @@ async fn test_batch_vs_individual_retrieval() {
     assert_eq!(individual_entries.len(), batch_entries.len());
     for (individual, batch) in individual_entries.iter().zip(batch_entries.iter()) {
         assert_eq!(individual.id(), batch.id());
-        assert_eq!(individual.sig(), batch.sig());
+        assert_eq!(individual.auth(), batch.auth());
     }
 }
 

@@ -179,7 +179,7 @@ async fn test_sig_info_with_signature_no_key() {
                 is_global: false,
             },
         }) // Empty key
-        .sig("fake_signature")
+        .signature("fake_signature")
         .build();
 
     // Should serialize/deserialize correctly

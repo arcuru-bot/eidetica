@@ -297,8 +297,8 @@ pub fn sign_entry(entry: &Entry, signing_key: &PrivateKey) -> Result<String, Err
 /// verification fails (missing signature, malformed data, or wrong key).
 pub fn verify_entry_signature(entry: &Entry, public_key: &PublicKey) -> Result<(), AuthError> {
     let signature_base64 = entry
-        .sig()
-        .sig
+        .auth()
+        .signature
         .as_ref()
         .ok_or(AuthError::InvalidSignature)?;
 
@@ -432,22 +432,20 @@ mod tests {
         let (signing_key, verifying_key) = generate_keypair();
 
         // Create a test entry with auth info but no signature
-        let mut entry = Entry::root_builder()
+        let entry = Entry::root_builder()
+            .set_auth(
+                SigInfo::builder()
+                    .key(SigKey::from_name("KEY_LAPTOP"))
+                    .build(),
+            )
             .build()
             .expect("Root entry should build successfully");
-
-        // Set auth ID without signature
-        entry.set_sig(
-            SigInfo::builder()
-                .key(SigKey::from_name("KEY_LAPTOP"))
-                .build(),
-        );
 
         // Sign the entry
         let signature = sign_entry(&entry, &signing_key).unwrap();
 
         // Set the signature on the entry
-        entry.set_signature(Some(signature));
+        let entry = entry.with_auth(|auth| auth.signature = Some(signature));
 
         // Verify the signature using algorithm-agnostic PublicKey
         verify_entry_signature(&entry, &verifying_key).unwrap();

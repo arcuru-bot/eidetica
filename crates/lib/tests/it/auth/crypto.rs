@@ -68,8 +68,8 @@ async fn test_key_management() {
         .get_entry(&entry_id)
         .await
         .expect("Failed to get entry");
-    assert_eq!(entry.sig().key, SigKey::from_pubkey(&key_id));
-    assert!(entry.sig().sig.is_some());
+    assert_eq!(entry.auth().key, SigKey::from_pubkey(&key_id));
+    assert!(entry.auth().signature.is_some());
 
     // Verify signature with tree's auth configuration
     assert!(
@@ -121,7 +121,7 @@ async fn test_generated_key_can_sign() {
         .get_entry(&entry_id)
         .await
         .expect("Failed to get entry");
-    assert_eq!(entry.sig().key, SigKey::from_pubkey(&key_id));
+    assert_eq!(entry.auth().key, SigKey::from_pubkey(&key_id));
     assert!(
         tree.verify_entry_signature(&entry_id)
             .await
@@ -188,8 +188,8 @@ async fn test_multi_key_authentication() {
         .get_entry(&entry_id)
         .await
         .expect("Failed to get entry");
-    assert_eq!(entry.sig().key, SigKey::from_pubkey(&key_id1));
-    assert!(entry.sig().sig.is_some());
+    assert_eq!(entry.auth().key, SigKey::from_pubkey(&key_id1));
+    assert!(entry.auth().signature.is_some());
     assert!(
         tree.verify_entry_signature(&entry_id)
             .await
@@ -226,7 +226,7 @@ async fn test_multi_key_authentication() {
         .get_entry(&entry_id2)
         .await
         .expect("Failed to get entry2");
-    assert_eq!(entry2.sig().key, SigKey::from_pubkey(&key_id2));
+    assert_eq!(entry2.auth().key, SigKey::from_pubkey(&key_id2));
     assert!(
         tree.verify_entry_signature(&entry_id2)
             .await

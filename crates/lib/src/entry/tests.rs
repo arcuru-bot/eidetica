@@ -423,7 +423,7 @@ fn test_entry_dagcbor_roundtrip_direct_sigkey() {
 fn test_entry_dagcbor_roundtrip_delegation_sigkey() {
     // Test DAG-CBOR roundtrip with a Delegation SigKey (uses untagged enum + flatten)
     let sig = SigInfo {
-        sig: Some("dGVzdF9zaWduYXR1cmU=".to_string()),
+        signature: Some("dGVzdF9zaWduYXR1cmU=".to_string()),
         key: SigKey::Delegation {
             path: vec![DelegationStep {
                 tree: ID::from_bytes("delegated_tree_id"),
@@ -436,7 +436,7 @@ fn test_entry_dagcbor_roundtrip_delegation_sigkey() {
     let entry = Entry::builder(ID::from_bytes("tree_root"))
         .add_parent(ID::from_bytes("parent_entry"))
         .set_subtree_data("data_store", br#"{"key":"value"}"#)
-        .set_sig(sig)
+        .set_auth(sig)
         .build()
         .expect("Entry with delegation should build successfully");
 
@@ -456,7 +456,7 @@ fn test_entry_dagcbor_roundtrip_with_pubkey_sigkey() {
     let entry = Entry::builder(ID::from_bytes("tree_root"))
         .add_parent(ID::from_bytes("parent_entry"))
         .set_subtree_data("store", b"data")
-        .set_sig(sig)
+        .set_auth(sig)
         .build()
         .expect("Entry with pubkey sig should build successfully");
 
@@ -505,13 +505,13 @@ fn test_id_memo_matches_uncached_computation() {
 
 #[test]
 fn test_id_memo_is_invalidated_by_set_signature() {
-    let mut entry = Entry::root_builder()
+    let entry = Entry::root_builder()
         .set_subtree_data("test", b"value")
         .build()
         .expect("Root entry should build successfully");
 
     let unsigned_id = entry.id();
-    entry.set_signature(Some("c2lnbmF0dXJl".to_string()));
+    let entry = entry.with_auth(|auth| auth.signature = Some("c2lnbmF0dXJl".to_string()));
 
     assert_eq!(
         entry.id(),
@@ -526,18 +526,18 @@ fn test_id_memo_is_invalidated_by_set_signature() {
 }
 
 #[test]
-fn test_id_memo_is_invalidated_by_set_sig() {
-    let mut entry = Entry::root_builder()
+fn test_id_memo_is_invalidated_by_set_auth() {
+    let entry = Entry::root_builder()
         .set_subtree_data("test", b"value")
         .build()
         .expect("Root entry should build successfully");
 
     let original_id = entry.id();
-    entry.set_sig(
-        SigInfo::builder()
+    let entry = entry.with_auth(|auth| {
+        *auth = SigInfo::builder()
             .key(SigKey::from_name("KEY_LAPTOP"))
-            .build(),
-    );
+            .build()
+    });
 
     assert_eq!(
         entry.id(),
@@ -549,11 +549,11 @@ fn test_id_memo_is_invalidated_by_set_sig() {
 
 #[test]
 fn test_id_memo_does_not_leak_across_canonical_for_signing() {
-    let mut entry = Entry::root_builder()
+    let entry = Entry::root_builder()
         .set_subtree_data("test", b"value")
         .build()
         .expect("Root entry should build successfully");
-    entry.set_signature(Some("c2lnbmF0dXJl".to_string()));
+    let entry = entry.with_auth(|auth| auth.signature = Some("c2lnbmF0dXJl".to_string()));
 
     // Populate the memo before deriving the canonical form.
     let signed_id = entry.id();
@@ -595,4 +595,35 @@ fn test_id_memo_is_not_serialized() {
         id,
         "a decoded entry must compute the same content ID"
     );
+}
+
+const WIRE_FORMAT_GOLDEN: &str = "a363736967a1636b6579a166446972656374a16468696e74a06474726565a264726f6f74d82a58250001551e2092a2b787a06d7272df43eaf87acc3b9c1d315d79d599d61c285983483e43199867706172656e747381d82a58250001551e20ebdea6058df2230dc25b7a7c7b487b470c508c2e0a5119c96893c443de3a9e7968737562747265657381a364646174614576616c7565646e616d65647465737467706172656e747380";
+const WIRE_FORMAT_GOLDEN_ID: &str = "bafyr4if5qqizbeab6d2g5swlaa7mw5cvo554v6jb3pvfd5s6nmdmjc6qdu";
+
+/// Pins the DAG-CBOR wire encoding of an entry.
+///
+/// An entry's ID is the hash of these exact bytes, so any change here silently
+/// re-addresses every entry ever written. Rust-side field renames must therefore
+/// carry a `#[serde(rename = ...)]` that keeps this encoding fixed; that is what
+/// this test enforces. A deliberate format change updates the expectation, and the
+/// diff is the record that it was deliberate.
+#[test]
+fn test_dagcbor_wire_format_is_pinned() {
+    // A non-root entry: root entries carry random metadata entropy, so only this
+    // shape has a stable encoding to pin.
+    let entry = Entry::builder(ID::from_bytes("root"))
+        .add_parent(ID::from_bytes("parent"))
+        .set_subtree_data("test", b"value")
+        .build()
+        .expect("Entry should build successfully");
+
+    let hex: String = entry
+        .to_dagcbor()
+        .expect("serialization should succeed")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    assert_eq!(hex, WIRE_FORMAT_GOLDEN, "entry wire format changed");
+    assert_eq!(entry.id().to_string(), WIRE_FORMAT_GOLDEN_ID);
 }

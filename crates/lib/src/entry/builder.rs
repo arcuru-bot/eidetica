@@ -71,7 +71,7 @@ use crate::{Result, auth::types::SigInfo, constants::ROOT, crdt::Doc, store::Sto
 pub struct EntryBuilder {
     pub(super) tree: TreeNode,
     pub(super) subtrees: Vec<SubTreeNode>,
-    pub(super) sig: SigInfo,
+    pub(super) auth: SigInfo,
 }
 
 impl EntryBuilder {
@@ -91,7 +91,7 @@ impl EntryBuilder {
                 height: 0,
             },
             subtrees: Vec::new(),
-            sig: SigInfo::default(),
+            auth: SigInfo::default(),
         }
     }
 
@@ -119,8 +119,8 @@ impl EntryBuilder {
     ///
     /// # Arguments
     /// * `auth` - The authentication information including key ID and optional signature
-    pub fn set_sig(mut self, sig: SigInfo) -> Self {
-        self.sig = sig;
+    pub fn set_auth(mut self, auth: SigInfo) -> Self {
+        self.auth = auth;
         self
     }
 
@@ -129,8 +129,8 @@ impl EntryBuilder {
     ///
     /// # Arguments
     /// * `auth` - The authentication information including key ID and optional signature
-    pub fn set_sig_mut(&mut self, sig: SigInfo) -> &mut Self {
-        self.sig = sig;
+    pub fn set_auth_mut(&mut self, auth: SigInfo) -> &mut Self {
+        self.auth = auth;
         self
     }
 
@@ -652,7 +652,7 @@ impl EntryBuilder {
             version: ENTRY_VERSION,
             tree: self.tree,
             subtrees: self.subtrees,
-            sig: self.sig,
+            auth: self.auth,
             id_cache: Default::default(),
         };
 

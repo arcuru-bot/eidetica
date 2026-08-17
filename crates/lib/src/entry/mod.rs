@@ -95,8 +95,8 @@ pub(super) struct SubTreeNode {
 ///
 /// # Authentication
 ///
-/// Each entry contains authentication information with:
-/// - `sig`: Base64-encoded cryptographic signature (optional, allows unsigned entry creation)
+/// Each entry contains authentication information (`auth`, a [`SigInfo`]) with:
+/// - `signature`: Base64-encoded cryptographic signature (optional, allows unsigned entry creation)
 /// - `key`: Authentication key reference path, either:
 ///   - A direct key ID defined in this tree's `_settings.auth`
 ///   - A delegation path as an ordered list of `{"key": "delegated_tree_1", "tips": ["A", "B"]}`
@@ -171,8 +171,9 @@ where
 /// that observes an entry's content: it is skipped by serde (so it never reaches the wire
 /// format or the hash input), ignored by equality, and hidden from `Debug`.
 ///
-/// A clone carries the cached value, which is sound because the fields the ID is derived
-/// from are only reachable through methods that call [`IdCache::clear`].
+/// A clone carries the cached value, which is sound because an `Entry` exposes no in-place
+/// mutation: content changes go through [`Entry::with_auth`], which consumes the entry and
+/// returns a new one with a fresh cache.
 #[derive(Clone, Default)]
 struct IdCache(OnceLock<ID>);
 
@@ -180,11 +181,6 @@ impl IdCache {
     /// Return the cached ID, computing and storing it on first use.
     fn get_or_init(&self, compute: impl FnOnce() -> ID) -> &ID {
         self.0.get_or_init(compute)
-    }
-
-    /// Discard any cached ID. Must be called by every mutation of ID-bearing state.
-    fn clear(&mut self) {
-        self.0.take();
     }
 }
 
@@ -214,15 +210,23 @@ pub struct Entry {
     )]
     version: u8,
     /// The main tree node data, including the root ID, parents in the main tree, and associated data.
-    pub(super) tree: TreeNode,
+    ///
+    /// Scoped to this module so that a built entry's content cannot be mutated from
+    /// elsewhere in the crate, which is what makes [`IdCache`] sound.
+    pub(in crate::entry) tree: TreeNode,
     /// A collection of named subtrees this entry contains data for.
     /// The vector is kept sorted alphabetically by subtree name during the build process.
-    pub(super) subtrees: Vec<SubTreeNode>,
-    /// Authentication information for this entry.
     ///
-    /// Private so that every write goes through [`Entry::set_sig`] or
-    /// [`Entry::set_signature`], which invalidate the cached ID.
-    sig: SigInfo,
+    /// Scoped for the same reason as [`Entry::tree`].
+    pub(in crate::entry) subtrees: Vec<SubTreeNode>,
+    /// Authentication information for this entry: the signature and the hint used to
+    /// locate the key that produced it.
+    ///
+    /// Private so that changes go through [`Entry::with_auth`], which rebuilds the entry
+    /// rather than mutating it in place. Serialized as `sig` to keep the wire format —
+    /// and therefore every existing entry ID — unchanged.
+    #[serde(rename = "sig")]
+    auth: SigInfo,
     /// Memoized content-addressable ID. Derived state; see [`IdCache`].
     #[serde(skip)]
     id_cache: IdCache,
@@ -266,24 +270,29 @@ impl Entry {
     }
 
     /// Get the authentication information attached to this entry.
-    pub fn sig(&self) -> &SigInfo {
-        &self.sig
+    pub fn auth(&self) -> &SigInfo {
+        &self.auth
     }
 
-    /// Replace this entry's authentication information.
+    /// Return this entry with its authentication information updated by `update`.
     ///
-    /// Changes the entry's content, and therefore its ID.
-    pub fn set_sig(&mut self, sig: SigInfo) {
-        self.sig = sig;
-        self.id_cache.clear();
-    }
-
-    /// Set (or clear) the base64-encoded signature on this entry's authentication information.
+    /// Signature material is part of an entry's content, so the returned entry has a
+    /// different ID from the receiver. Consuming `self` and returning a new value is what
+    /// keeps that honest: an `Entry` is never mutated in place, so a memoized ID can never
+    /// outlive the content it was computed from.
     ///
-    /// Changes the entry's content, and therefore its ID.
-    pub fn set_signature(&mut self, signature: Option<String>) {
-        self.sig.sig = signature;
-        self.id_cache.clear();
+    /// ```
+    /// # use eidetica::entry::Entry;
+    /// # fn main() -> eidetica::Result<()> {
+    /// let entry = Entry::root_builder().build()?;
+    /// let signed = entry.with_auth(|auth| auth.signature = Some("c2lnbmF0dXJl".to_string()));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_auth(mut self, update: impl FnOnce(&mut SigInfo)) -> Self {
+        update(&mut self.auth);
+        self.id_cache = IdCache::default();
+        self
     }
 
     /// Get the ID of the root `Entry` of the tree this entry belongs to.
@@ -407,9 +416,7 @@ impl Entry {
     /// which is necessary for signature generation and verification.
     /// The returned entry has deterministic field ordering for consistent signatures.
     pub fn canonical_for_signing(&self) -> Self {
-        let mut canonical = self.clone();
-        canonical.set_signature(None);
-        canonical
+        self.clone().with_auth(|auth| auth.signature = None)
     }
 
     /// Create canonical bytes for signing or ID generation.
