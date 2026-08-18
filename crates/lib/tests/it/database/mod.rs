@@ -15,6 +15,7 @@
 mod api_methods;
 mod core_operations;
 mod create_with_init;
+mod dag_width_probe;
 mod helpers;
 mod merge_algorithms;
 mod settings_metadata;
