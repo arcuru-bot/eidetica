@@ -1,9 +1,8 @@
-//! Height-based sorting and CRDT caching for InMemory database
+//! CRDT state caching for the in-memory backend.
 //!
-//! Heights are stored directly in entries, so sorting is trivial.
-//! This module also handles CRDT state caching with byte-bounded LRU
-//! eviction, scoped by [`CacheScope`] so daemon-trusted bytes (Shared)
-//! and client-uploaded bytes (User) coexist in one storage substrate.
+//! Cached state is held in a byte-bounded LRU, scoped by [`CacheScope`] so
+//! daemon-trusted bytes (Shared) and client-uploaded bytes (User) coexist in
+//! one storage substrate.
 
 use lru::LruCache;
 
