@@ -259,14 +259,21 @@ impl Entry {
     /// reused afterwards. Callers on hot paths (sorting, DAG traversal, map keys) can
     /// therefore call this freely instead of threading an ID alongside the entry.
     pub fn id(&self) -> ID {
-        self.id_cache
-            .get_or_init(|| {
-                let bytes = self
-                    .to_dagcbor()
-                    .expect("Failed to serialize entry to DAG-CBOR for ID");
-                ID::from_dagcbor_bytes(bytes)
-            })
-            .clone()
+        self.id_ref().clone()
+    }
+
+    /// Borrow the content-addressable ID of the entry.
+    ///
+    /// The same value [`Entry::id`] returns, without copying it out of the memo. An [`ID`]
+    /// carries a fixed-size digest buffer, so comparison-heavy callers — sorting a slice of
+    /// entries, scanning one for a match — avoid a copy per access by borrowing instead.
+    pub fn id_ref(&self) -> &ID {
+        self.id_cache.get_or_init(|| {
+            let bytes = self
+                .to_dagcbor()
+                .expect("Failed to serialize entry to DAG-CBOR for ID");
+            ID::from_dagcbor_bytes(bytes)
+        })
     }
 
     /// Get the authentication information attached to this entry.
