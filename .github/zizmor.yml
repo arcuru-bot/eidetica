@@ -17,8 +17,8 @@ rules:
       # `steps.nix.outputs.push-args` is a first-party output of our setup-nix
       # composite (pre-quoted Nix store paths), not attacker-controllable input
       # — see the comment at that step in publish.yml.
-      - publish.yml:118
-      - publish.yml:129
+      - publish.yml:119
+      - publish.yml:130
   secrets-inherit:
     ignore:
       # PAT_TOKEN reaches the reusable workflow through its own
@@ -36,5 +36,5 @@ rules:
       # version; zizmor resolves it as a ref and reports the expected divergence
       # from the branch tip. Deps: Actions Audit covers these pins instead,
       # failing when the pinned commit is no longer reachable from that branch.
-      - release-plz-pr.yml:34
-      - release-plz-release.yml:43
+      - release-plz-pr.yml:35
+      - release-plz-release.yml:44

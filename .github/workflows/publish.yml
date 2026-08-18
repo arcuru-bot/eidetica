@@ -46,6 +46,7 @@ jobs:
     name: Publish (${{ matrix.system }})
     environment: publish
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     # For workflow_run, restrict to a CI run on this repo's own main: the
     # `branches` filter matches the triggering run's head_branch, which a fork
     # PR from a branch named "main" also satisfies, and fork code would then be
@@ -246,6 +247,7 @@ jobs:
     name: Manifest
     environment: release
     runs-on: ubicloud-standard-2
+    timeout-minutes: 60
     needs: build
     if: github.repository_owner == 'arcuru'
     permissions:

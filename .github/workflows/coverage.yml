@@ -12,6 +12,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubicloud-standard-8
+    timeout-minutes: 90
     if: github.repository_owner == 'arcuru'
     steps:
       - name: Checkout
