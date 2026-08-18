@@ -193,3 +193,41 @@ async fn test_sibling_order_follows_cid_ord() {
         );
     }
 }
+
+/// The same normative pin for whole-tree traversal, which sorts on tree height
+/// rather than store height and so runs a separate comparator.
+#[tokio::test]
+async fn test_tree_sibling_order_follows_cid_ord() {
+    let mem = InMemory::new();
+    let sql = Sqlite::in_memory().await.expect("sqlite backend");
+
+    let root_id = build_fan_out(&[&mem, &sql]).await;
+
+    for (label, backend) in [
+        ("in-memory", &mem as &dyn BackendImpl),
+        ("sqlite", &sql as &dyn BackendImpl),
+    ] {
+        let siblings: Vec<ID> = backend
+            .get_tree(&root_id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.id())
+            .filter(|id| *id != root_id)
+            .collect();
+
+        assert_eq!(
+            siblings.len(),
+            SIBLINGS,
+            "{label} backend should return every sibling"
+        );
+
+        let mut expected = siblings.clone();
+        expected.sort();
+
+        assert_eq!(
+            siblings, expected,
+            "{label} backend does not order same-height siblings by CID Ord"
+        );
+    }
+}
