@@ -31,6 +31,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubicloud-standard-2
+    timeout-minutes: 15
     # Only the CI-triggered Publish warms the cache (its warm step is itself gated
     # on workflow_run), so a release- or dispatch-triggered Publish would send this
     # job into a cold build on a small runner. Deploy from the main-push path only.
@@ -68,6 +69,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubicloud-standard-2
+    timeout-minutes: 15
     needs: build
     if: github.repository_owner == 'arcuru' && github.ref == 'refs/heads/main'
     permissions:

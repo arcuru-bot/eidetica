@@ -12,6 +12,7 @@ jobs:
   sanitize:
     name: Sanitize
     runs-on: ubicloud-standard-4
+    timeout-minutes: 90
     if: github.repository_owner == 'arcuru'
     steps:
       - name: Checkout

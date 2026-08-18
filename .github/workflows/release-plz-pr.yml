@@ -17,6 +17,7 @@ jobs:
   release-pr:
     name: Release-plz PR
     runs-on: ubicloud-standard-2
+    timeout-minutes: 15
     if: ${{ github.repository_owner == 'arcuru' }}
     permissions:
       contents: write

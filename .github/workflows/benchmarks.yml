@@ -12,6 +12,7 @@ jobs:
   benchmark:
     name: Benchmark
     runs-on: ubicloud-standard-4
+    timeout-minutes: 180
     if: github.repository_owner == 'arcuru'
     steps:
       - name: Checkout
