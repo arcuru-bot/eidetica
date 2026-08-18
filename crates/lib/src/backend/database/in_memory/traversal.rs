@@ -401,12 +401,12 @@ pub(crate) fn snapshot(inner: &mut InMemoryInner, tree: &ID) -> Result<Vec<ID>> 
         .entries
         .iter()
         .filter(|(_, entry)| entry.in_tree(tree))
-        .map(|(id, entry)| (id.clone(), entry.is_root(), entry.id()))
+        .map(|(id, entry)| (id.clone(), entry.is_root()))
         .collect();
 
     let mut tips = Vec::new();
-    for (id, is_root, entry_id) in entry_info {
-        if super::storage::is_tip(&inner.entries, tree, &id) && (!is_root || entry_id == *tree) {
+    for (id, is_root) in entry_info {
+        if super::storage::is_tip(&inner.entries, tree, &id) && (!is_root || id == *tree) {
             tips.push(id);
         }
     }
