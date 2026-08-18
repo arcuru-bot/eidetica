@@ -9,6 +9,8 @@ use crate::{
     entry::{Entry, ID},
 };
 
+use crate::backend::database::sorting;
+
 /// Retrieves an entry by ID from the internal `HashMap`.
 /// Used internally by traversal functions.
 pub(crate) fn get(inner: &InMemoryInner, id: &ID) -> Result<Entry> {
@@ -227,7 +229,7 @@ pub(crate) fn get_tree(inner: &InMemoryInner, tree: &ID) -> Result<Vec<Entry>> {
         .cloned()
         .collect();
 
-    crate::backend::database::sorting::sort_entries_by_height(&mut tree_entries);
+    sorting::sort_entries_by_height(&mut tree_entries);
     Ok(tree_entries)
 }
 
@@ -240,7 +242,7 @@ pub(crate) fn get_store(inner: &InMemoryInner, tree: &ID, subtree: &str) -> Resu
         .cloned()
         .collect();
 
-    crate::backend::database::sorting::sort_entries_by_store_height(subtree, &mut subtree_entries);
+    sorting::sort_entries_by_store_height(subtree, &mut subtree_entries);
     Ok(subtree_entries)
 }
 
@@ -304,7 +306,7 @@ pub(crate) fn get_tree_from_tips(
     }
 
     // Sort the result by height
-    crate::backend::database::sorting::sort_entries_by_height(&mut result);
+    sorting::sort_entries_by_height(&mut result);
 
     Ok(result)
 }
@@ -362,7 +364,7 @@ pub(crate) fn store_at(
     }
 
     // Sort the result by subtree height
-    crate::backend::database::sorting::sort_entries_by_store_height(subtree, &mut result);
+    sorting::sort_entries_by_store_height(subtree, &mut result);
 
     Ok(result)
 }

@@ -29,6 +29,8 @@ use crate::{
     snapshot::Snapshot,
 };
 
+use crate::backend::database::sorting;
+
 use cache::InMemoryCrdtCache;
 
 /// Grouped tree tips cache: (tree_tips, subtree_name -> subtree_tips)
@@ -160,7 +162,7 @@ impl InMemory {
     /// * `_tree` - The ID of the tree context (unused, kept for API compatibility)
     /// * `entries` - The vector of entries to be sorted in place
     pub fn sort_entries_by_height(&self, _tree: &ID, entries: &mut [Entry]) {
-        crate::backend::database::sorting::sort_entries_by_height(entries)
+        sorting::sort_entries_by_height(entries)
     }
 
     /// Sort entries by their height within a subtree (exposed for testing)
@@ -172,7 +174,7 @@ impl InMemory {
     /// * `subtree` - The name of the subtree context
     /// * `entries` - The vector of entries to be sorted in place
     pub fn sort_entries_by_subtree_height(&self, _tree: &ID, subtree: &str, entries: &mut [Entry]) {
-        crate::backend::database::sorting::sort_entries_by_store_height(subtree, entries)
+        sorting::sort_entries_by_store_height(subtree, entries)
     }
 
     /// Check if an entry is a tip within its tree (exposed for benchmarks)
