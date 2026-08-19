@@ -222,6 +222,31 @@
         cargoDenyChecks = "--config .config/deny.toml bans licenses sources";
       });
 
+    # The released binary must never carry the library's test-only hooks.
+    # `testing` sits outside `default`/`full`, so it can only reach eidetica-bin
+    # through an --all-features invocation or a normal (non-dev) dependency on
+    # it. Either would ship clock injection and past-visibility accessors to
+    # users; this fails the build instead.
+    release-features = craneLib.mkCargoDerivation (baseArgs
+      // {
+        pname = "release-features";
+        cargoArtifacts = null;
+        buildPhaseCargoCommand = ''
+          cargo tree -e features -p eidetica-bin > feature-graph.txt
+          if grep -F 'eidetica feature "testing"' feature-graph.txt; then
+            echo "error: eidetica-bin's release feature graph enables the library's test-only 'testing' feature" >&2
+            exit 1
+          fi
+        '';
+        doInstallCargoArtifacts = false;
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out
+          echo "Release binary does not enable the testing feature" > $out/result
+          runHook postInstall
+        '';
+      });
+
     # cargo-udeps: find unused dependencies
     # Requires nightly toolchain for -Z flags
     # Note: No cached artifacts - must perform its own instrumented build
