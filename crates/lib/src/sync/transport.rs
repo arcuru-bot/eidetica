@@ -265,7 +265,12 @@ impl Sync {
         let instance = self.instance()?;
 
         // Create the background sync and get command sender
-        let background_tx = BackgroundSync::start(instance, sync_tree_id, Arc::clone(&self.queue));
+        let background_tx = BackgroundSync::start(
+            instance,
+            sync_tree_id,
+            Arc::clone(&self.queue),
+            Arc::clone(&self.peer_state),
+        );
 
         // Initialize the command channel (can only be done once)
         self.background_tx

@@ -116,6 +116,7 @@ mod bootstrap;
 mod bootstrap_request_manager;
 mod ops;
 mod peer;
+mod peer_state;
 mod queue;
 mod transport;
 mod transport_manager;
@@ -126,6 +127,7 @@ mod user_sync_manager;
 use background::SyncCommand;
 pub use bootstrap_request_manager::{BootstrapRequest, RequestStatus};
 pub use error::{SyncError, TimeoutPhase};
+use peer_state::PeerStates;
 pub use peer_types::{Address, ConnectionState, PeerId, PeerInfo, PeerStatus};
 use queue::SyncQueue;
 pub use ticket::DatabaseTicket;
@@ -221,7 +223,11 @@ impl SyncHandle {
 pub struct SyncStatus {
     /// Whether we have local data for this tree
     pub has_local_data: bool,
-    /// Last time sync succeeded (if ever)
+    /// When at least one tree last synced with this peer.
+    ///
+    /// Peer-wide rather than specific to `has_local_data`'s tree, and held only
+    /// in memory by the running sync engine, so it reads `None` before the
+    /// first successful round and again after a restart.
     pub last_sync: Option<SystemTime>,
     /// Last error encountered (if any)
     pub last_error: Option<String>,
@@ -261,6 +267,8 @@ pub struct Sync {
     sync_tree: Database,
     /// Queue for entries pending synchronization
     queue: Arc<SyncQueue>,
+    /// Per-peer liveness state, written by the background engine.
+    peer_state: Arc<PeerStates>,
 }
 
 impl Clone for Sync {
@@ -274,6 +282,7 @@ impl Clone for Sync {
             instance: self.instance.clone(),
             sync_tree: self.sync_tree.clone(),
             queue: Arc::clone(&self.queue),
+            peer_state: Arc::clone(&self.peer_state),
         }
     }
 }
@@ -301,6 +310,7 @@ impl Sync {
             instance: instance.downgrade(),
             sync_tree,
             queue: Arc::new(SyncQueue::new()),
+            peer_state: Arc::new(PeerStates::default()),
         };
 
         // Initialize combined settings for all tracked users
@@ -329,6 +339,7 @@ impl Sync {
             instance: instance.downgrade(),
             sync_tree,
             queue: Arc::new(SyncQueue::new()),
+            peer_state: Arc::new(PeerStates::default()),
         };
 
         // Initialize combined settings for all tracked users

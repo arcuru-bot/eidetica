@@ -315,7 +315,8 @@ Applications register sync relationships once; the background engine handles syn
 
 ### 8. Persistent State Management
 
-**Decision:** All peer and relationship state stored persistently in sync database
+**Decision:** All peer and relationship state stored persistently in sync database;
+observational liveness timestamps are the one exception and stay in memory
 
 **Architecture:**
 
@@ -326,6 +327,8 @@ Sync Database (Persistent):
 
 BackgroundSync (Transient):
 ├── retry_queue: Vec<RetryEntry> (failed sends pending retry)
+├── peer_state: per-peer last-successful-sync timestamps, shared with the Sync
+│   frontend and written only by the engine
 └── sync_tree_id: ID (reference to sync database for peer lookups)
 ```
 
@@ -335,6 +338,12 @@ BackgroundSync (Transient):
 - BackgroundSync reads peer information on-demand when needed
 - Frontend writes peer/relationship changes directly to sync database
 - Single source of truth in persistent storage
+- One deliberate exception: last-successful-sync timestamps stay in memory. A
+  successful round is a purely observational fact, and persisting one would cost
+  a transaction per peer per round — on the order of a thousand entries a day
+  for a handful of peers at the default interval. The accepted cost is that a
+  peer reads back as never having synced until the next successful round after a
+  restart.
 
 **Rationale:**
 

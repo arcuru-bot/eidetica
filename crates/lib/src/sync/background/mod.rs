@@ -16,6 +16,7 @@ use super::{
     error::SyncError,
     handler::SyncHandlerImpl,
     peer_manager::PeerManager,
+    peer_state::PeerStates,
     peer_types::{Address, PeerId, PeerStatus},
     protocol::{SyncRequest, SyncRequestAuth, SyncResponse, SyncTreeRequest},
     queue::SyncQueue,
@@ -163,6 +164,9 @@ pub struct BackgroundSync {
     // Queue for entries pending synchronization (shared with Sync frontend)
     queue: Arc<SyncQueue>,
 
+    // Per-peer liveness state (shared with Sync frontend, written only here)
+    peer_state: Arc<PeerStates>,
+
     // Retry queue for failed sends
     retry_queue: Vec<RetryEntry>,
 
@@ -184,6 +188,7 @@ impl BackgroundSync {
         instance: Instance,
         sync_tree_id: ID,
         queue: Arc<SyncQueue>,
+        peer_state: Arc<PeerStates>,
     ) -> mpsc::Sender<SyncCommand> {
         let (tx, rx) = mpsc::channel(100);
 
@@ -192,6 +197,7 @@ impl BackgroundSync {
             instance: instance.downgrade(),
             sync_tree_id,
             queue,
+            peer_state,
             retry_queue: Vec::new(),
             command_rx: rx,
         };
@@ -710,8 +716,10 @@ impl BackgroundSync {
             info!(peer = %peer_id, tree_count = sync_trees.len(), "Synchronizing trees with peer");
 
             let tree_count = sync_trees.len();
+            let mut synced_any = false;
             for (index, tree_id) in sync_trees.iter().enumerate() {
                 let Err(e) = self.sync_tree_with_peer(peer_id, tree_id, &address).await else {
+                    synced_any = true;
                     continue;
                 };
 
@@ -735,6 +743,14 @@ impl BackgroundSync {
                     );
                     break;
                 }
+            }
+
+            // A round that moved at least one tree is the peer answering, which
+            // is the fact `SyncStatus.last_sync` reports. A round in which every
+            // tree failed is not, even though the walk itself returns `Ok`.
+            if synced_any && let Ok(instance) = self.instance() {
+                self.peer_state
+                    .record_success(peer_id, instance.clock().now_millis());
             }
 
             info!(peer = %peer_id, "Completed peer synchronization");
