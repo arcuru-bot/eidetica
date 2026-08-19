@@ -203,6 +203,19 @@ impl Error {
         }
     }
 
+    /// Check if this error is network-related.
+    ///
+    /// True for a peer that could not be reached, went quiet, or dropped the
+    /// connection — as opposed to one that answered and refused. A caller
+    /// deciding whether another request to the same peer is worth making wants
+    /// this distinction: the first is worth retrying, the second is not.
+    pub fn is_network_error(&self) -> bool {
+        match self {
+            Error::Sync(sync_err) => sync_err.is_network_error(),
+            _ => false,
+        }
+    }
+
     /// Check if this error is database/backend-related.
     pub fn is_database_error(&self) -> bool {
         matches!(self, Error::Backend(_))

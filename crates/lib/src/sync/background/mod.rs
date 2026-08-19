@@ -170,9 +170,9 @@ pub struct BackgroundSync {
     command_rx: mpsc::Receiver<SyncCommand>,
 }
 
-/// How many peers a periodic round syncs at once. Bounds concurrent
-/// connections on a large peer set; well above the point where a round stops
-/// being dominated by any single unreachable peer.
+/// How many peers may be synced at once, and so how many outbound connections a
+/// periodic sync can hold open. Bounds a large peer set; well above the point
+/// where the work stops being dominated by any single unreachable peer.
 const MAX_CONCURRENT_PEER_SYNCS: usize = 16;
 
 impl BackgroundSync {
@@ -709,10 +709,31 @@ impl BackgroundSync {
 
             info!(peer = %peer_id, tree_count = sync_trees.len(), "Synchronizing trees with peer");
 
-            for tree_id in sync_trees {
-                if let Err(e) = self.sync_tree_with_peer(peer_id, &tree_id, &address).await {
-                    // Log tree sync failure but continue with other trees
-                    tracing::error!("Failed to sync tree {tree_id} with peer {peer_id}: {e}");
+            let tree_count = sync_trees.len();
+            for (index, tree_id) in sync_trees.iter().enumerate() {
+                let Err(e) = self.sync_tree_with_peer(peer_id, tree_id, &address).await else {
+                    continue;
+                };
+
+                tracing::error!("Failed to sync tree {tree_id} with peer {peer_id}: {e}");
+
+                // A failure that is about the peer rather than about this tree
+                // ends the walk. Every remaining tree would fail the same way,
+                // each paying a full deadline to establish what this one just
+                // established, so a peer that is down costs one round trip
+                // rather than one per tree registered against it.
+                //
+                // Any other failure is about this tree alone: the peer answered,
+                // so the trees behind it are still worth attempting. Keeping
+                // that distinction is what lets the walk stop early without a
+                // single broken tree stalling every tree behind it.
+                if e.is_network_error() {
+                    debug!(
+                        peer = %peer_id,
+                        skipped = tree_count - index - 1,
+                        "Peer stopped answering; ending the tree walk"
+                    );
+                    break;
                 }
             }
 
@@ -865,5 +886,73 @@ impl BackgroundSync {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::{
+        Error,
+        sync::error::{SyncError, TimeoutPhase},
+    };
+
+    /// The rule the tree walk applies to a failed tree: end the peer's round, or
+    /// carry on to the trees behind it.
+    fn ends_the_walk(err: SyncError) -> bool {
+        Error::from(err).is_network_error()
+    }
+
+    /// The peer itself stopped answering, so every remaining tree would pay a
+    /// full deadline to establish what this one just established.
+    #[test]
+    fn a_peer_that_stopped_answering_ends_the_walk() {
+        assert!(ends_the_walk(SyncError::ConnectionFailed {
+            address: "peer:8080".to_string(),
+            reason: "connection refused".to_string(),
+        }));
+        assert!(ends_the_walk(SyncError::Timeout {
+            address: "peer:8080".to_string(),
+            phase: TimeoutPhase::Connect,
+            elapsed: Duration::from_secs(10),
+        }));
+        assert!(ends_the_walk(SyncError::Network(
+            "connection reset by peer".to_string()
+        )));
+    }
+
+    /// A peer that connected and then went quiet is still a peer that stopped
+    /// answering. The phase says whether it proved itself reachable, which is
+    /// worth reporting, but it does not make the remaining trees worth
+    /// attempting this round.
+    #[test]
+    fn a_peer_that_went_quiet_after_connecting_also_ends_the_walk() {
+        assert!(ends_the_walk(SyncError::Timeout {
+            address: "peer:8080".to_string(),
+            phase: TimeoutPhase::Request,
+            elapsed: Duration::from_secs(30),
+        }));
+    }
+
+    /// The peer answered in every one of these: the failure is about the one
+    /// tree, so the trees behind it are still worth attempting. Ending the walk
+    /// on these would let a single misconfigured tree stall every tree
+    /// registered behind it against a peer that is perfectly healthy.
+    #[test]
+    fn a_failure_about_one_tree_does_not_end_the_walk() {
+        assert!(!ends_the_walk(SyncError::PermissionDenied(
+            "key has no write access".to_string()
+        )));
+        assert!(!ends_the_walk(SyncError::AuthenticationFailed(
+            "signature did not verify".to_string()
+        )));
+        assert!(!ends_the_walk(SyncError::UnexpectedResponse {
+            expected: "SyncResponse",
+            actual: "Error".to_string(),
+        }));
+        assert!(!ends_the_walk(SyncError::SyncProtocolError(
+            "malformed tip set".to_string()
+        )));
     }
 }
