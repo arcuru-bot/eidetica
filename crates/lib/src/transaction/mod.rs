@@ -981,17 +981,9 @@ impl Transaction {
         // Batch-fetch the whole path in one round-trip instead of one `get`
         // per entry (each a separate RPC on a remote backend). Order is
         // preserved, which matters here: `entry_ids` is the canonical CRDT
-        // replay order produced by `get_path_from_to`.
-        //
-        // TODO(chunking): over a remote backend the whole path comes back in
-        // a single response frame, so a path whose entries exceed
-        // `MAX_FRAME_SIZE` fails where the old per-entry loop would have
-        // succeeded — and it fails badly: `write_frame` errors inside the
-        // connection's writer task, which drops the connection instead of
-        // returning a correlated error. Same ceiling `GetStoreEntries` and
-        // the empty-base `store_at` path already sit under. Fix is to window
-        // `entry_ids` into fixed-size chunks here, which keeps every frame
-        // bounded regardless of path length.
+        // replay order produced by `get_path_from_to`. The remote backend
+        // windows the fetch internally, so no length of path can produce a
+        // response frame over the protocol cap.
         let entries = self.db.ops().get_entries(entry_ids).await?;
 
         for entry in entries {
