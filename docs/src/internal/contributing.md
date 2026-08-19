@@ -61,6 +61,25 @@ See [CI/Build Infrastructure](ci.md) for details.
 
 Binary caching via a [binary cache](https://cache.eidetica.dev) speeds up builds by providing pre-built dependencies.
 
+## Benchmarks
+
+Criterion benchmarks live in `crates/lib/benches/`. Run them with `nix run .#bench`, or a
+single target with `cargo bench --bench backend_benchmarks`. CI runs `cargo bench --workspace`
+weekly and uploads the results to Bencher.
+
+Sample size is set per harness — 30 for `backend_benchmarks`, 50 for `benchmarks` — and
+`--sample-size N` overrides it:
+
+```bash
+cargo bench --bench backend_benchmarks -- --sample-size 60
+```
+
+Two groups build a large tree in every iteration's setup, so they fall back to a reduced
+sample size of 10 when the flag is absent: `large_tree_operations` and `get_tree_from_tips`.
+Each announces that on stderr. Results are noisy at that size — pass `--sample-size` when a
+number needs to be trusted, and note that the tracked history for those two groups was
+collected at 10 samples, so it is not comparable with a larger run.
+
 ## Development Workflow
 
 1. Enter the dev shell: `nix develop` or use direnv

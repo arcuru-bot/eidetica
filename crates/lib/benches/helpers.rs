@@ -1,5 +1,6 @@
 //! Shared helpers for benchmark tests
 
+use criterion::{BenchmarkGroup, measurement::Measurement};
 use eidetica::{
     Database, Instance,
     backend::{BackendImpl, database::InMemory},
@@ -67,6 +68,34 @@ pub async fn setup_tree_async() -> (Instance, User, Database) {
 pub async fn setup_tree_inmemory() -> (Instance, User, Database) {
     let backend = Box::new(InMemory::new());
     setup_tree_with_backend(backend).await
+}
+
+/// Sample size used by groups whose per-iteration setup builds a large tree.
+///
+/// Well below Criterion's default because each sample rebuilds a tree of hundreds
+/// of entries; measurements taken at this size are correspondingly noisy.
+pub const LARGE_SETUP_SAMPLE_SIZE: usize = 10;
+
+/// Applies [`LARGE_SETUP_SAMPLE_SIZE`] to a group unless `--sample-size` was passed.
+///
+/// A group calling `sample_size` unconditionally overrides the runner's own
+/// configuration, so `--sample-size` has no effect on it. This yields to the flag
+/// when it is present, and reports the reduced default on stderr when it is not.
+#[allow(dead_code)]
+pub fn apply_large_setup_sample_size<M: Measurement>(
+    group: &mut BenchmarkGroup<'_, M>,
+    name: &str,
+) {
+    let flagged =
+        std::env::args().any(|arg| arg == "--sample-size" || arg.starts_with("--sample-size="));
+    if flagged {
+        return;
+    }
+    group.sample_size(LARGE_SETUP_SAMPLE_SIZE);
+    eprintln!(
+        "note: group `{name}` samples {LARGE_SETUP_SAMPLE_SIZE} iterations; \
+         pass --sample-size N for a statistically stronger run"
+    );
 }
 
 /// Creates a fresh empty tree with the given backend.

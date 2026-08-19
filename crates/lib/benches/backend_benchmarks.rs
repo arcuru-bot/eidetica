@@ -7,7 +7,7 @@ use eidetica::{
 };
 use std::hint::black_box;
 
-use helpers::{setup_tree_async, setup_tree_inmemory};
+use helpers::{apply_large_setup_sample_size, setup_tree_async, setup_tree_inmemory};
 
 /// Create a linear chain of entries for testing merge base performance
 async fn create_linear_chain(tree: &Database, length: usize) -> Vec<ID> {
@@ -343,7 +343,7 @@ pub fn bench_tree_traversal_scalability(c: &mut Criterion) {
         .build()
         .expect("Failed to build Tokio runtime");
     let mut group = c.benchmark_group("large_tree_operations");
-    group.sample_size(10); // Reduce sample size for large tree operations
+    apply_large_setup_sample_size(&mut group, "large_tree_operations");
 
     let tree_sizes = [100, 500];
     let structures = ["linear", "wide"];
@@ -496,7 +496,7 @@ pub fn bench_get_tree_from_tips(c: &mut Criterion) {
         .build()
         .expect("Failed to build Tokio runtime");
     let mut group = c.benchmark_group("get_tree_from_tips");
-    group.sample_size(10);
+    apply_large_setup_sample_size(&mut group, "get_tree_from_tips");
 
     let tree_sizes = [100, 500];
     let structures = ["linear", "wide"];
