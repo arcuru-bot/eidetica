@@ -59,19 +59,23 @@ extra-trusted-public-keys = $TRUSTED_KEYS
 EOF
 fi
 
-# Install tools
+# Install tools.
+#
+# `--inputs-from .` resolves `nixpkgs` to this repo's locked nixpkgs input rather
+# than the runner's rolling flake registry, so the tooling only moves when
+# flake.lock does.
 if [[ ${#tools[@]} -gt 0 ]]; then
-  nix profile add "${tools[@]}"
+  nix profile add --inputs-from . "${tools[@]}"
 fi
 
 # Configure Attic
 if [[ $setup_attic == "true" && -n ${ATTIC_AUTH_TOKEN:-} && -n ${ATTIC_SERVER_URL:-} ]]; then
-  nix profile add nixpkgs#attic-client
+  nix profile add --inputs-from . nixpkgs#attic-client
   attic login eidetica "$ATTIC_SERVER_URL" "$ATTIC_AUTH_TOKEN"
 fi
 
 # Configure Cachix
 if [[ $setup_cachix == "true" && -n ${CACHIX_AUTH_TOKEN:-} ]]; then
-  nix profile add nixpkgs#cachix
+  nix profile add --inputs-from . nixpkgs#cachix
   cachix authtoken "$CACHIX_AUTH_TOKEN"
 fi
