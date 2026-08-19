@@ -239,7 +239,13 @@ impl PeerSyncState {
     /// nothing the scheduler did not already know, and counting it would let
     /// someone retrying by hand during an outage push the automatic schedule
     /// further and further out.
-    fn record(&mut self, cursor: Option<usize>, synced_any: bool, scheduled: bool, now_ms: u64) {
+    fn record(
+        &mut self,
+        cursor: Option<usize>,
+        synced_any: bool,
+        scheduled: bool,
+        now_ms: Option<u64>,
+    ) {
         if let Some(cursor) = cursor {
             self.tree_cursor = cursor;
         }
@@ -247,7 +253,12 @@ impl PeerSyncState {
         if synced_any {
             self.consecutive_failures = 0;
             self.rounds_to_skip = 0;
-            self.last_success_ms = Some(now_ms);
+            // Left alone when the clock is unavailable: the previous timestamp
+            // is stale, but it did happen, and it beats stamping this round at
+            // a time it did not occur.
+            if let Some(now_ms) = now_ms {
+                self.last_success_ms = Some(now_ms);
+            }
             return;
         }
 
@@ -773,7 +784,12 @@ impl BackgroundSync {
         synced_any: bool,
         scheduled: bool,
     ) {
-        let now_ms = self.instance().map(|i| i.clock().now_millis()).unwrap_or(0);
+        // `None` when the instance is gone. A round cannot report a success
+        // without one — the walk it records opens with `self.instance()?` — but
+        // the guard is several frames away, and a fallback constant here would
+        // stamp a successful round at the Unix epoch rather than leaving it
+        // unknown.
+        let now_ms = self.instance().map(|i| i.clock().now_millis()).ok();
         self.peer_state
             .lock()
             .expect("peer sync state mutex poisoned")
@@ -1115,7 +1131,7 @@ mod tests {
     const FAILED_ROUND: (Option<usize>, bool, bool) = (Some(0), false, true);
 
     /// Stand-in round timestamp for the tests that do not care about time.
-    const ROUND_MS: u64 = 1_000;
+    const ROUND_MS: Option<u64> = Some(1_000);
 
     /// Number of rounds a peer is skipped for, given how many consecutive
     /// scheduled rounds it has now failed.
@@ -1237,12 +1253,35 @@ mod tests {
         assert_eq!(state.last_success_ms, None);
 
         state.record(Some(0), true, true, ROUND_MS);
-        assert_eq!(state.last_success_ms, Some(ROUND_MS));
+        assert_eq!(state.last_success_ms, ROUND_MS);
 
-        state.record(Some(0), false, true, ROUND_MS + 500);
-        assert_eq!(state.last_success_ms, Some(ROUND_MS));
+        state.record(Some(0), false, true, ROUND_MS.map(|t| t + 500));
+        assert_eq!(state.last_success_ms, ROUND_MS);
 
-        state.record(Some(0), true, false, ROUND_MS + 900);
-        assert_eq!(state.last_success_ms, Some(ROUND_MS + 900));
+        state.record(Some(0), true, false, ROUND_MS.map(|t| t + 900));
+        assert_eq!(state.last_success_ms, ROUND_MS.map(|t| t + 900));
+    }
+
+    /// With no clock to read, the round is left unstamped rather than stamped
+    /// at a time it did not happen. Reporting the Unix epoch as a peer's last
+    /// sync is worse than reporting nothing, and a stale earlier timestamp is
+    /// at least a time the peer really did answer.
+    #[test]
+    fn a_round_with_no_clock_leaves_the_timestamp_alone() {
+        let mut state = PeerSyncState::default();
+
+        state.record(Some(0), true, true, None);
+        assert_eq!(state.last_success_ms, None);
+
+        state.record(Some(0), true, true, ROUND_MS);
+        state.record(Some(0), true, true, None);
+        assert_eq!(state.last_success_ms, ROUND_MS);
+
+        // The rest of the round's bookkeeping is unaffected by the missing
+        // clock: a success still clears the backoff.
+        let mut state = PeerSyncState::default();
+        state.record(Some(0), false, true, ROUND_MS);
+        state.record(Some(0), true, true, None);
+        assert!(!state.take_skip());
     }
 }
