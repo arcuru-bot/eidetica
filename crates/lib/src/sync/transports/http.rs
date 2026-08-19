@@ -3,7 +3,7 @@
 //! This module provides HTTP-based sync communication using a single
 //! JSON endpoint (/api/v0) with axum for the server and reqwest for the client.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{
@@ -27,6 +27,36 @@ use crate::{
         protocol::{RequestContext, SyncRequest, SyncResponse},
     },
 };
+
+/// Maximum time spent establishing a TCP connection to a peer.
+///
+/// A peer that is down or firewalled is detected within this bound rather than
+/// at the operating system's connect timeout, which can run into minutes.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum time an outbound request may spend waiting for the peer to send
+/// something, reset by every byte that arrives.
+///
+/// reqwest applies no timeout by default, so without this a peer that accepts
+/// the connection and never answers holds the request open forever. Requests
+/// are awaited inline by the background sync engine, so an unbounded one stalls
+/// every other thing that engine does.
+///
+/// This bounds silence rather than the whole exchange, because the two are not
+/// the same request. A bootstrap response carries an entire database, so a
+/// deadline on the exchange would fail a transfer that is making progress on a
+/// slow link or against a large tree, while adding nothing against the peer
+/// that has stopped sending.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Build the outbound HTTP client with both deadlines applied.
+fn build_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| SyncError::Network(format!("Failed to build HTTP client: {e}")).into())
+}
 
 /// Persistable configuration for the HTTP transport.
 ///
@@ -96,7 +126,7 @@ impl HttpTransportBuilder {
         Ok(HttpTransport {
             server_state: ServerState::new(),
             bind_address: self.bind_address,
-            client: reqwest::Client::new(),
+            client: build_client()?,
         })
     }
 }
@@ -112,7 +142,7 @@ impl TransportBuilder for HttpTransportBuilder {
         let transport = HttpTransport {
             server_state: ServerState::new(),
             bind_address: self.bind_address,
-            client: reqwest::Client::new(),
+            client: build_client()?,
         };
         Ok((transport, None))
     }
@@ -138,7 +168,7 @@ impl HttpTransport {
         Ok(Self {
             server_state: ServerState::new(),
             bind_address: None,
-            client: reqwest::Client::new(),
+            client: build_client()?,
         })
     }
 
@@ -265,9 +295,22 @@ impl SyncTransport for HttpTransport {
             .json(&request) // Send SyncRequest as JSON body
             .send()
             .await
-            .map_err(|e| SyncError::ConnectionFailed {
-                address: address.address.clone(),
-                reason: e.to_string(),
+            .map_err(|e| {
+                // A timeout that is not a connect timeout means the peer
+                // accepted the connection and then went quiet: it is reachable,
+                // so report it as a transport failure rather than as an
+                // unreachable peer.
+                if e.is_timeout() && !e.is_connect() {
+                    SyncError::Network(format!(
+                        "Request to {} timed out after {REQUEST_TIMEOUT:?}",
+                        address.address
+                    ))
+                } else {
+                    SyncError::ConnectionFailed {
+                        address: address.address.clone(),
+                        reason: e.to_string(),
+                    }
+                }
             })?;
 
         if !response.status().is_success() {
