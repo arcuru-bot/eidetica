@@ -16,8 +16,15 @@ service = []
 y-crdt = ["dep:yrs"]
 sqlite = ["dep:sqlx"]
 postgres = ["dep:sqlx"]
-# Exposes internal testing utilities
-# Includes FixedClock, Instance::*_with_clock, and other internal hooks.
+# Exposes internal testing utilities: FixedClock, Instance::*_with_clock, the
+# `testing` module (Cluster/Peer), and other internal hooks.
+#
+# NOT FOR PRODUCTION. These hooks let a caller move the clock, reach past
+# visibility boundaries, and drive internals the public API deliberately does not
+# expose. Deliberately excluded from `default` and `full`, and no workspace member
+# may take it as a normal dependency — doing so would compile the hooks into every
+# release binary built with `--workspace`. Enable it in dev-dependencies and test
+# invocations only.
 testing = []
 
 [dependencies]
@@ -67,6 +74,14 @@ criterion = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 ctor = { workspace = true }
 ipld-core = { workspace = true }
+
+# The integration suite reaches for hooks that only exist under `testing`, so it
+# is declared explicitly rather than auto-discovered: without the feature cargo
+# skips the target instead of failing to compile it.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["testing"]
 
 [[bench]]
 name = "benchmarks"

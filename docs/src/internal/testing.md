@@ -15,10 +15,21 @@ The module structure in `tests/it/` mirrors `src/`. Each module has:
 ## Running Tests
 
 ```bash
-just test              # Run all tests with nextest
-cargo test --test it   # Run integration tests
-cargo test auth::      # Run specific module tests
+just test                              # Run all tests with nextest
+cargo test --all-features --test it    # Run integration tests
+cargo test --all-features auth::       # Run specific module tests
 ```
+
+The `it` target declares `required-features = ["testing"]`, because it uses
+internal hooks — `FixedClock`, `Instance::*_with_clock`, the `testing` module —
+that only exist under that feature. Without it cargo skips the target rather than
+failing to compile it, so pass `--all-features` (or `--features testing`) when
+invoking cargo directly. `just test` and the Nix test packages already do.
+
+The `testing` feature is not in `default` or `full` and must never be taken as a
+normal dependency by a workspace member: that would compile the hooks into every
+release binary built with `--workspace`. The `release-features` lint fails the
+build if `eidetica-bin`'s feature graph ever enables it.
 
 ## Backend Matrix Testing
 

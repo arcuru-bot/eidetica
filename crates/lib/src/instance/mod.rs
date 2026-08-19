@@ -618,6 +618,10 @@ impl Instance {
     }
 
     /// Test variant of [`Instance::open_backend`] with an injectable clock.
+    ///
+    /// Gated behind the `testing` feature and not for production use: an
+    /// instance whose clock a caller controls can be made to write entries with
+    /// arbitrary timestamps.
     #[cfg(any(test, feature = "testing"))]
     pub async fn open_backend_with_clock(
         backend: Box<dyn BackendImpl>,
@@ -643,6 +647,10 @@ impl Instance {
     ///
     /// Arg order: backend, clock, initial — clock goes in the middle so
     /// migrating from the prior `create_with_clock` is a pure rename.
+    ///
+    /// Gated behind the `testing` feature and not for production use: an
+    /// instance whose clock a caller controls can be made to write entries with
+    /// arbitrary timestamps.
     #[cfg(any(test, feature = "testing"))]
     pub async fn create_backend_with_clock(
         backend: Box<dyn BackendImpl>,
