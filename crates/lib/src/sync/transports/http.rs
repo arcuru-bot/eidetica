@@ -21,7 +21,7 @@ use crate::{
     crdt::Doc,
     store::Registered,
     sync::{
-        error::SyncError,
+        error::{SyncError, TimeoutPhase},
         handler::SyncHandler,
         peer_types::Address,
         protocol::{RequestContext, SyncRequest, SyncResponse},
@@ -56,6 +56,31 @@ fn build_client() -> Result<reqwest::Client> {
         .read_timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|e| SyncError::Network(format!("Failed to build HTTP client: {e}")).into())
+}
+
+/// The timeout a failed request represents, or `None` if it failed some other
+/// way.
+///
+/// Which deadline expired says what the peer proved about itself: one that
+/// never completed the connection may not be there, while one that accepted it
+/// and then went quiet is reachable. Both are timeouts, so both carry the phase
+/// rather than being sorted into different variants.
+fn timeout_error(error: &reqwest::Error, address: &str) -> Option<SyncError> {
+    if !error.is_timeout() {
+        return None;
+    }
+
+    let (phase, elapsed) = if error.is_connect() {
+        (TimeoutPhase::Connect, CONNECT_TIMEOUT)
+    } else {
+        (TimeoutPhase::Request, REQUEST_TIMEOUT)
+    };
+
+    Some(SyncError::Timeout {
+        address: address.to_string(),
+        phase,
+        elapsed,
+    })
 }
 
 /// Persistable configuration for the HTTP transport.
@@ -296,21 +321,10 @@ impl SyncTransport for HttpTransport {
             .send()
             .await
             .map_err(|e| {
-                // A timeout that is not a connect timeout means the peer
-                // accepted the connection and then went quiet: it is reachable,
-                // so report it as a transport failure rather than as an
-                // unreachable peer.
-                if e.is_timeout() && !e.is_connect() {
-                    SyncError::Network(format!(
-                        "Request to {} timed out after {REQUEST_TIMEOUT:?}",
-                        address.address
-                    ))
-                } else {
-                    SyncError::ConnectionFailed {
-                        address: address.address.clone(),
-                        reason: e.to_string(),
-                    }
-                }
+                timeout_error(&e, &address.address).unwrap_or_else(|| SyncError::ConnectionFailed {
+                    address: address.address.clone(),
+                    reason: e.to_string(),
+                })
             })?;
 
         if !response.status().is_success() {
@@ -321,10 +335,14 @@ impl SyncTransport for HttpTransport {
             .into());
         }
 
-        let sync_response: SyncResponse = response
-            .json()
-            .await
-            .map_err(|e| SyncError::Network(format!("Failed to parse response: {e}")))?;
+        // The response body is read here rather than above, so a peer that
+        // stops sending partway through one runs out of time here too. Without
+        // this the stall would be reported as a malformed response, which is a
+        // different fault with a different remedy.
+        let sync_response: SyncResponse = response.json().await.map_err(|e| {
+            timeout_error(&e, &address.address)
+                .unwrap_or_else(|| SyncError::Network(format!("Failed to parse response: {e}")))
+        })?;
 
         Ok(sync_response)
     }
@@ -363,4 +381,66 @@ async fn handle_sync_request(
     let response = handler.handle_request(&request, &context).await;
 
     Json(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    /// A peer that accepts the connection and then says nothing is reported as
+    /// a timeout, in the phase that records it was reachable. This is the
+    /// classification the tree walk and every log reader act on, and it rests
+    /// on how the HTTP client reports a deadline, so it is pinned here rather
+    /// than assumed.
+    #[tokio::test]
+    async fn a_peer_that_accepts_and_says_nothing_times_out_in_the_request_phase() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+
+        // Accept the connection and hold it open without answering.
+        tokio::spawn(async move {
+            let _accepted = listener.accept().await;
+            pending::<()>().await;
+        });
+
+        let client = reqwest::Client::builder()
+            .read_timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let error = client
+            .post(format!("http://{address}/api/v0"))
+            .send()
+            .await
+            .expect_err("a peer that never answers cannot produce a response");
+
+        match timeout_error(&error, &address) {
+            Some(SyncError::Timeout { phase, .. }) => assert_eq!(phase, TimeoutPhase::Request),
+            other => panic!("expected a request-phase timeout, got {other:?}"),
+        }
+    }
+
+    /// A refusal is not a timeout: nothing is listening, so the connection is
+    /// rejected rather than left waiting, and a caller must be able to tell the
+    /// two apart without reading the message.
+    #[tokio::test]
+    async fn a_refused_connection_is_not_reported_as_a_timeout() {
+        // Bind and drop, so the port is known to have no listener on it.
+        let address = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().to_string()
+        };
+
+        let client = build_client().unwrap();
+        let error = client
+            .post(format!("http://{address}/api/v0"))
+            .send()
+            .await
+            .expect_err("nothing is listening on that port");
+
+        assert!(timeout_error(&error, &address).is_none());
+    }
 }
