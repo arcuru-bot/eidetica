@@ -492,7 +492,6 @@ nix action='check':
             if ! command -v nix-fast-build >/dev/null 2>&1; then
                 echo "error: nix-fast-build is not on PATH" >&2
                 echo "Enter the dev shell first ('nix develop' or 'direnv allow')," >&2
-                echo "or install it with 'nix profile install nixpkgs#nix-fast-build'." >&2
                 exit 127
             fi
             nix-fast-build --no-link --skip-cached ${CI:+--no-nom}
