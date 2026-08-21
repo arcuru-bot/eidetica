@@ -489,6 +489,11 @@ nix action='check':
             nix build
             ;;
         check)
+            if ! command -v nix-fast-build >/dev/null 2>&1; then
+                echo "error: nix-fast-build is not on PATH" >&2
+                echo "Enter the dev shell first ('nix develop' or 'direnv allow')," >&2
+                exit 127
+            fi
             nix-fast-build --no-link --skip-cached ${CI:+--no-nom}
             ;;
         test)
