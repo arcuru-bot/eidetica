@@ -467,3 +467,56 @@ async fn test_auto_sync_after_restart() -> Result<()> {
 
     Ok(())
 }
+
+/// A write that arrives over sync must fire the receiving side's `on_write`.
+///
+/// This is the hop a "dumb transport" deployment rests on: one peer only
+/// writes, another only reacts. If the reacting side learns about the write on
+/// its next restart rather than when it lands, that architecture does not work
+/// — and it fails silently, since nothing errors and a restart appears to fix
+/// it.
+///
+/// Entries arrive from sync `Unverified`, and `put_entry` deliberately does not
+/// fire for `Unverified` writes; the fire is meant to come from the verify pass
+/// that `put_remote_entries` runs inline. So this covers the whole chain
+/// (receive → store → verify → promote → fire), not the callback registry alone.
+///
+/// Peer 0 owns the database and subscribes; peer 1 bootstraps with write
+/// permission and writes — the same roles as a host that reacts and a
+/// transport-only peer that does not.
+#[tokio::test]
+async fn a_synced_write_fires_the_receiving_side_callback() -> Result<()> {
+    use super::helpers::{cluster_put, cluster_shared_database};
+    use eidetica::testing::Cluster;
+
+    let mut net = Cluster::builder().peers(2).build().await?;
+    let (room, dbs) = cluster_shared_database(&mut net, "registry").await?;
+
+    let fires = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = fires.clone();
+    // Held to the end of the test: dropping the handle unsubscribes.
+    let _cb = dbs[0]
+        .on_write(move |event, _db| {
+            // Count only remote-sourced fires. A bare counter would also catch
+            // this peer's own bookkeeping writes during the exchange and pass
+            // whether or not the synced write ever fired anything.
+            let remote = event.source() == eidetica::instance::WriteSource::Remote;
+            let counter = counter.clone();
+            async move {
+                if remote {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(())
+            }
+        })
+        .await?;
+
+    cluster_put(&dbs[1], "from_the_writer", "1").await?;
+    net.exchange(1, 0, &room).await?;
+
+    assert!(
+        fires.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "a write that arrived over sync did not fire the receiving side's on_write"
+    );
+    Ok(())
+}
