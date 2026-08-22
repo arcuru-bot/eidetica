@@ -58,17 +58,30 @@ impl Sync {
         tree_id: &ID,
         signing_key: Option<&PrivateKey>,
     ) -> Result<()> {
-        // Get peer information and address
-        let peer_info = self
-            .get_peer_info(peer_pubkey)
-            .await?
-            .ok_or_else(|| SyncError::PeerNotFound(peer_pubkey.to_string()))?;
+        let addresses = self.peer_addresses(peer_pubkey).await?;
+        let peer = peer_pubkey.clone();
+        let tree = tree_id.clone();
+        let key = signing_key.cloned();
+        self.race_addresses(&addresses, peer_pubkey, move |sync, addr| {
+            let peer = peer.clone();
+            let tree = tree.clone();
+            let key = key.clone();
+            async move {
+                sync.sync_tree_with_peer_at(&addr, &peer, &tree, key.as_ref())
+                    .await
+            }
+        })
+        .await
+    }
 
-        let address = peer_info
-            .addresses
-            .first()
-            .ok_or_else(|| SyncError::Network("No addresses found for peer".to_string()))?;
-
+    /// One address's attempt at [`Self::sync_tree_with_peer_as`].
+    async fn sync_tree_with_peer_at(
+        &self,
+        address: &Address,
+        peer_pubkey: &PublicKey,
+        tree_id: &ID,
+        signing_key: Option<&PrivateKey>,
+    ) -> Result<()> {
         // Get our current tips for this tree (empty if tree doesn't exist)
         let backend = self.backend()?;
         let our_tips = backend
@@ -691,17 +704,45 @@ impl Sync {
         requested_permission: Option<Permission>,
         metadata: Option<Doc>,
     ) -> Result<()> {
-        // Get peer information and address
-        let peer_info = self
-            .get_peer_info(peer_pubkey)
-            .await?
-            .ok_or_else(|| SyncError::PeerNotFound(peer_pubkey.to_string()))?;
+        let addresses = self.peer_addresses(peer_pubkey).await?;
+        let peer = peer_pubkey.clone();
+        let tree = tree_id.clone();
+        let key = requesting_key.cloned();
+        let key_name = requesting_key_name.map(str::to_string);
+        self.race_addresses(&addresses, peer_pubkey, move |sync, addr| {
+            let peer = peer.clone();
+            let tree = tree.clone();
+            let key = key.clone();
+            let key_name = key_name.clone();
+            let metadata = metadata.clone();
+            async move {
+                sync.sync_tree_with_peer_auth_at(
+                    &addr,
+                    &peer,
+                    &tree,
+                    key.as_ref(),
+                    key_name.as_deref(),
+                    requested_permission,
+                    metadata,
+                )
+                .await
+            }
+        })
+        .await
+    }
 
-        let address = peer_info
-            .addresses
-            .first()
-            .ok_or_else(|| SyncError::Network("No addresses found for peer".to_string()))?;
-
+    /// One address's attempt at [`Self::sync_tree_with_peer_auth`].
+    #[allow(clippy::too_many_arguments)]
+    async fn sync_tree_with_peer_auth_at(
+        &self,
+        address: &Address,
+        peer_pubkey: &PublicKey,
+        tree_id: &ID,
+        requesting_key: Option<&PrivateKey>,
+        requesting_key_name: Option<&str>,
+        requested_permission: Option<Permission>,
+        metadata: Option<Doc>,
+    ) -> Result<()> {
         // Get our current tips for this tree (empty if tree doesn't exist)
         let backend = self.backend()?;
         let our_tips = backend
@@ -838,6 +879,60 @@ impl Sync {
 
         rx.await
             .map_err(|e| SyncError::Network(format!("Response channel error: {e}")))?
+    }
+
+    /// Every address recorded for `peer_pubkey`.
+    async fn peer_addresses(&self, peer_pubkey: &PublicKey) -> Result<Vec<Address>> {
+        let peer_info = self
+            .get_peer_info(peer_pubkey)
+            .await?
+            .ok_or_else(|| SyncError::PeerNotFound(peer_pubkey.to_string()))?;
+        if peer_info.addresses.is_empty() {
+            return Err(
+                SyncError::Network(format!("No addresses found for peer {peer_pubkey}")).into(),
+            );
+        }
+        Ok(peer_info.addresses)
+    }
+
+    /// Try every address a peer has, concurrently, and take the first that works.
+    ///
+    /// A peer's address list only ever grows: anything that changes address on
+    /// restart appends a new entry and leaves the old one in place. Dialing just
+    /// one of them makes a peer that is up and reachable permanently unreachable
+    /// as soon as the entry that happens to be dialed goes stale — and the
+    /// failure presents as a timeout, which reads as "the peer is down", the one
+    /// diagnosis that leads away from the cause.
+    ///
+    /// Ticket bootstrap has always raced its address hints. This puts every
+    /// subsequent sync on the same footing, which makes an accumulated list
+    /// harmless rather than fatal. Pruning dead addresses is a separate concern
+    /// and is not needed for reachability once all of them are tried.
+    ///
+    /// On total failure the last error is returned unchanged — callers match on
+    /// specific variants (`BootstrapPending`, for one), so it must not be
+    /// flattened into a connectivity error. The attempted addresses are logged
+    /// instead, since a bare timeout naming no address is not actionable.
+    async fn race_addresses<F, Fut>(
+        &self,
+        addresses: &[Address],
+        peer_pubkey: &PublicKey,
+        f: F,
+    ) -> Result<()>
+    where
+        F: Fn(Sync, Address) -> Fut,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let result = self.try_addresses_concurrently(addresses, f).await;
+        if let Err(e) = &result {
+            warn!(
+                peer = %peer_pubkey,
+                attempted = ?addresses,
+                error = %e,
+                "No address answered for this peer"
+            );
+        }
+        result
     }
 
     /// Timeout applied to each address attempt in
