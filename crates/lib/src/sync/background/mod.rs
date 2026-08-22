@@ -10,7 +10,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::interval,
 };
-use tracing::{Instrument, debug, info, info_span, trace};
+use tracing::{Instrument, debug, info, info_span, trace, warn};
 
 use super::{
     error::SyncError,
@@ -21,6 +21,7 @@ use super::{
     protocol::{SyncRequest, SyncRequestAuth, SyncResponse, SyncTreeRequest},
     queue::SyncQueue,
     transport_manager::TransportManager,
+    transports::SyncTransport,
 };
 use crate::{
     Database, Error, Instance, Result, WeakInstance,
@@ -504,6 +505,72 @@ impl BackgroundSync {
         Ok(())
     }
 
+    /// Try an operation against multiple addresses concurrently, returning the
+    /// first success.
+    ///
+    /// For each address a transport handle is obtained via
+    /// [`TransportManager::handle_for_address`]. One task is spawned per
+    /// address, each subject to a 30-second timeout. Returns as soon as any
+    /// task succeeds. Remaining tasks are **not** cancelled — they continue
+    /// running so that additional peer connections can be established and
+    /// registered for future syncs.
+    ///
+    /// If no address has a matching transport an error is returned. If all
+    /// tasks fail the last error is returned.
+    async fn try_addresses_concurrently<F, Fut, T>(&self, addresses: &[Address], f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: Fn(std::sync::Arc<dyn SyncTransport>, Address) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+    {
+        // Collect transport handles upfront (before any spawn).
+        let mut tasks: Vec<(std::sync::Arc<dyn SyncTransport>, Address)> = Vec::new();
+        for addr in addresses {
+            if let Some(transport) = self.transport_manager.handle_for_address(addr) {
+                tasks.push((transport, addr.clone()));
+            }
+        }
+
+        if tasks.is_empty() {
+            return Err(
+                SyncError::InvalidAddress("No matching transport for any address".into()).into(),
+            );
+        }
+
+        let (tx, mut rx) = mpsc::channel(tasks.len());
+
+        for (transport, addr) in tasks {
+            let tx = tx.clone();
+            let fut = f(transport, addr.clone());
+            let addr_info = addr.clone();
+            tokio::spawn(async move {
+                let result = tokio::time::timeout(Duration::from_secs(30), fut).await;
+                let result = match result {
+                    Ok(inner) => inner,
+                    Err(_) => {
+                        warn!(
+                            address = ?addr_info,
+                            "Address attempt timed out after 30s",
+                        );
+                        Err(SyncError::Network("Address attempt timed out after 30s".into()).into())
+                    }
+                };
+                let _ = tx.send(result).await;
+            });
+        }
+        drop(tx);
+
+        let mut last_err = None;
+        while let Some(result) = rx.recv().await {
+            match result {
+                Ok(val) => return Ok(val),
+                Err(e) => last_err = Some(e),
+            }
+        }
+
+        Err(last_err.expect("at least one task was spawned"))
+    }
+
     /// Send specific entries to a peer without duplicate filtering.
     ///
     /// This method performs direct entry transmission and is used by:
@@ -521,8 +588,8 @@ impl BackgroundSync {
     ///
     /// Failed sends are automatically added to the retry queue with exponential backoff.
     async fn send_to_peer(&self, peer: &PeerId, entries: Vec<Entry>) -> Result<()> {
-        // Get peer address from sync tree (extract and drop transaction before await)
-        let address = {
+        // Get peer addresses from sync tree (extract and drop transaction before await)
+        let (addresses, request) = {
             let sync_tree = self.get_sync_tree().await?;
             let txn = sync_tree.new_transaction().await?;
             let peer_info = PeerManager::new(&txn)
@@ -530,17 +597,16 @@ impl BackgroundSync {
                 .await?
                 .ok_or_else(|| SyncError::PeerNotFound(peer.to_string()))?;
 
-            peer_info
-                .addresses
-                .first()
-                .ok_or_else(|| SyncError::Network("No addresses found for peer".to_string()))?
-                .clone()
+            let addresses = peer_info.addresses.clone();
+            let request = SyncRequest::SendEntries(entries);
+            (addresses, request)
         }; // Transaction is dropped here
 
-        let request = SyncRequest::SendEntries(entries);
         let response = self
-            .transport_manager
-            .send_request(&address, &request)
+            .try_addresses_concurrently(&addresses, move |transport, addr| {
+                let request = request.clone();
+                async move { transport.send_request(&addr, &request).await }
+            })
             .await?;
 
         match response {
@@ -748,8 +814,9 @@ impl BackgroundSync {
         async move {
             info!(peer = %peer_id, "Starting peer synchronization");
 
-            // Get peer info and tree list from sync tree (extract and drop transaction before await)
-            let (address, sync_trees) = {
+            // Get peer addresses and tree list from sync tree (extract and
+            // drop transaction before any network I/O).
+            let (addresses, sync_trees) = {
                 let sync_tree = self.get_sync_tree().await?;
                 let txn = sync_tree.new_transaction().await?;
                 let peer_manager = PeerManager::new(&txn);
@@ -759,22 +826,35 @@ impl BackgroundSync {
                     .await?
                     .ok_or_else(|| SyncError::PeerNotFound(peer_id.to_string()))?;
 
-                let address = peer_info
-                    .addresses
-                    .first()
-                    .ok_or_else(|| SyncError::Network("No addresses found for peer".to_string()))?
-                    .clone();
+                let addresses = peer_info.addresses.clone();
 
                 // Find all trees that sync with this peer from sync tree
                 let sync_trees = peer_manager.get_peer_trees(peer_id.public_key()).await?;
 
-                (address, sync_trees)
+                (addresses, sync_trees)
             }; // Transaction is dropped here
 
             if sync_trees.is_empty() {
                 debug!(peer = %peer_id, "No trees configured for sync with peer");
                 return Ok(()); // No trees to sync
             }
+
+            // Try all addresses concurrently to find a reachable one. A
+            // lightweight empty SendEntries probe is used — the peer will Ack
+            // it without side effects if it is reachable.
+            let address = self
+                .try_addresses_concurrently(&addresses, |transport, addr| async move {
+                    let request = SyncRequest::SendEntries(Vec::new());
+                    let response = transport.send_request(&addr, &request).await?;
+                    match response {
+                        SyncResponse::Ack | SyncResponse::Count(_) => Ok(addr.clone()),
+                        _ => Err(SyncError::Network(
+                            "Probe request got unexpected response".into(),
+                        )
+                        .into()),
+                    }
+                })
+                .await?;
 
             info!(peer = %peer_id, tree_count = sync_trees.len(), "Synchronizing trees with peer");
 
