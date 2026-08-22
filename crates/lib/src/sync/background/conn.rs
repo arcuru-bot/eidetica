@@ -21,97 +21,111 @@ use crate::{
     entry::Entry,
 };
 
-impl BackgroundSync {
-    /// Connect to a peer and perform handshake
-    pub(super) async fn connect_to_peer(&mut self, address: &Address) -> Result<PublicKey> {
-        // Generate challenge for authentication
-        let challenge = generate_challenge();
+/// Everything a handshake needs, in a form that can leave the engine.
+///
+/// A handshake is aimed at a peer the engine has not talked to before, which is
+/// exactly the peer most likely not to be there — so it is the command most
+/// likely to hold the loop for a full connect deadline. Every field here is
+/// cheap to clone, so the whole operation runs on a task of its own.
+///
+/// The peer registration at the end is a transaction against the sync database,
+/// not engine state, so it travels with the network call rather than having to
+/// come back for it.
+pub(super) struct HandshakeCtx {
+    pub(super) transport: std::sync::Arc<dyn crate::sync::transports::SyncTransport>,
+    pub(super) instance: crate::instance::WeakInstance,
+    pub(super) sync_tree_id: crate::entry::ID,
+    pub(super) listen_addresses: Vec<Address>,
+}
 
-        // Get our device info from instance
-        let instance = self.instance()?;
-        let public_key = instance.id();
+/// Connect to a peer and perform the handshake.
+pub(super) async fn run_handshake(ctx: HandshakeCtx, address: Address) -> Result<PublicKey> {
+    let HandshakeCtx {
+        transport,
+        instance,
+        sync_tree_id,
+        listen_addresses,
+    } = ctx;
+    // Generate challenge for authentication
+    let challenge = generate_challenge();
 
-        // Build listen addresses from all running servers
-        let listen_addresses: Vec<Address> = self
-            .transport_manager
-            .get_all_server_addresses()
-            .into_iter()
-            .map(|(transport_type, addr)| Address {
-                transport_type,
-                address: addr,
-            })
-            .collect();
+    // Get our device info from instance
+    let instance = instance
+        .upgrade()
+        .ok_or_else(|| crate::Error::from(SyncError::InstanceDropped))?;
+    let public_key = instance.id();
 
-        // Create handshake request
-        let handshake_request = HandshakeRequest {
-            device_id: public_key.clone(),
-            public_key: public_key.clone(),
-            display_name: Some("BackgroundSync".to_string()),
-            protocol_version: PROTOCOL_VERSION,
-            challenge: challenge.clone(),
-            listen_addresses,
-        };
+    // Create handshake request
+    let handshake_request = HandshakeRequest {
+        device_id: public_key.clone(),
+        public_key: public_key.clone(),
+        display_name: Some("BackgroundSync".to_string()),
+        protocol_version: PROTOCOL_VERSION,
+        challenge: challenge.clone(),
+        listen_addresses,
+    };
 
-        // Send handshake request
-        let request = SyncRequest::Handshake(handshake_request);
-        let response = self
-            .transport_manager
-            .send_request(address, &request)
-            .await?;
+    // Send handshake request
+    let request = SyncRequest::Handshake(handshake_request);
+    let response = transport.send_request(&address, &request).await?;
 
-        // Process handshake response
-        match response {
-            SyncResponse::Handshake(handshake_resp) => {
-                // Verify protocol version
-                if handshake_resp.protocol_version != PROTOCOL_VERSION {
-                    return Err(SyncError::ProtocolMismatch {
-                        expected: PROTOCOL_VERSION,
-                        received: handshake_resp.protocol_version,
-                    }
-                    .into());
+    // Process handshake response
+    match response {
+        SyncResponse::Handshake(handshake_resp) => {
+            // Verify protocol version
+            if handshake_resp.protocol_version != PROTOCOL_VERSION {
+                return Err(SyncError::ProtocolMismatch {
+                    expected: PROTOCOL_VERSION,
+                    received: handshake_resp.protocol_version,
                 }
-
-                // Verify the server's signature on our challenge
-                let verification_result = verify_challenge_response(
-                    &challenge,
-                    &handshake_resp.challenge_response,
-                    &handshake_resp.public_key,
-                );
-
-                verification_result.map_err(|e| {
-                    SyncError::HandshakeFailed(format!("Signature verification failed: {e}"))
-                })?;
-
-                // Add peer to sync tree
-                let sync_tree = self.get_sync_tree().await?;
-                let txn = sync_tree.new_transaction().await?;
-                let peer_manager = PeerManager::new(&txn);
-
-                // Try to register peer, but ignore if already exists
-                match peer_manager
-                    .register_peer(
-                        &handshake_resp.public_key,
-                        handshake_resp.display_name.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        txn.commit().await?;
-                    }
-                    Err(Error::Sync(ref e)) if matches!(**e, SyncError::PeerAlreadyExists(_)) => {
-                        // Peer already exists, that's fine - just continue with handshake result
-                    }
-                    Err(e) => return Err(e),
-                }
-
-                // Successfully connected to peer
-                Ok(handshake_resp.public_key)
+                .into());
             }
-            SyncResponse::Error(msg) => Err(SyncError::HandshakeFailed(msg).into()),
-            _ => Err(SyncError::HandshakeFailed("Unexpected response type".to_string()).into()),
-        }
-    }
 
+            // Verify the server's signature on our challenge
+            let verification_result = verify_challenge_response(
+                &challenge,
+                &handshake_resp.challenge_response,
+                &handshake_resp.public_key,
+            );
+
+            verification_result.map_err(|e| {
+                SyncError::HandshakeFailed(format!("Signature verification failed: {e}"))
+            })?;
+
+            // Add peer to sync tree
+            let signing_key = instance.signing_key()?.clone();
+            let sync_tree = crate::Database::open(&instance, &sync_tree_id)
+                .await?
+                .with_key(signing_key);
+            let txn = sync_tree.new_transaction().await?;
+            let peer_manager = PeerManager::new(&txn);
+
+            // Try to register peer, but ignore if already exists
+            match peer_manager
+                .register_peer(
+                    &handshake_resp.public_key,
+                    handshake_resp.display_name.as_deref(),
+                )
+                .await
+            {
+                Ok(_) => {
+                    txn.commit().await?;
+                }
+                Err(Error::Sync(ref e)) if matches!(**e, SyncError::PeerAlreadyExists(_)) => {
+                    // Peer already exists, that's fine - just continue with handshake result
+                }
+                Err(e) => return Err(e),
+            }
+
+            // Successfully connected to peer
+            Ok(handshake_resp.public_key)
+        }
+        SyncResponse::Error(msg) => Err(SyncError::HandshakeFailed(msg).into()),
+        _ => Err(SyncError::HandshakeFailed("Unexpected response type".to_string()).into()),
+    }
+}
+
+impl BackgroundSync {
     /// Handle bootstrap response by storing root and all entries
     pub(super) async fn handle_bootstrap_response(
         &self,

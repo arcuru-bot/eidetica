@@ -301,3 +301,53 @@ async fn a_stale_address_does_not_hide_a_working_one() {
         server_sync.stop_server().await.unwrap();
     }
 }
+
+/// A hung handshake must not stall a handshake with a different peer.
+///
+/// Same defect as `a_hung_request_does_not_block_an_unrelated_one`, on the
+/// command most exposed to it: a handshake is aimed at a peer the engine has
+/// never reached, which is exactly the peer most likely not to be there.
+#[tokio::test]
+async fn a_hung_handshake_does_not_block_an_unrelated_one() {
+    use std::{sync::Arc, time::Duration};
+
+    let (_server_db, sync_server) = setup().await;
+    sync_server
+        .register_transport("http", HttpTransport::builder().bind("127.0.0.1:0"))
+        .await
+        .unwrap();
+    sync_server.accept_connections().await.unwrap();
+    let live = Address::http(sync_server.get_server_address().await.unwrap());
+
+    // Completes the TCP handshake, then never answers — what a peer that went
+    // away behind a live NAT looks like. Nothing fails fast.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let black_hole = Address::http(listener.local_addr().unwrap().to_string());
+    let accepting = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((conn, _)) = listener.accept().await {
+            held.push(conn);
+        }
+    });
+
+    let (_client_db, client) = setup().await;
+    client
+        .register_transport("http", HttpTransport::builder())
+        .await
+        .unwrap();
+    let client = Arc::new(client);
+
+    let hung = {
+        let client = Arc::clone(&client);
+        tokio::spawn(async move { client.connect_to_peer(&black_hole).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let served = tokio::time::timeout(Duration::from_secs(5), client.connect_to_peer(&live)).await;
+
+    hung.abort();
+    accepting.abort();
+
+    let served = served.expect("a reachable peer's handshake was starved by a hung one");
+    served.expect("handshake with the healthy peer failed");
+}
