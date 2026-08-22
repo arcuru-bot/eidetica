@@ -180,6 +180,13 @@ pub struct BackgroundSync {
 /// where the work stops being dominated by any single unreachable peer.
 const MAX_CONCURRENT_PEER_SYNCS: usize = 16;
 
+/// Bound on a single registration handshake while a route is being selected.
+///
+/// It covers the handshake only. The transfer that follows runs outside it, so
+/// a legitimately large exchange is never cut short by a connect-shaped deadline
+/// — the transports impose their own read-silence timeouts for that.
+const ADDRESS_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl BackgroundSync {
     /// Start the background sync engine and return a command sender.
     ///
@@ -505,24 +512,32 @@ impl BackgroundSync {
         Ok(())
     }
 
-    /// Try an operation against multiple addresses concurrently, returning the
-    /// first success.
+    /// Race bounded registration handshakes and return the first usable route
+    /// **to `expected`**.
     ///
     /// For each address a transport handle is obtained via
     /// [`TransportManager::handle_for_address`]. One task is spawned per
-    /// address, each subject to a 30-second timeout. Returns as soon as any
-    /// task succeeds. Remaining tasks are **not** cancelled — they continue
-    /// running so that additional peer connections can be established and
-    /// registered for future syncs.
+    /// address, each subject to [`ADDRESS_ATTEMPT_TIMEOUT`]. Remaining
+    /// handshakes are **not** cancelled — they continue running so that
+    /// additional addresses can be registered by the remote peer. The caller
+    /// performs the real operation once on the selected route, outside this
+    /// timeout.
+    ///
+    /// A handshake identifies who actually answered, and only a route that
+    /// answers as `expected` is selected. A peer's address list only ever grows,
+    /// so a stale entry can be reoccupied by an unrelated node; that node
+    /// completes a handshake perfectly well. Taking it as the route would send
+    /// this peer's traffic to a stranger and, worse, stop the working address
+    /// behind it from ever being tried — the exact failure this whole path
+    /// exists to remove.
     ///
     /// If no address has a matching transport an error is returned. If all
     /// tasks fail the last error is returned.
-    async fn try_addresses_concurrently<F, Fut, T>(&self, addresses: &[Address], f: F) -> Result<T>
-    where
-        T: Send + 'static,
-        F: Fn(std::sync::Arc<dyn SyncTransport>, Address) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<T>> + Send + 'static,
-    {
+    async fn select_route(
+        &self,
+        addresses: &[Address],
+        expected: &PublicKey,
+    ) -> Result<(std::sync::Arc<dyn SyncTransport>, Address)> {
         // Collect transport handles upfront (before any spawn).
         let mut tasks: Vec<(std::sync::Arc<dyn SyncTransport>, Address)> = Vec::new();
         for addr in addresses {
@@ -541,18 +556,28 @@ impl BackgroundSync {
 
         for (transport, addr) in tasks {
             let tx = tx.clone();
-            let fut = f(transport, addr.clone());
+            let mut ctx = self.handshake_ctx(&addr)?;
+            ctx.transport = Arc::clone(&transport);
             let addr_info = addr.clone();
             tokio::spawn(async move {
-                let result = tokio::time::timeout(Duration::from_secs(30), fut).await;
+                let result = tokio::time::timeout(
+                    ADDRESS_ATTEMPT_TIMEOUT,
+                    conn::run_handshake(ctx, addr.clone()),
+                )
+                .await;
                 let result = match result {
-                    Ok(inner) => inner,
+                    Ok(Ok(answered)) => Ok((transport, addr, answered)),
+                    Ok(Err(error)) => Err(error),
                     Err(_) => {
                         warn!(
                             address = ?addr_info,
-                            "Address attempt timed out after 30s",
+                            timeout = ?ADDRESS_ATTEMPT_TIMEOUT,
+                            "Address attempt timed out",
                         );
-                        Err(SyncError::Network("Address attempt timed out after 30s".into()).into())
+                        Err(SyncError::Network(format!(
+                            "Address attempt timed out after {ADDRESS_ATTEMPT_TIMEOUT:?}"
+                        ))
+                        .into())
                     }
                 };
                 let _ = tx.send(result).await;
@@ -563,7 +588,23 @@ impl BackgroundSync {
         let mut last_err = None;
         while let Some(result) = rx.recv().await {
             match result {
-                Ok(val) => return Ok(val),
+                Ok((transport, addr, answered)) if &answered == expected => {
+                    return Ok((transport, addr));
+                }
+                Ok((_, addr, answered)) => {
+                    warn!(
+                        address = ?addr,
+                        expected = %expected,
+                        answered = %answered,
+                        "Address answered as a different peer; not selecting it as the route"
+                    );
+                    last_err = Some(
+                        SyncError::HandshakeFailed(format!(
+                            "{addr:?} answered as {answered}, not {expected}"
+                        ))
+                        .into(),
+                    );
+                }
                 Err(e) => last_err = Some(e),
             }
         }
@@ -602,12 +643,8 @@ impl BackgroundSync {
             (addresses, request)
         }; // Transaction is dropped here
 
-        let response = self
-            .try_addresses_concurrently(&addresses, move |transport, addr| {
-                let request = request.clone();
-                async move { transport.send_request(&addr, &request).await }
-            })
-            .await?;
+        let (transport, address) = self.select_route(&addresses, peer.public_key()).await?;
+        let response = transport.send_request(&address, &request).await?;
 
         match response {
             SyncResponse::Ack | SyncResponse::Count(_) => Ok(()),
@@ -839,22 +876,10 @@ impl BackgroundSync {
                 return Ok(()); // No trees to sync
             }
 
-            // Try all addresses concurrently to find a reachable one. A
-            // lightweight empty SendEntries probe is used — the peer will Ack
-            // it without side effects if it is reachable.
-            let address = self
-                .try_addresses_concurrently(&addresses, |transport, addr| async move {
-                    let request = SyncRequest::SendEntries(Vec::new());
-                    let response = transport.send_request(&addr, &request).await?;
-                    match response {
-                        SyncResponse::Ack | SyncResponse::Count(_) => Ok(addr.clone()),
-                        _ => Err(SyncError::Network(
-                            "Probe request got unexpected response".into(),
-                        )
-                        .into()),
-                    }
-                })
-                .await?;
+            // Race bounded handshakes to select one route. Other successful
+            // handshakes may finish registration, but only the selected route
+            // continues into the tree exchange.
+            let (_transport, address) = self.select_route(&addresses, peer_id.public_key()).await?;
 
             info!(peer = %peer_id, tree_count = sync_trees.len(), "Synchronizing trees with peer");
 

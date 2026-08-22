@@ -62,7 +62,7 @@ impl Sync {
         let peer = peer_pubkey.clone();
         let tree = tree_id.clone();
         let key = signing_key.cloned();
-        self.race_addresses(&addresses, peer_pubkey, move |sync, addr| {
+        self.with_selected_address(&addresses, peer_pubkey, move |sync, addr| {
             let peer = peer.clone();
             let tree = tree.clone();
             let key = key.clone();
@@ -661,10 +661,9 @@ impl Sync {
 
     /// Sync with a peer using a [`DatabaseTicket`].
     ///
-    /// Attempts [`sync_with_peer`](Self::sync_with_peer) for every address
-    /// hint in the ticket concurrently. Each address may point to a different
-    /// peer, so connections are independent. Succeeds if at least one address
-    /// syncs successfully; returns the last error if all fail.
+    /// Races bounded handshakes against every address hint, then performs the
+    /// tree exchange once through the first usable route. Other successful
+    /// handshakes may finish peer registration in the background.
     ///
     /// # Arguments
     /// * `ticket` - A ticket containing the database ID and address hints.
@@ -674,11 +673,10 @@ impl Sync {
     /// Returns the last sync error if no address succeeded.
     pub async fn sync_with_ticket(&self, ticket: &DatabaseTicket) -> Result<()> {
         let database_id = ticket.database_id().clone();
-        self.try_addresses_concurrently(ticket.addresses(), |sync, addr| {
-            let db_id = database_id.clone();
-            async move { sync.sync_with_peer(&addr, Some(&db_id)).await }
-        })
-        .await
+        let (address, peer_pubkey) = self.select_address(ticket.addresses(), None).await?;
+        self.add_peer_address(&peer_pubkey, address.clone()).await?;
+        self.sync_tree_with_peer_at(&address, &peer_pubkey, &database_id, None)
+            .await
     }
 
     /// Sync a specific tree with a peer, with optional authentication for bootstrap.
@@ -709,7 +707,7 @@ impl Sync {
         let tree = tree_id.clone();
         let key = requesting_key.cloned();
         let key_name = requesting_key_name.map(str::to_string);
-        self.race_addresses(&addresses, peer_pubkey, move |sync, addr| {
+        self.with_selected_address(&addresses, peer_pubkey, move |sync, addr| {
             let peer = peer.clone();
             let tree = tree.clone();
             let key = key.clone();
@@ -733,7 +731,7 @@ impl Sync {
 
     /// One address's attempt at [`Self::sync_tree_with_peer_auth`].
     #[allow(clippy::too_many_arguments)]
-    async fn sync_tree_with_peer_auth_at(
+    pub(super) async fn sync_tree_with_peer_auth_at(
         &self,
         address: &Address,
         peer_pubkey: &PublicKey,
@@ -895,7 +893,7 @@ impl Sync {
         Ok(peer_info.addresses)
     }
 
-    /// Try every address a peer has, concurrently, and take the first that works.
+    /// Select a route with bounded handshakes, then run the real operation once.
     ///
     /// A peer's address list only ever grows: anything that changes address on
     /// restart appends a new entry and leaves the old one in place. Dialing just
@@ -913,7 +911,7 @@ impl Sync {
     /// specific variants (`BootstrapPending`, for one), so it must not be
     /// flattened into a connectivity error. The attempted addresses are logged
     /// instead, since a bare timeout naming no address is not actionable.
-    async fn race_addresses<F, Fut>(
+    async fn with_selected_address<F, Fut>(
         &self,
         addresses: &[Address],
         peer_pubkey: &PublicKey,
@@ -923,7 +921,10 @@ impl Sync {
         F: Fn(Sync, Address) -> Fut,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        let result = self.try_addresses_concurrently(addresses, f).await;
+        let result = match self.select_address(addresses, Some(peer_pubkey)).await {
+            Ok((address, _)) => f(self.clone(), address).await,
+            Err(error) => Err(error),
+        };
         if let Err(e) = &result {
             warn!(
                 peer = %peer_pubkey,
@@ -936,29 +937,33 @@ impl Sync {
     }
 
     /// Timeout applied to each address attempt in
-    /// [`try_addresses_concurrently`](Self::try_addresses_concurrently).
+    /// [`select_address`](Self::select_address).
     const ADDRESS_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-    /// Try an operation against multiple addresses concurrently, returning on
-    /// the first success.
+    /// Race registration handshakes and return the first usable address, along
+    /// with the identity that answered on it.
     ///
-    /// Spawns one detached task per address via [`tokio::spawn`]. Returns as
-    /// soon as any task succeeds. Remaining tasks are **not** cancelled — they
-    /// continue running in the background so that additional peer connections
-    /// can be established and registered for future syncs. Each task is subject
-    /// to [`ADDRESS_ATTEMPT_TIMEOUT`](Self::ADDRESS_ATTEMPT_TIMEOUT).
+    /// Spawns one detached task per address via [`tokio::spawn`]. Remaining
+    /// tasks are **not** cancelled — they continue running in the background so
+    /// that additional addresses can be registered for future syncs. The real
+    /// operation runs separately and is therefore not bounded by this timeout.
+    ///
+    /// `expected` is the peer the caller means to reach, when it knows. A
+    /// handshake says who actually answered, and a route that answers as
+    /// somebody else is rejected rather than selected: a peer's address list
+    /// only ever grows, so a stale entry can be reoccupied by an unrelated node
+    /// that handshakes perfectly well, and selecting it would both misdirect the
+    /// exchange and stop the working address behind it from ever being tried.
+    /// Ticket paths pass `None` — a ticket's whole purpose is to learn an
+    /// identity the caller does not yet have.
     ///
     /// If all tasks fail the last error is returned. If `addresses` is empty
     /// an [`SyncError::InvalidAddress`] error is returned.
-    pub(super) async fn try_addresses_concurrently<F, Fut>(
+    pub(super) async fn select_address(
         &self,
         addresses: &[Address],
-        f: F,
-    ) -> Result<()>
-    where
-        F: Fn(Sync, Address) -> Fut,
-        Fut: Future<Output = Result<()>> + Send + 'static,
-    {
+        expected: Option<&PublicKey>,
+    ) -> Result<(Address, PublicKey)> {
         if addresses.is_empty() {
             return Err(SyncError::InvalidAddress("Ticket has no address hints".into()).into());
         }
@@ -967,13 +972,19 @@ impl Sync {
 
         for addr in addresses {
             let tx = tx.clone();
-            let fut = f(self.clone(), addr.clone());
+            let sync = self.clone();
+            let addr = addr.clone();
             let addr_info = addr.clone();
             // Detached spawn: the task keeps running even after we return.
             tokio::spawn(async move {
-                let result = tokio::time::timeout(Self::ADDRESS_ATTEMPT_TIMEOUT, fut).await;
+                let result = tokio::time::timeout(
+                    Self::ADDRESS_ATTEMPT_TIMEOUT,
+                    sync.connect_to_peer(&addr),
+                )
+                .await;
                 let result = match result {
-                    Ok(inner) => inner,
+                    Ok(Ok(peer_pubkey)) => Ok((addr, peer_pubkey)),
+                    Ok(Err(error)) => Err(error),
                     Err(_) => {
                         warn!(
                             address = ?addr_info,
@@ -988,7 +999,7 @@ impl Sync {
                     }
                 };
                 match &result {
-                    Ok(()) => debug!(address = ?addr_info, "Address attempt succeeded"),
+                    Ok(_) => debug!(address = ?addr_info, "Address attempt succeeded"),
                     Err(e) => debug!(address = ?addr_info, error = %e, "Address attempt failed"),
                 }
                 // Ignore send errors — the receiver is dropped on early success,
@@ -1002,7 +1013,23 @@ impl Sync {
         let mut last_err = None;
         while let Some(result) = rx.recv().await {
             match result {
-                Ok(()) => return Ok(()),
+                Ok((addr, answered)) => match expected {
+                    Some(want) if want != &answered => {
+                        warn!(
+                            address = ?addr,
+                            expected = %want,
+                            answered = %answered,
+                            "Address answered as a different peer; not selecting it as the route"
+                        );
+                        last_err = Some(
+                            SyncError::HandshakeFailed(format!(
+                                "{addr:?} answered as {answered}, not {want}"
+                            ))
+                            .into(),
+                        );
+                    }
+                    _ => return Ok((addr, answered)),
+                },
                 Err(e) => last_err = Some(e),
             }
         }

@@ -351,3 +351,87 @@ async fn a_hung_handshake_does_not_block_an_unrelated_one() {
     let served = served.expect("a reachable peer's handshake was starved by a hung one");
     served.expect("handshake with the healthy peer failed");
 }
+
+/// Forward to `target`, but stall `delay` before opening the upstream connection.
+///
+/// Used to fix the outcome of an address race. Two live HTTP servers on loopback
+/// both answer in single-digit milliseconds, so which one wins is a coin toss —
+/// and a coin-toss regression passes half the time, which is worse than no test.
+async fn delaying_proxy(target: String, delay: std::time::Duration) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        while let Ok((mut inbound, _)) = listener.accept().await {
+            let target = target.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if let Ok(mut outbound) = tokio::net::TcpStream::connect(&target).await {
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// An address that answers as somebody else must not be taken as the route.
+///
+/// Racing handshakes across a peer's addresses picks a route, but a handshake
+/// also says *who answered*. A peer's address list only ever grows, so a stale
+/// entry can be reoccupied by an unrelated node — which completes a handshake
+/// perfectly well. Selecting that node both misdirects the exchange and, because
+/// the route is chosen once, stops the working address behind it from ever being
+/// tried: precisely the permanent unreachability this path exists to remove,
+/// reintroduced one layer up.
+///
+/// The stranger is made to win the race outright by putting the real server
+/// behind a delaying proxy, so a route selector that ignores identity fails here
+/// every run rather than half of them.
+#[tokio::test]
+async fn an_address_answering_as_another_peer_does_not_hide_the_real_one() {
+    use std::time::Duration;
+
+    let (_si, _su, _sk, _sdb, tree_id, server_sync) =
+        setup_public_sync_enabled_server("server_user", "server_key", "db").await;
+    let _real = start_sync_server(&server_sync).await;
+    let real_raw = server_sync.get_server_address_for("http").await.unwrap();
+
+    // A second, unrelated node: live, speaking the protocol, and not our peer.
+    let (_oi, _ou, _ok, other_sync) = setup_sync_enabled_client("other_user", "other_key").await;
+    let stranger = start_sync_server(&other_sync).await;
+
+    let slow_real = Address::http(delaying_proxy(real_raw, Duration::from_millis(750)).await);
+
+    let (client_instance, _cu, _ck, client_sync) =
+        setup_sync_enabled_client("client_user", "client_key").await;
+    client_sync
+        .register_transport("http", HttpTransport::builder())
+        .await
+        .unwrap();
+
+    let server_pubkey = server_sync.get_device_pubkey().unwrap();
+    client_sync
+        .register_peer(&server_pubkey, Some("server"))
+        .await
+        .unwrap();
+    for addr in [stranger, slow_real] {
+        client_sync
+            .add_peer_address(&server_pubkey, addr)
+            .await
+            .unwrap();
+    }
+
+    client_sync
+        .sync_tree_with_peer(&server_pubkey, &tree_id)
+        .await
+        .expect("a stranger winning the handshake race hid the real peer");
+    client_sync.flush().await.ok();
+
+    assert!(
+        client_instance.has_database(&tree_id).await,
+        "tree did not arrive from the peer we asked for"
+    );
+
+    server_sync.stop_server().await.unwrap();
+    other_sync.stop_server().await.unwrap();
+}

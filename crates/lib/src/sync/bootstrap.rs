@@ -133,9 +133,8 @@ impl Sync {
 
     /// Bootstrap with a peer using a [`DatabaseTicket`].
     ///
-    /// Tries every address hint in the ticket concurrently. Succeeds if at
-    /// least one address connects and syncs; returns the last error if all
-    /// fail.
+    /// Races bounded handshakes against every address hint, then performs the
+    /// bootstrap exchange once through the first usable route.
     ///
     /// # Arguments
     /// * `ticket` - A ticket containing the database ID and address hints.
@@ -159,23 +158,17 @@ impl Sync {
         let database_id = ticket.database_id().clone();
         let signing_key = requesting_key.clone();
         let key_name = requesting_key_name.to_string();
-        self.try_addresses_concurrently(ticket.addresses(), |sync, addr| {
-            let db_id = database_id.clone();
-            let signing_key = signing_key.clone();
-            let key_name = key_name.clone();
-            let metadata = metadata.clone();
-            async move {
-                sync.sync_with_peer_for_bootstrap_internal(
-                    &addr,
-                    &db_id,
-                    &signing_key,
-                    &key_name,
-                    requested_permission,
-                    metadata,
-                )
-                .await
-            }
-        })
+        let (address, peer_pubkey) = self.select_address(ticket.addresses(), None).await?;
+        self.add_peer_address(&peer_pubkey, address.clone()).await?;
+        self.sync_tree_with_peer_auth_at(
+            &address,
+            &peer_pubkey,
+            &database_id,
+            Some(&signing_key),
+            Some(&key_name),
+            Some(requested_permission),
+            metadata,
+        )
         .await
     }
 
