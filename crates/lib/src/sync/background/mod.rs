@@ -215,6 +215,33 @@ impl BackgroundSync {
             .ok_or_else(|| SyncError::InstanceDropped.into())
     }
 
+    /// Collect what a handshake needs so it can run off the command loop.
+    ///
+    /// Everything gathered here is either a cheap handle or local engine state
+    /// (the listen addresses), so the borrow ends before the handshake starts.
+    fn handshake_ctx(&self, address: &Address) -> Result<conn::HandshakeCtx> {
+        let transport = self
+            .transport_manager
+            .handle_for_address(address)
+            .ok_or_else(|| SyncError::NoTransportForAddress {
+                address: address.clone(),
+            })?;
+        Ok(conn::HandshakeCtx {
+            transport,
+            instance: self.instance.clone(),
+            sync_tree_id: self.sync_tree_id.clone(),
+            listen_addresses: self
+                .transport_manager
+                .get_all_server_addresses()
+                .into_iter()
+                .map(|(transport_type, addr)| Address {
+                    transport_type,
+                    address: addr,
+                })
+                .collect(),
+        })
+    }
+
     /// Get the sync tree for accessing peer data
     pub(super) async fn get_sync_tree(&self) -> Result<Database> {
         // Load sync tree with the device key
@@ -403,8 +430,21 @@ impl BackgroundSync {
             }
 
             SyncCommand::ConnectToPeer { address, response } => {
-                let result = self.connect_to_peer(&address).await;
-                let _ = response.send(result);
+                // Served off the loop, for the same reason as SendRequest
+                // below: a handshake is aimed at a peer this engine has never
+                // reached, which is precisely the peer most likely not to be
+                // there. Awaiting it inline hands the whole engine to a
+                // stranger for a full connect deadline.
+                match self.handshake_ctx(&address) {
+                    Ok(ctx) => {
+                        tokio::spawn(async move {
+                            let _ = response.send(conn::run_handshake(ctx, address).await);
+                        });
+                    }
+                    Err(e) => {
+                        let _ = response.send(Err(e));
+                    }
+                }
             }
 
             SyncCommand::SendRequest {
