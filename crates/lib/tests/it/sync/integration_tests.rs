@@ -234,3 +234,70 @@ async fn a_hung_request_does_not_block_an_unrelated_one() {
     let served = served.expect("a healthy peer was starved by an unrelated hung request");
     served.expect("sending to the healthy peer failed");
 }
+
+/// A stale address must not hide a working one, whichever order they sit in.
+///
+/// A peer's address list only grows — anything that changes address on restart
+/// appends and leaves the old entry behind — so a peer that has ever moved is
+/// the normal case, not an edge case. Dialing only one entry makes such a peer
+/// permanently unreachable while it is up and serving, and the failure presents
+/// as a timeout, which reads as "the peer is down".
+///
+/// Both orders are checked because passing in only one is exactly what a
+/// first-address implementation does.
+#[tokio::test]
+async fn a_stale_address_does_not_hide_a_working_one() {
+    for stale_first in [true, false] {
+        let (_si, _su, _sk, _sdb, tree_id, server_sync) =
+            setup_public_sync_enabled_server("server_user", "server_key", "db").await;
+        let live = start_sync_server(&server_sync).await;
+
+        // Bind then drop, so the port is free: connecting is refused rather
+        // than hanging, which keeps the test quick while still being an
+        // address that cannot serve.
+        let dead = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap().to_string();
+            drop(l);
+            Address::http(addr)
+        };
+
+        let (client_instance, _cu, _ck, client_sync) =
+            setup_sync_enabled_client("client_user", "client_key").await;
+        client_sync
+            .register_transport("http", HttpTransport::builder())
+            .await
+            .unwrap();
+
+        let server_pubkey = server_sync.get_device_pubkey().unwrap();
+        client_sync
+            .register_peer(&server_pubkey, Some("server"))
+            .await
+            .unwrap();
+        let order = if stale_first {
+            [dead, live]
+        } else {
+            [live, dead]
+        };
+        for addr in order {
+            client_sync
+                .add_peer_address(&server_pubkey, addr)
+                .await
+                .unwrap();
+        }
+
+        client_sync
+            .sync_tree_with_peer(&server_pubkey, &tree_id)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("sync failed with stale_first={stale_first}: {e}");
+            });
+        client_sync.flush().await.ok();
+
+        assert!(
+            client_instance.has_database(&tree_id).await,
+            "tree did not arrive with stale_first={stale_first}"
+        );
+        server_sync.stop_server().await.unwrap();
+    }
+}
