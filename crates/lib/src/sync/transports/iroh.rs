@@ -627,13 +627,7 @@ impl SyncTransport for IrohTransport {
     }
 
     async fn start_server(&self, handler: Arc<dyn SyncHandler>) -> Result<()> {
-        // Check if server is already running
-        if self.server_state.is_running() {
-            return Err(SyncError::ServerAlreadyRunning {
-                address: "iroh-endpoint".to_string(),
-            }
-            .into());
-        }
+        let start = self.server_state.begin_start("iroh-endpoint")?;
 
         // Ensure we have an endpoint and get EndpointAddr with direct addresses
         let endpoint = self.ensure_endpoint().await?;
@@ -657,8 +651,7 @@ impl SyncTransport for IrohTransport {
         wait_for_ready(ready_rx, "iroh-endpoint").await?;
 
         // Start server state with EndpointAddr string and shutdown sender
-        self.server_state
-            .server_started(endpoint_addr_str, shutdown_tx);
+        start.complete(endpoint_addr_str, shutdown_tx);
 
         Ok(())
     }

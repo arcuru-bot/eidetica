@@ -226,13 +226,7 @@ impl SyncTransport for HttpTransport {
             return Ok(());
         };
 
-        // Check if server is already running
-        if self.server_state.is_running() {
-            return Err(SyncError::ServerAlreadyRunning {
-                address: effective_addr.to_string(),
-            }
-            .into());
-        }
+        let start = self.server_state.begin_start(effective_addr)?;
 
         let socket_addr: SocketAddr =
             effective_addr.parse().map_err(|e| SyncError::ServerBind {
@@ -249,15 +243,29 @@ impl SyncTransport for HttpTransport {
         // Create a channel to get the actual bound address back
         let (addr_tx, addr_rx) = oneshot::channel::<SocketAddr>();
 
+        let listener = match tokio::net::TcpListener::bind(socket_addr).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                return Err(SyncError::ServerBind {
+                    address: effective_addr.to_string(),
+                    reason: error.to_string(),
+                }
+                .into());
+            }
+        };
+        let actual_addr = match listener.local_addr() {
+            Ok(address) => address,
+            Err(error) => {
+                return Err(SyncError::ServerBind {
+                    address: effective_addr.to_string(),
+                    reason: error.to_string(),
+                }
+                .into());
+            }
+        };
+
         // Spawn server task
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(socket_addr)
-                .await
-                .expect("Failed to bind address");
-
-            // Get the actual bound address (important for port 0)
-            let actual_addr = listener.local_addr().expect("Failed to get local address");
-
             // Send the actual address back
             let _ = addr_tx.send(actual_addr);
 
@@ -266,7 +274,7 @@ impl SyncTransport for HttpTransport {
 
             // Run server with graceful shutdown
             // Convert router to service with ConnectInfo support
-            axum::serve(
+            if let Err(error) = axum::serve(
                 listener,
                 router.into_make_service_with_connect_info::<SocketAddr>(),
             )
@@ -274,21 +282,28 @@ impl SyncTransport for HttpTransport {
                 let _ = shutdown_rx.await;
             })
             .await
-            .expect("Server failed");
+            {
+                tracing::error!(%error, "HTTP sync server failed");
+            }
         });
 
-        // Get the actual bound address
-        let actual_addr = addr_rx.await.map_err(|_| SyncError::ServerBind {
-            address: effective_addr.to_string(),
-            reason: "Failed to get actual server address".to_string(),
-        })?;
+        // Confirm the server task published the address it bound.
+        let actual_addr = match addr_rx.await {
+            Ok(address) => address,
+            Err(_) => {
+                return Err(SyncError::ServerBind {
+                    address: effective_addr.to_string(),
+                    reason: "Failed to get actual server address".to_string(),
+                }
+                .into());
+            }
+        };
 
         // Wait for server to be ready
         wait_for_ready(ready_rx, effective_addr).await?;
 
         // Start server state with address and shutdown sender
-        self.server_state
-            .server_started(actual_addr.to_string(), shutdown_tx);
+        start.complete(actual_addr.to_string(), shutdown_tx);
 
         Ok(())
     }

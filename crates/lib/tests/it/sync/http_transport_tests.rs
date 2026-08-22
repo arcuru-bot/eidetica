@@ -48,6 +48,46 @@ async fn test_http_transport_double_start_error() {
 }
 
 #[tokio::test]
+async fn test_http_transport_concurrent_start_error() {
+    let transport = HttpTransport::builder()
+        .bind("127.0.0.1:0")
+        .build_sync()
+        .unwrap();
+
+    let (_instance1, handler1) = super::helpers::setup_test_handler().await;
+    let (_instance2, handler2) = super::helpers::setup_test_handler().await;
+    let (first, second) = tokio::join!(
+        transport.start_server(handler1),
+        transport.start_server(handler2)
+    );
+
+    assert_ne!(
+        first.is_ok(),
+        second.is_ok(),
+        "exactly one concurrent start must succeed"
+    );
+    transport.stop_server().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_http_transport_failed_start_can_retry() {
+    let blocker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = blocker.local_addr().unwrap();
+    let transport = HttpTransport::builder()
+        .bind(address.to_string())
+        .build_sync()
+        .unwrap();
+
+    let (_instance1, handler1) = super::helpers::setup_test_handler().await;
+    assert!(transport.start_server(handler1).await.is_err());
+
+    drop(blocker);
+    let (_instance2, handler2) = super::helpers::setup_test_handler().await;
+    transport.start_server(handler2).await.unwrap();
+    transport.stop_server().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_http_transport_stop_without_start() {
     let transport = HttpTransport::builder()
         .bind("127.0.0.1:0")

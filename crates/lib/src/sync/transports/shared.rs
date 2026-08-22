@@ -24,8 +24,16 @@ pub struct ServerState {
     inner: Mutex<ServerStateInner>,
 }
 
+/// A cancellation-safe reservation for starting one server.
+pub(super) struct ServerStart<'a> {
+    state: &'a ServerState,
+    completed: bool,
+}
+
 struct ServerStateInner {
-    /// Whether the server is running.
+    /// Whether the server is starting or running.
+    active: bool,
+    /// Whether startup completed and the server is accepting requests.
     running: bool,
     /// Shutdown signal for the server loop.
     shutdown: Option<oneshot::Sender<()>>,
@@ -44,11 +52,30 @@ impl ServerState {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(ServerStateInner {
+                active: false,
                 running: false,
                 shutdown: None,
                 address: None,
             }),
         }
+    }
+
+    /// Reserve this transport for startup.
+    ///
+    /// Dropping the returned guard before startup completes releases the
+    /// reservation, including when the startup future is cancelled.
+    pub(super) fn begin_start(&self, address: &str) -> Result<ServerStart<'_>, SyncError> {
+        let mut inner = self.lock();
+        if inner.active {
+            return Err(SyncError::ServerAlreadyRunning {
+                address: address.to_string(),
+            });
+        }
+        inner.active = true;
+        Ok(ServerStart {
+            state: self,
+            completed: false,
+        })
     }
 
     /// Check if the server is currently running.
@@ -64,13 +91,13 @@ impl ServerState {
             .ok_or(SyncError::ServerNotRunning)
     }
 
-    /// Start the server by setting it as running with the given address and shutdown sender.
-    /// This combines the commonly used pair: set_running + set_shutdown_sender.
-    pub fn server_started(&self, address: String, shutdown_sender: oneshot::Sender<()>) {
+    /// Release a startup reservation after startup fails.
+    fn startup_failed(&self) {
         let mut inner = self.lock();
-        inner.running = true;
-        inner.address = Some(address);
-        inner.shutdown = Some(shutdown_sender);
+        inner.active = false;
+        inner.running = false;
+        inner.address = None;
+        inner.shutdown = None;
     }
 
     /// Stop the server by triggering shutdown and clearing state.
@@ -82,6 +109,7 @@ impl ServerState {
             let _ = tx.send(());
         }
         // Then mark as stopped and clear address
+        inner.active = false;
         inner.running = false;
         inner.address = None;
     }
@@ -94,6 +122,26 @@ impl ServerState {
     /// is taken as-is and the next start/stop corrects it.
     fn lock(&self) -> std::sync::MutexGuard<'_, ServerStateInner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl ServerStart<'_> {
+    /// Mark startup complete and install the running server state.
+    pub(super) fn complete(mut self, address: String, shutdown_sender: oneshot::Sender<()>) {
+        let mut inner = self.state.lock();
+        debug_assert!(inner.active);
+        inner.running = true;
+        inner.address = Some(address);
+        inner.shutdown = Some(shutdown_sender);
+        self.completed = true;
+    }
+}
+
+impl Drop for ServerStart<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.state.startup_failed();
+        }
     }
 }
 
