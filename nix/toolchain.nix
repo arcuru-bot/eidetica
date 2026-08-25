@@ -172,6 +172,14 @@
       CARGO_PROFILE = "release";
     };
 
+  # The production binary's feature policy. The release build and the guard
+  # share this value, and the assertion rejects broad feature activation before
+  # either can drift into it.
+  releaseCargoExtraArgs = let
+    args = "-p eidetica-bin";
+  in
+    assert !(lib.hasInfix "--all-features" args); args;
+
   # Bench arguments (uses bench profile artifacts)
   benchArgs =
     baseArgs
@@ -230,6 +238,7 @@ in {
     cargoArtifactsAsan
     cargoArtifactsLsan
     releaseArgs
+    releaseCargoExtraArgs
     benchArgs
     debugArgs
     debugArgsNightly
