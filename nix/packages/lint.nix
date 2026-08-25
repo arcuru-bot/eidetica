@@ -10,6 +10,7 @@
   baseArgs,
   baseArgsNightly,
   debugArgs,
+  releaseCargoExtraArgs,
   eidLib,
   treefmtWrapper,
   pkgs,
@@ -232,7 +233,7 @@
         pname = "release-features";
         cargoArtifacts = null;
         buildPhaseCargoCommand = ''
-          cargo tree -e features -p eidetica-bin > feature-graph.txt
+          cargo tree -e features ${releaseCargoExtraArgs} > feature-graph.txt
           if grep -F 'eidetica feature "testing"' feature-graph.txt; then
             echo "error: eidetica-bin's release feature graph enables the library's test-only 'testing' feature" >&2
             exit 1

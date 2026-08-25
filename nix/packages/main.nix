@@ -2,6 +2,7 @@
 {
   craneLib,
   releaseArgs,
+  releaseCargoExtraArgs,
   debugArgs,
 }: let
   eidetica-bin = craneLib.buildPackage (releaseArgs
@@ -12,7 +13,7 @@
       # passthrough to the library's test-only `testing` hooks. Default features
       # already resolve to the library's `full`. Enforced by the
       # `release-features` lint.
-      cargoExtraArgs = "-p eidetica-bin";
+      cargoExtraArgs = releaseCargoExtraArgs;
       doCheck = false; # Tests run separately with nextest
       meta = {
         description = "Eidetica binary";
