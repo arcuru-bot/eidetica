@@ -433,11 +433,22 @@ impl Database {
         root_id: &ID,
         identity: SigKey,
     ) -> Result<Self> {
-        instance.backend().get(root_id).await?;
+        // Probe through the identity-bound backend, not `instance.backend()`.
+        // The instance-level backend carries no per-handle identity, so it acts
+        // as the connection's login pubkey — and a user's login key is not a
+        // member of every tree they hold a key for. A database created under a
+        // per-database key (`User::add_private_key` + `create_database`) grants
+        // only that key, so probing as the login identity denies the existence
+        // check on a database the caller is authorised to open. `identity` has
+        // already been proof-of-possession registered into the connection's
+        // session keyset by the caller, so this is the same identity every
+        // subsequent read and write on the handle travels as.
+        let ops = Arc::new(RemoteBackend::new(conn, Some(identity)));
+        ops.get(root_id).await?;
         Ok(Self {
             root: root_id.clone(),
             instance: instance.downgrade(),
-            ops: Arc::new(RemoteBackend::new(conn, Some(identity))),
+            ops,
             key: None,
             allow_unverified: false,
         })
