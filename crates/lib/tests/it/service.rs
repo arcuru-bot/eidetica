@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use eidetica::Entry;
 use eidetica::Instance;
-use eidetica::auth::crypto::{create_challenge_response, sign_entry};
+use eidetica::auth::crypto::{create_challenge_response, generate_keypair, sign_entry};
 use eidetica::backend::database::InMemory;
 use eidetica::service::ServiceServer;
 use eidetica::service::protocol::{
@@ -899,6 +899,31 @@ async fn test_remote_database_ops_e2e() {
             "entries must be ordered by subtree height"
         );
     }
+}
+
+/// An authenticated connection must not be able to claim an unregistered
+/// identity for a database operation.
+#[tokio::test]
+async fn test_remote_operation_rejects_pubkey_absent_from_session_keyset() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (instance, root_id, _identity) = setup_db(&server, &socket_path, "alice").await;
+
+    // `setup_db` authenticated this connection as alice. This key has never
+    // been registered through the session-key proof-of-possession exchange.
+    let (_private_key, absent_pubkey) = generate_keypair();
+    let err = remote_conn(&instance)
+        .db_get_entry(
+            eidetica::entry::ID::default(),
+            eidetica::auth::types::SigKey::from_pubkey(&absent_pubkey),
+            root_id,
+        )
+        .await
+        .expect_err("server must reject a claimed pubkey absent from the session keyset");
+
+    assert!(
+        err.to_string().contains("not in the session keyset"),
+        "expected server rejection for a pubkey absent from the session keyset, got: {err}",
+    );
 }
 // === Change A: verification-gated SubmitSignedEntry ===
 //
@@ -2332,4 +2357,105 @@ async fn test_client_drop_releases_daemon_subscription() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("daemon still holds the subscription after the client dropped: {server:?}");
+}
+
+/// A user's non-default, per-database key must be usable to open that database
+/// over a service connection.
+///
+/// A `User` holds many keys, and `User::add_private_key` + `create_database`
+/// is the ordinary way to give one database its own signing identity. The
+/// resulting tree's `auth_settings` grant that per-database key and **not**
+/// the user's default key, which is also the pubkey the connection logged in
+/// with. Opening such a database from a connected instance must therefore
+/// travel as the per-database identity end to end — including the root-entry
+/// existence probe — or the daemon's per-tree gate denies a database the user
+/// legitimately holds a key for.
+#[tokio::test]
+async fn test_open_database_with_non_login_per_database_key() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    create_user_via_admin(&server, "alice").await;
+
+    // Server-side: give the database its own key, distinct from alice's
+    // default (login) key, and create it under that key so the tree's auth
+    // settings bind only the per-database key.
+    let mut server_user = server.login_user("alice", None).await.unwrap();
+    let login_key = server_user.get_default_key().unwrap();
+    let per_db_key = server_user.add_private_key(Some("per-db")).await.unwrap();
+    assert_ne!(
+        per_db_key, login_key,
+        "the per-database key must differ from the login key for this to be a real test"
+    );
+
+    let mut settings = eidetica::crdt::Doc::new();
+    settings.set("name", "per_db_key_database");
+    let root_id = server_user
+        .create_database(settings, &per_db_key)
+        .await
+        .unwrap()
+        .root_id()
+        .clone();
+
+    // Client: log in over the socket (session identity = the login key) and
+    // open the database under the per-database key.
+    let instance = Instance::connect(format!("unix://{}", socket_path.display()))
+        .await
+        .unwrap();
+    let user = instance.login_user("alice", None).await.unwrap();
+    assert_eq!(
+        user.get_default_key().unwrap(),
+        login_key,
+        "the connection's session identity is the login key"
+    );
+    assert_eq!(
+        user.find_key(&root_id).unwrap(),
+        Some(per_db_key.clone()),
+        "the user tracks the database under its per-database key"
+    );
+
+    let database = user
+        .open_database_with_key(&root_id, &per_db_key)
+        .await
+        .expect("opening a database under the user's own per-database key must be permitted");
+
+    assert_eq!(database.root_id(), &root_id);
+    // The handle must be usable, not merely constructible: a read travels as
+    // the per-database identity through the same gate.
+    let name = database.get_name().await.unwrap();
+    assert_eq!(name, "per_db_key_database");
+}
+
+/// Negative control for the test above: a key the user does not hold cannot be
+/// used to open the database, so the fix widens nothing beyond the user's own
+/// keys.
+#[tokio::test]
+async fn test_open_database_with_unheld_key_is_rejected() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    create_user_via_admin(&server, "alice").await;
+    create_user_via_admin(&server, "mallory").await;
+
+    let mut alice_server = server.login_user("alice", None).await.unwrap();
+    let alice_db_key = alice_server.add_private_key(Some("per-db")).await.unwrap();
+    let mut settings = eidetica::crdt::Doc::new();
+    settings.set("name", "alices_database");
+    let root_id = alice_server
+        .create_database(settings, &alice_db_key)
+        .await
+        .unwrap()
+        .root_id()
+        .clone();
+
+    let mallory_inst = Instance::connect(format!("unix://{}", socket_path.display()))
+        .await
+        .unwrap();
+    let mallory = mallory_inst.login_user("mallory", None).await.unwrap();
+
+    let err = mallory
+        .open_database_with_key(&root_id, &alice_db_key)
+        .await
+        .expect_err("a user must not open a database under a key they do not hold");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("key") || msg.contains("permission") || msg.contains("auth"),
+        "expected a key/permission error, got: {err}",
+    );
 }
