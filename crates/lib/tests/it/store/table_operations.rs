@@ -87,6 +87,376 @@ async fn test_table_basic_crud_operations() {
 }
 
 #[tokio::test]
+async fn test_table_load_is_lazy_and_projection_is_row_addressable() {
+    if std::env::var("TEST_BACKEND").as_deref() == Ok("service") {
+        return;
+    }
+    let ctx = TestContext::new().with_database().await;
+    let engine = ctx.database().backend().unwrap().local_engine().unwrap();
+    let memory = engine
+        .as_any()
+        .downcast_ref::<eidetica::backend::database::InMemory>()
+        .unwrap();
+    let txn = ctx.database().new_transaction().await.unwrap();
+    let before_load = memory.store_state_read_counts();
+    let table = txn
+        .get_store::<Table<SimpleRecord>>("lazy_rows")
+        .await
+        .unwrap();
+    assert_eq!(memory.store_state_read_counts(), before_load);
+    assert_eq!(
+        memory.store_state_record_count(ctx.database().root_id(), "lazy_rows"),
+        0
+    );
+
+    table.set("b", SimpleRecord { value: 2 }).await.unwrap();
+    table.set("a", SimpleRecord { value: 1 }).await.unwrap();
+    assert_eq!(table.get("a").await.unwrap().value, 1);
+    assert_eq!(
+        table
+            .scan_page(None, 1)
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        ["a"]
+    );
+    txn.commit().await.unwrap();
+
+    let before_load = memory.store_state_read_counts();
+    let viewer = ctx
+        .database()
+        .get_store_viewer::<Table<SimpleRecord>>("lazy_rows")
+        .await
+        .unwrap();
+    assert_eq!(memory.store_state_read_counts(), before_load);
+    assert_eq!(
+        memory.store_state_record_count(ctx.database().root_id(), "lazy_rows"),
+        0
+    );
+    let first = viewer.scan_page(None, 1).await.unwrap();
+    assert_eq!(first.rows[0].0, "a");
+    let second = viewer.scan_page(first.next.as_ref(), 1).await.unwrap();
+    assert_eq!(second.rows[0].0, "b");
+    assert!(second.next.is_none());
+    assert_eq!(
+        memory.store_state_record_count(ctx.database().root_id(), "lazy_rows"),
+        2
+    );
+    let after_scan = memory.store_state_read_counts();
+    assert_eq!(after_scan.0, before_load.0);
+    assert!(after_scan.1 > before_load.1);
+    assert!(after_scan.1 <= before_load.1 + 4);
+    assert_eq!(viewer.get("a").await.unwrap().value, 1);
+    let after_get = memory.store_state_read_counts();
+    assert_eq!(after_get, (after_scan.0 + 1, after_scan.1));
+
+    ctx.database()
+        .backend()
+        .unwrap()
+        .clear_derived_store_state()
+        .await
+        .unwrap();
+    assert_eq!(viewer.get("b").await.unwrap().value, 2);
+}
+
+#[tokio::test]
+async fn test_table_scan_merges_changes_across_page_boundaries() {
+    let ctx = TestContext::new().with_database().await;
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("paged_rows")
+        .await
+        .unwrap();
+    for (key, value) in [("a", 1), ("c", 3), ("e", 5)] {
+        table.set(key, SimpleRecord { value }).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("paged_rows")
+        .await
+        .unwrap();
+    table.set("b", SimpleRecord { value: 2 }).await.unwrap();
+    table.set("d", SimpleRecord { value: 4 }).await.unwrap();
+    assert!(table.delete("c").await.unwrap());
+
+    let empty = table.scan_page(None, 0).await.unwrap();
+    assert!(empty.rows.is_empty());
+    assert!(empty.next.is_none());
+
+    let first = table.scan_page(None, 2).await.unwrap();
+    assert_eq!(
+        first
+            .rows
+            .iter()
+            .map(|row| row.0.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    let second = table.scan_page(first.next.as_ref(), 2).await.unwrap();
+    assert_eq!(
+        second
+            .rows
+            .iter()
+            .map(|row| row.0.as_str())
+            .collect::<Vec<_>>(),
+        ["d", "e"]
+    );
+    assert!(second.next.is_none());
+}
+
+#[tokio::test]
+async fn test_table_dotted_primary_keys_survive_commits() {
+    let ctx = TestContext::new().with_database().await;
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("dotted_primary_keys")
+        .await
+        .unwrap();
+    table.set("a.b", SimpleRecord { value: 1 }).await.unwrap();
+    table.set("a.c", SimpleRecord { value: 2 }).await.unwrap();
+    table.set("z", SimpleRecord { value: 3 }).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("dotted_primary_keys")
+        .await
+        .unwrap();
+    assert_eq!(table.get("a.b").await.unwrap().value, 1);
+    let first = table.scan_page(None, 2).await.unwrap();
+    assert_eq!(
+        first.rows,
+        [
+            ("a.b".to_string(), SimpleRecord { value: 1 }),
+            ("a.c".to_string(), SimpleRecord { value: 2 }),
+        ]
+    );
+    let second = table.scan_page(first.next.as_ref(), 2).await.unwrap();
+    assert_eq!(second.rows, [("z".to_string(), SimpleRecord { value: 3 })]);
+    assert!(second.next.is_none());
+
+    assert!(table.delete("a.b").await.unwrap());
+    tx.commit().await.unwrap();
+
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("dotted_primary_keys")
+        .await
+        .unwrap();
+    assert!(table.get("a.b").await.is_err());
+    table.set("a.b", SimpleRecord { value: 4 }).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let viewer = ctx
+        .database()
+        .get_store_viewer::<Table<SimpleRecord>>("dotted_primary_keys")
+        .await
+        .unwrap();
+    assert_eq!(viewer.get("a.b").await.unwrap().value, 4);
+    assert_eq!(viewer.get("a.c").await.unwrap().value, 2);
+}
+
+#[tokio::test]
+async fn test_table_overlay_hides_stale_doc_path_replacements() {
+    let ctx = TestContext::new().with_database().await;
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("path_replacements")
+        .await
+        .unwrap();
+    for (key, value) in [("a", 1), ("b", 2), ("c", 3)] {
+        table.set(key, SimpleRecord { value }).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("path_replacements")
+        .await
+        .unwrap();
+    table.set("a.b", SimpleRecord { value: 4 }).await.unwrap();
+    assert!(table.get("a").await.is_err());
+    assert_eq!(table.get("a.b").await.unwrap().value, 4);
+    let first = table.scan_page(None, 1).await.unwrap();
+    assert_eq!(first.rows[0].0, "a.b");
+    let second = table.scan_page(first.next.as_ref(), 1).await.unwrap();
+    assert_eq!(second.rows[0].0, "b");
+    let third = table.scan_page(second.next.as_ref(), 1).await.unwrap();
+    assert_eq!(third.rows[0].0, "c");
+    assert!(third.next.is_none());
+
+    tx.commit().await.unwrap();
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("path_replacements")
+        .await
+        .unwrap();
+    table.set("a", SimpleRecord { value: 5 }).await.unwrap();
+    assert_eq!(table.get("a").await.unwrap().value, 5);
+    assert!(table.get("a.b").await.is_err());
+    assert!(table.delete("a").await.unwrap());
+    assert!(table.get("a").await.is_err());
+    assert!(table.get("a.b").await.is_err());
+    table.set("a", SimpleRecord { value: 6 }).await.unwrap();
+    assert_eq!(table.get("a").await.unwrap().value, 6);
+    assert!(table.get("a.b").await.is_err());
+    let page = table.scan_page(None, 4).await.unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert!(page.next.is_none());
+}
+
+#[tokio::test]
+async fn test_table_conflicting_staged_paths_use_last_operation() {
+    for (name, operations, parent, child, expected) in [
+        (
+            "parent_then_child",
+            [("set", "a"), ("set", "a.b")],
+            None,
+            Some(2),
+            [("a.b", 2), ("b", 3), ("c", 4)].as_slice(),
+        ),
+        (
+            "child_then_parent",
+            [("set", "a.b"), ("set", "a")],
+            Some(1),
+            None,
+            [("a", 1), ("b", 3), ("c", 4)].as_slice(),
+        ),
+        (
+            "child_then_parent_delete",
+            [("set", "a.b"), ("delete", "a")],
+            None,
+            None,
+            [("b", 3), ("c", 4)].as_slice(),
+        ),
+        (
+            "parent_delete_then_child",
+            [("delete", "a"), ("set", "a.b")],
+            None,
+            Some(2),
+            [("a.b", 2), ("b", 3), ("c", 4)].as_slice(),
+        ),
+    ] {
+        let ctx = TestContext::new().with_database().await;
+        let tx = ctx.database().new_transaction().await.unwrap();
+        let table = tx.get_store::<Table<SimpleRecord>>(name).await.unwrap();
+        for (key, value) in [("a", 0), ("b", 3), ("c", 4)] {
+            table.set(key, SimpleRecord { value }).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let tx = ctx.database().new_transaction().await.unwrap();
+        let table = tx.get_store::<Table<SimpleRecord>>(name).await.unwrap();
+        for (operation, key) in operations {
+            if operation == "set" {
+                let value = if key == "a" { 1 } else { 2 };
+                table.set(key, SimpleRecord { value }).await.unwrap();
+            } else {
+                assert!(table.delete(key).await.unwrap());
+            }
+        }
+        assert_table_path_state(
+            &format!("{name} before commit"),
+            &table,
+            parent,
+            child,
+            expected,
+        )
+        .await;
+        tx.commit().await.unwrap();
+
+        let tx = ctx.database().new_transaction().await.unwrap();
+        let table = tx.get_store::<Table<SimpleRecord>>(name).await.unwrap();
+        assert_table_path_state(
+            &format!("{name} after commit"),
+            &table,
+            parent,
+            child,
+            expected,
+        )
+        .await;
+    }
+}
+
+async fn assert_table_path_state(
+    phase: &str,
+    table: &Table<SimpleRecord>,
+    parent: Option<i32>,
+    child: Option<i32>,
+    expected: &[(&str, i32)],
+) {
+    assert_eq!(
+        table.get("a").await.ok().map(|row| row.value),
+        parent,
+        "{phase} parent"
+    );
+    assert_eq!(
+        table.get("a.b").await.ok().map(|row| row.value),
+        child,
+        "{phase} child"
+    );
+
+    let mut cursor = None;
+    let mut rows = Vec::new();
+    loop {
+        let page = table.scan_page(cursor.as_ref(), 1).await.unwrap();
+        rows.extend(page.rows.into_iter().map(|(key, row)| (key, row.value)));
+        let Some(next) = page.next else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    assert_eq!(
+        rows,
+        expected
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), *value))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_table_doc_path_normalization_keeps_empty_key_and_ignores_all_dots() {
+    let ctx = TestContext::new().with_database().await;
+    let tx = ctx.database().new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<SimpleRecord>>("path_normalization")
+        .await
+        .unwrap();
+    table.set("", SimpleRecord { value: 1 }).await.unwrap();
+    table.set(".", SimpleRecord { value: 2 }).await.unwrap();
+    table.set("...", SimpleRecord { value: 3 }).await.unwrap();
+    assert_eq!(table.get("").await.unwrap().value, 1);
+    assert!(table.get(".").await.is_err());
+    assert!(table.get("...").await.is_err());
+    assert_eq!(
+        table.scan_page(None, 2).await.unwrap().rows,
+        [("".to_string(), SimpleRecord { value: 1 })]
+    );
+    tx.commit().await.unwrap();
+
+    let viewer = ctx
+        .database()
+        .get_store_viewer::<Table<SimpleRecord>>("path_normalization")
+        .await
+        .unwrap();
+    assert_eq!(viewer.get("").await.unwrap().value, 1);
+    assert!(viewer.get(".").await.is_err());
+    assert!(viewer.get("...").await.is_err());
+}
+
+#[tokio::test]
 async fn test_table_multiple_records() {
     let ctx = TestContext::new().with_database().await;
 
