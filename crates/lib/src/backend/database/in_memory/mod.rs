@@ -13,7 +13,10 @@ use std::{
     any::Any,
     collections::{BTreeMap, HashMap, HashSet},
     path::Path,
-    sync::{Mutex, RwLock},
+    sync::{
+        Mutex, RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -96,6 +99,36 @@ pub struct InMemory {
     /// every read is effectively a write under LRU semantics. Hosts both
     /// `Shared` (daemon-trusted) and `User` (client-attested) entries.
     pub(crate) crdt_cache: Mutex<InMemoryCrdtCache>,
+    store_state_point_reads: AtomicUsize,
+    store_state_scan_reads: AtomicUsize,
+}
+
+impl InMemory {
+    #[cfg(feature = "testing")]
+    pub fn store_state_record_count(&self, database: &ID, store: &str) -> usize {
+        self.inner
+            .read()
+            .unwrap()
+            .store_state_namespaces
+            .values()
+            .filter(|record_set| {
+                record_set.ready
+                    && record_set.request.database == *database
+                    && record_set.request.store == store
+                    && record_set.request.projection.name == "eidetica/table/rows"
+            })
+            .map(|record_set| record_set.records.len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn store_state_read_counts(&self) -> (usize, usize) {
+        (
+            self.store_state_point_reads.load(Ordering::Relaxed),
+            self.store_state_scan_reads.load(Ordering::Relaxed),
+        )
+    }
 }
 
 impl InMemory {
@@ -111,6 +144,8 @@ impl InMemory {
                 tips: HashMap::new(),
             }),
             crdt_cache: Mutex::new(InMemoryCrdtCache::new()),
+            store_state_point_reads: AtomicUsize::new(0),
+            store_state_scan_reads: AtomicUsize::new(0),
         }
     }
 
@@ -333,6 +368,7 @@ impl BackendImpl for InMemory {
         view: &RecordView,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>> {
+        self.store_state_point_reads.fetch_add(1, Ordering::Relaxed);
         let inner = self.inner.read().unwrap();
         let namespace = inner
             .store_state_namespaces
@@ -358,6 +394,7 @@ impl BackendImpl for InMemory {
         if limit == 0 {
             return Ok(RecordPage::default());
         }
+        self.store_state_scan_reads.fetch_add(1, Ordering::Relaxed);
         let mut records = namespace
             .records
             .iter()

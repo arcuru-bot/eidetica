@@ -1,12 +1,7 @@
 //! Benchmarks for Table store cache performance
 //!
-//! These benchmarks measure the cost of state computation when tips change.
-//! When a new commit is added, the tip combination changes and the cached state
-//! for that combination doesn't exist yet. This triggers: cache miss → compute
-//! merged state from tips → populate cache.
-//!
-//! The key optimization target is incremental state computation (process only
-//! the diff) vs full recomputation (process all entries).
+//! These benchmarks measure cold and warm Table reads and the cost of state
+//! computation when tips change.
 
 mod helpers;
 
@@ -240,6 +235,76 @@ fn bench_cold_cache_rebuild(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks one point read through a fresh Table handle.
+///
+/// Setup creates a large Table in one commit and prepares its historical state.
+/// The timed operation opens a new handle and reads one row, excluding initial
+/// cached-state construction.
+fn bench_cold_large_table_point_read(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build Tokio runtime");
+
+    let mut group = c.benchmark_group("table_cold_point_read");
+    for &row_count in &[1_000, 10_000] {
+        group.bench_with_input(
+            BenchmarkId::new("single_row", row_count),
+            &row_count,
+            |b, &row_count| {
+                b.iter_with_setup(
+                    || {
+                        let (_instance, _user, db) = rt.block_on(setup_tree_async());
+                        let keys = rt.block_on(async {
+                            let tx = db.new_transaction().await.unwrap();
+                            let table = tx
+                                .get_store::<Table<BenchRecord>>("bench_table")
+                                .await
+                                .unwrap();
+                            let mut keys = Vec::with_capacity(row_count);
+                            for id in 0..row_count {
+                                let key = format!("row-{id:08}");
+                                table
+                                    .set(
+                                        &key,
+                                        BenchRecord {
+                                            id,
+                                            name: format!("record_{id}"),
+                                            value: id as i64 * 100,
+                                        },
+                                    )
+                                    .await
+                                    .unwrap();
+                                keys.push(key);
+                            }
+                            tx.commit().await.unwrap();
+
+                            let table = db
+                                .get_store_viewer::<Table<BenchRecord>>("bench_table")
+                                .await
+                                .unwrap();
+                            table.get(&keys[0]).await.unwrap();
+                            keys
+                        });
+                        (_instance, db, keys)
+                    },
+                    |(_instance, db, keys)| {
+                        rt.block_on(async {
+                            let table = db
+                                .get_store_viewer::<Table<BenchRecord>>("bench_table")
+                                .await
+                                .unwrap();
+                            let row = table.get(&keys[row_count / 2]).await.unwrap();
+                            black_box(row);
+                        });
+                    },
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = table_cache_benches;
     config = Criterion::default().configure_from_args();
@@ -247,5 +312,6 @@ criterion_group! {
         bench_cache_rebuild_after_single_commit,
         bench_warm_cache_read,
         bench_cold_cache_rebuild,
+        bench_cold_large_table_point_read,
 }
 criterion_main!(table_cache_benches);

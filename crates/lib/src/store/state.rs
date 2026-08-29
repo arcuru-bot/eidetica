@@ -8,6 +8,8 @@ use crate::{
 };
 
 use super::ProjectionDescriptor;
+use super::RecordProjection;
+use crate::crdt::Doc;
 
 /// Reserved key for the generic opaque whole-state projection.
 pub const OPAQUE_STATE_KEY: &[u8] = &[0x00];
@@ -27,6 +29,42 @@ pub(crate) fn opaque_request(
         projection: descriptor,
         source_key,
     }
+}
+
+pub(crate) fn records_request(
+    database: &ID,
+    store: &str,
+    descriptor: ProjectionDescriptor,
+    source_key: Vec<u8>,
+    scope: CacheScope,
+) -> StoreStateRequest {
+    opaque_request(database, store, descriptor, source_key, scope)
+}
+
+pub(crate) async fn publish_records<'a>(
+    backend: &dyn Backend,
+    request: StoreStateRequest,
+    deltas: impl Iterator<Item = &'a [u8]>,
+    projection: &dyn RecordProjection<Doc>,
+) -> Result<RecordView> {
+    let token = backend.begin_store_state_staging(request).await?;
+    let result = async {
+        let mut records = BTreeMap::new();
+        for bytes in deltas {
+            let delta: Doc = serde_json::from_slice(bytes)?;
+            projection.project_delta(&delta, &mut records)?;
+        }
+        records.retain(|_, value| value.is_some());
+        if !records.is_empty() {
+            backend.stage_store_state_records(&token, records).await?;
+        }
+        backend.publish_store_state(token.clone()).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = backend.abort_store_state(token).await;
+    }
+    result
 }
 
 pub(crate) async fn load_opaque(

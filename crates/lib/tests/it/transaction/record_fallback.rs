@@ -6,20 +6,35 @@
 //! deliberately leaving the record methods at their defaults — the shape of an
 //! old custom [`BackendImpl`](eidetica::backend::BackendImpl).
 
-use std::any::Any;
+use std::{
+    any::Any,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 use eidetica::{
     Database, Instance, NewUser, Result, Snapshot,
     auth::crypto::generate_keypair,
     backend::database::InMemory,
-    backend::{BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, VerificationStatus},
+    backend::{
+        BackendError, BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, RecordMutations,
+        RecordPage, RecordRange, RecordView, StagingToken, StoreStateRequest, VerificationStatus,
+    },
     crdt::Doc,
     entry::{Entry, ID},
-    store::DocStore,
+    store::{DocStore, Table},
 };
 
 /// A pre-record-substrate backend: full entry storage, no record support.
-struct Recordless<B>(B);
+struct Recordless<B>(B, Option<Arc<StaleThenUnsupported>>);
+
+struct StaleThenUnsupported {
+    phase: AtomicU8,
+    get: AtomicU8,
+    scan: AtomicU8,
+}
 
 #[async_trait::async_trait]
 impl<B: BackendImpl> BackendImpl for Recordless<B> {
@@ -164,6 +179,85 @@ impl<B: BackendImpl> BackendImpl for Recordless<B> {
         self.0.set_instance_secrets(secrets).await
     }
 
+    async fn resolve_store_state(&self, request: &StoreStateRequest) -> Result<Option<RecordView>> {
+        match self.1.as_ref() {
+            Some(_) => self.0.resolve_store_state(request).await,
+            None => Err(BackendError::StoreStateStorageUnsupported.into()),
+        }
+    }
+
+    async fn begin_store_state_staging(&self, request: StoreStateRequest) -> Result<StagingToken> {
+        match self.1.as_ref() {
+            Some(_) => self.0.begin_store_state_staging(request).await,
+            None => Err(BackendError::StoreStateStorageUnsupported.into()),
+        }
+    }
+
+    async fn stage_store_state_records(
+        &self,
+        token: &StagingToken,
+        records: RecordMutations,
+    ) -> Result<()> {
+        match self.1.as_ref() {
+            Some(_) => self.0.stage_store_state_records(token, records).await,
+            None => Err(BackendError::StoreStateStorageUnsupported.into()),
+        }
+    }
+
+    async fn publish_store_state(&self, token: StagingToken) -> Result<RecordView> {
+        match self.1.as_ref() {
+            Some(_) => self.0.publish_store_state(token).await,
+            None => Err(BackendError::StoreStateStorageUnsupported.into()),
+        }
+    }
+
+    async fn store_state_record_get(
+        &self,
+        view: &RecordView,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(stale) = self.1.as_ref() else {
+            return Err(BackendError::StoreStateStorageUnsupported.into());
+        };
+        if stale.phase.load(Ordering::SeqCst) == 0 {
+            return self.0.store_state_record_get(view, key).await;
+        }
+        if stale.get.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(BackendError::InvalidStoreStateView.into());
+        }
+        if stale.phase.load(Ordering::SeqCst) == 1 {
+            return Err(BackendError::StoreStateStorageUnsupported.into());
+        }
+        self.0.store_state_record_get(view, key).await
+    }
+
+    async fn store_state_record_scan(
+        &self,
+        view: &RecordView,
+        range: &RecordRange,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RecordPage> {
+        let Some(stale) = self.1.as_ref() else {
+            return Err(BackendError::StoreStateStorageUnsupported.into());
+        };
+        if stale.phase.load(Ordering::SeqCst) < 2 {
+            return self
+                .0
+                .store_state_record_scan(view, range, after, limit)
+                .await;
+        }
+        if stale.scan.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(BackendError::InvalidStoreStateView.into());
+        }
+        if stale.phase.load(Ordering::SeqCst) == 2 {
+            return Err(BackendError::StoreStateStorageUnsupported.into());
+        }
+        self.0
+            .store_state_record_scan(view, range, after, limit)
+            .await
+    }
+
     // Record-based Store-state methods keep their defaults, which report
     // `StoreStateStorageUnsupported` — exactly what an old custom backend does.
 }
@@ -177,7 +271,7 @@ impl<B: BackendImpl> BackendImpl for Recordless<B> {
 #[tokio::test]
 async fn old_backend_without_record_support_reads_through_history() {
     let (instance, _admin) = Instance::create_backend(
-        Box::new(Recordless(InMemory::new())),
+        Box::new(Recordless(InMemory::new(), None)),
         NewUser::passwordless("admin"),
     )
     .await
@@ -200,4 +294,168 @@ async fn old_backend_without_record_support_reads_through_history() {
         assert_eq!(viewer.get_string("alpha").await.unwrap(), "1");
         assert_eq!(viewer.get_string("beta").await.unwrap(), "2");
     }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+struct TableRow {
+    value: u32,
+}
+
+/// Table keeps its historical behavior when a custom backend does not implement
+/// cached records, including ordered paging and transaction-local changes.
+#[tokio::test]
+async fn table_uses_history_when_record_storage_is_unsupported() {
+    let (instance, _admin) = Instance::create_backend(
+        Box::new(Recordless(InMemory::new(), None)),
+        NewUser::passwordless("admin"),
+    )
+    .await
+    .unwrap();
+    let (private_key, _) = generate_keypair();
+    let database = Database::create(&instance, private_key, Doc::new())
+        .await
+        .unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx.get_store::<Table<TableRow>>("rows").await.unwrap();
+    table.set("b", TableRow { value: 2 }).await.unwrap();
+    table.set("a", TableRow { value: 1 }).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx.get_store::<Table<TableRow>>("rows").await.unwrap();
+    table.set("c", TableRow { value: 3 }).await.unwrap();
+    assert!(table.delete("a").await.unwrap());
+    assert_eq!(table.get("b").await.unwrap().value, 2);
+    assert!(table.get("a").await.is_err());
+
+    let first = table.scan_page(None, 1).await.unwrap();
+    assert_eq!(first.rows, [("b".to_string(), TableRow { value: 2 })]);
+    let second = table.scan_page(first.next.as_ref(), 1).await.unwrap();
+    assert_eq!(second.rows, [("c".to_string(), TableRow { value: 3 })]);
+    assert!(second.next.is_none());
+}
+
+#[tokio::test]
+async fn table_dotted_json_rows_match_fresh_and_historical_projection() {
+    let (instance, _admin) = Instance::create_backend(
+        Box::new(Recordless(InMemory::new(), None)),
+        NewUser::passwordless("admin"),
+    )
+    .await
+    .unwrap();
+    let (private_key, _) = generate_keypair();
+    let database = Database::create(&instance, private_key, Doc::new())
+        .await
+        .unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<serde_json::Value>>("rows")
+        .await
+        .unwrap();
+    table.set("a.b", serde_json::json!({})).await.unwrap();
+    table.set("a.c", serde_json::json!([])).await.unwrap();
+    table
+        .set("a.d", serde_json::json!({"nested": {"value": 1}}))
+        .await
+        .unwrap();
+    table.set("top", serde_json::json!({})).await.unwrap();
+    table.set("z", serde_json::json!(null)).await.unwrap();
+    let expected = vec![
+        ("a.b".to_string(), serde_json::json!({})),
+        ("a.c".to_string(), serde_json::json!([])),
+        (
+            "a.d".to_string(),
+            serde_json::json!({"nested": {"value": 1}}),
+        ),
+        ("top".to_string(), serde_json::json!({})),
+        ("z".to_string(), serde_json::json!(null)),
+    ];
+    assert_eq!(table.get("a.b").await.unwrap(), serde_json::json!({}));
+    assert_eq!(table.scan_page(None, 5).await.unwrap().rows, expected);
+    tx.commit().await.unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<serde_json::Value>>("rows")
+        .await
+        .unwrap();
+    assert_eq!(table.get("a.b").await.unwrap(), serde_json::json!({}));
+    assert_eq!(table.scan_page(None, 5).await.unwrap().rows, expected);
+    drop(tx);
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<serde_json::Value>>("rows")
+        .await
+        .unwrap();
+    assert!(table.delete("a.b").await.unwrap());
+    tx.commit().await.unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<serde_json::Value>>("rows")
+        .await
+        .unwrap();
+    assert!(table.get("a.b").await.is_err());
+    assert_eq!(
+        table.scan_page(None, 5).await.unwrap().rows,
+        expected
+            .iter()
+            .filter(|(key, _)| key != "a.b")
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    table.set("a.b", serde_json::json!({})).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx
+        .get_store::<Table<serde_json::Value>>("rows")
+        .await
+        .unwrap();
+    assert_eq!(table.get("a.b").await.unwrap(), serde_json::json!({}));
+    assert_eq!(table.scan_page(None, 5).await.unwrap().rows, expected);
+}
+
+/// A stale record view may discover that the refreshed backend no longer
+/// supports record reads; both get and scan must take the normal history path.
+#[tokio::test]
+async fn stale_record_view_retries_fallback_to_history() {
+    let state = Arc::new(StaleThenUnsupported {
+        phase: AtomicU8::new(0),
+        get: AtomicU8::new(0),
+        scan: AtomicU8::new(0),
+    });
+    let (instance, _admin) = Instance::create_backend(
+        Box::new(Recordless(InMemory::new(), Some(state.clone()))),
+        NewUser::passwordless("admin"),
+    )
+    .await
+    .unwrap();
+    let (private_key, _) = generate_keypair();
+    let database = Database::create(&instance, private_key, Doc::new())
+        .await
+        .unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx.get_store::<Table<TableRow>>("rows").await.unwrap();
+    table.set("a", TableRow { value: 1 }).await.unwrap();
+    table.set("b", TableRow { value: 2 }).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let table = tx.get_store::<Table<TableRow>>("rows").await.unwrap();
+    state.phase.store(1, Ordering::SeqCst);
+    assert_eq!(table.get("a").await.unwrap().value, 1);
+    state.phase.store(2, Ordering::SeqCst);
+    let page = table.scan_page(None, 2).await.unwrap();
+    assert_eq!(
+        page.rows,
+        [
+            ("a".to_string(), TableRow { value: 1 }),
+            ("b".to_string(), TableRow { value: 2 }),
+        ]
+    );
 }

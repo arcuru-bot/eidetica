@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -6,11 +6,122 @@ use uuid::Uuid;
 
 use crate::{
     Result, Store, Transaction,
-    crdt::{CRDT, Doc},
-    store::{Registered, errors::StoreError},
+    backend::RecordMutations,
+    crdt::{
+        Doc,
+        doc::{Value, path::normalize_path},
+    },
+    store::{
+        ProjectionDescriptor, RecordProjection, Registered, StoreStateModel, errors::StoreError,
+    },
 };
 
-/// A Row-based Store
+const DEFAULT_SCAN_PAGE_SIZE: usize = 128;
+
+struct TableProjection;
+
+fn project_doc_delta(delta: &Doc, prefix: &str, out: &mut RecordMutations) {
+    for (key, value) in delta.iter_all() {
+        let key = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match value {
+            Value::Doc(doc) => project_doc_delta(doc, &key, out),
+            Value::Text(value) => {
+                insert_projected_record(out, key.into_bytes(), Some(value.as_bytes().to_vec()))
+            }
+            Value::Deleted => insert_projected_record(out, key.into_bytes(), None),
+            _ => {}
+        }
+    }
+}
+
+fn insert_projected_record(out: &mut RecordMutations, key: Vec<u8>, value: Option<Vec<u8>>) {
+    out.retain(|existing_key, _| !TableProjection.staged_keys_conflict(existing_key, &key));
+    out.insert(key, value);
+}
+
+pub(crate) fn encode_entry_delta(mutations: &RecordMutations) -> Result<Doc> {
+    TableProjection.encode_entry_delta(mutations)
+}
+
+impl RecordProjection<Doc> for TableProjection {
+    fn descriptor(&self) -> ProjectionDescriptor {
+        ProjectionDescriptor {
+            name: "eidetica/table/rows".to_string(),
+            version: 0,
+        }
+    }
+
+    fn project_delta(&self, delta: &Doc, out: &mut RecordMutations) -> Result<()> {
+        project_doc_delta(delta, "", out);
+        Ok(())
+    }
+
+    fn encode_entry_delta(&self, mutations: &RecordMutations) -> Result<Doc> {
+        let mut delta = Doc::new();
+        for (key, value) in mutations {
+            let key =
+                std::str::from_utf8(key).map_err(|error| StoreError::SerializationFailed {
+                    store: "Table".to_string(),
+                    reason: error.to_string(),
+                })?;
+            let _ = match value {
+                Some(value) => delta.set(
+                    key,
+                    std::str::from_utf8(value).map_err(|error| {
+                        StoreError::SerializationFailed {
+                            store: "Table".to_string(),
+                            reason: error.to_string(),
+                        }
+                    })?,
+                ),
+                None => delta.remove(key),
+            };
+        }
+        Ok(delta)
+    }
+
+    fn normalize_record_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let key = std::str::from_utf8(key).map_err(|error| StoreError::SerializationFailed {
+            store: "Table".to_string(),
+            reason: error.to_string(),
+        })?;
+        let normalized = normalize_path(key);
+        Ok((key.is_empty() || !normalized.is_empty()).then_some(normalized.into_bytes()))
+    }
+
+    fn staged_keys_conflict(&self, left: &[u8], right: &[u8]) -> bool {
+        left == right
+            || left
+                .strip_prefix(right)
+                .is_some_and(|suffix| suffix.starts_with(b"."))
+            || right
+                .strip_prefix(left)
+                .is_some_and(|suffix| suffix.starts_with(b"."))
+    }
+
+    fn staged_key_descends_from(&self, staged_key: &[u8], key: &[u8]) -> bool {
+        staged_key
+            .strip_prefix(key)
+            .is_some_and(|suffix| suffix.starts_with(b"."))
+    }
+}
+
+/// Exclusive continuation for ordered Table scans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCursor(Vec<u8>);
+
+/// One bounded page of rows in primary-key byte order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TablePage<T> {
+    pub rows: Vec<(String, T)>,
+    pub next: Option<TableCursor>,
+}
+
+/// A row-based Store
 ///
 /// `Table` provides a record-oriented storage abstraction for entries in a subtree,
 /// similar to a database table with automatic primary key generation.
@@ -53,6 +164,10 @@ where
 {
     type Data = Doc;
 
+    fn state_model() -> StoreStateModel<Self::Data> {
+        StoreStateModel::Records(Arc::new(TableProjection))
+    }
+
     async fn load(txn: &Transaction, subtree_name: String) -> Result<Self> {
         Ok(Self {
             name: subtree_name,
@@ -93,37 +208,13 @@ where
     pub async fn get(&self, key: impl AsRef<str>) -> Result<T> {
         let key = key.as_ref();
 
-        // Check local staged data from the transaction
-        if let Some(data) = self.local_data()? {
-            // If there's a tombstone in local data, the record is deleted
-            if data.is_tombstone(key) {
-                return Err(StoreError::KeyNotFound {
-                    store: self.name.clone(),
-                    key: key.to_string(),
-                }
-                .into());
-            }
-
-            // If there's a value in local data, return that
-            if let Some(map_value) = data.get(key)
-                && let Some(value) = map_value.as_text()
-            {
-                return serde_json::from_str(value).map_err(|e| {
-                    StoreError::DeserializationFailed {
-                        store: self.name.clone(),
-                        reason: format!("Failed to deserialize record for key '{key}': {e}"),
-                    }
-                    .into()
-                });
-            }
-        }
-
-        // Otherwise, get the full state from the backend
-        let data: Doc = self.txn.get_full_state(&self.name).await?;
-
-        // Get the value
-        match data.get(key).and_then(|v| v.as_text()) {
-            Some(value) => serde_json::from_str(value).map_err(|e| {
+        let projection = TableProjection;
+        match self
+            .txn
+            .record_get(&self.name, &projection, key.as_bytes())
+            .await?
+        {
+            Some(value) => serde_json::from_slice(&value).map_err(|e| {
                 StoreError::DeserializationFailed {
                     store: self.name.clone(),
                     reason: format!("Failed to deserialize record for key '{key}': {e}"),
@@ -157,26 +248,17 @@ where
         // Generate a UUIDv4 for the primary key
         let primary_key = Uuid::new_v4().to_string();
 
-        // Get current data from the transaction, or create new if not existing
-        let mut data = self.local_data()?.unwrap_or_default();
-
-        // Serialize the row
         let serialized_row =
-            serde_json::to_string(&row).map_err(|e| StoreError::SerializationFailed {
+            serde_json::to_vec(&row).map_err(|e| StoreError::SerializationFailed {
                 store: self.name.clone(),
                 reason: format!("Failed to serialize record: {e}"),
             })?;
-
-        // Update the data with the new row
-        data.set(primary_key.clone(), serialized_row);
-
-        // Serialize and update the transaction
-        let serialized_data =
-            serde_json::to_vec(&data).map_err(|e| StoreError::SerializationFailed {
-                store: self.name.clone(),
-                reason: format!("Failed to serialize subtree data: {e}"),
-            })?;
-        self.txn.update_subtree(&self.name, serialized_data).await?;
+        self.txn.stage_record(
+            &self.name,
+            &TableProjection,
+            primary_key.as_bytes().to_vec(),
+            Some(serialized_row),
+        )?;
 
         // Return the primary key
         Ok(primary_key)
@@ -198,26 +280,17 @@ where
     /// Returns an error if there's a serialization error or the operation fails
     pub async fn set(&self, key: impl AsRef<str>, row: T) -> Result<()> {
         let key_str = key.as_ref();
-        // Get current data from the transaction, or create new if not existing
-        let mut data = self.local_data()?.unwrap_or_default();
-
-        // Serialize the row
         let serialized_row =
-            serde_json::to_string(&row).map_err(|e| StoreError::SerializationFailed {
+            serde_json::to_vec(&row).map_err(|e| StoreError::SerializationFailed {
                 store: self.name.clone(),
                 reason: format!("Failed to serialize record for key '{key_str}': {e}"),
             })?;
-
-        // Update the data
-        data.set(key_str, serialized_row);
-
-        // Serialize and update the transaction
-        let serialized_data =
-            serde_json::to_vec(&data).map_err(|e| StoreError::SerializationFailed {
-                store: self.name.clone(),
-                reason: format!("Failed to serialize subtree data: {e}"),
-            })?;
-        self.txn.update_subtree(&self.name, serialized_data).await
+        self.txn.stage_record(
+            &self.name,
+            &TableProjection,
+            key_str.as_bytes().to_vec(),
+            Some(serialized_row),
+        )
     }
 
     /// Deletes a row from the Table by its primary key.
@@ -238,26 +311,24 @@ where
         let key_str = key.as_ref();
 
         // Check if the record exists (checks both local and full state)
-        let exists = self.get(key_str).await.is_ok();
+        let exists = self.get(key_str).await.is_ok()
+            || self.txn.record_has_staged_descendant(
+                &self.name,
+                &TableProjection,
+                key_str.as_bytes(),
+            )?;
 
         // If the record doesn't exist, return false early
         if !exists {
             return Ok(false);
         }
 
-        // Get current data from the transaction, or create new if not existing
-        let mut data = self.local_data()?.unwrap_or_default();
-
-        // Remove the key (creates tombstone for CRDT semantics)
-        data.remove(key_str);
-
-        // Serialize and update the transaction
-        let serialized_data =
-            serde_json::to_vec(&data).map_err(|e| StoreError::SerializationFailed {
-                store: self.name.clone(),
-                reason: format!("Failed to serialize subtree data: {e}"),
-            })?;
-        self.txn.update_subtree(&self.name, serialized_data).await?;
+        self.txn.stage_record(
+            &self.name,
+            &TableProjection,
+            key_str.as_bytes().to_vec(),
+            None,
+        )?;
 
         // Return true since we confirmed the record existed
         Ok(true)
@@ -274,37 +345,59 @@ where
     /// # Errors
     /// Returns an error if there's a serialization error or the operation fails
     pub async fn search(&self, query: impl Fn(&T) -> bool) -> Result<Vec<(String, T)>> {
-        // Get the full state combining local and backend data
         let mut result = Vec::new();
-
-        // Get the full state from the backend
-        let mut data = self.txn.get_full_state::<Doc>(&self.name).await?;
-
-        // Merge with local staged data if any
-        if let Some(local) = self.local_data()? {
-            data = data.merge(&local)?;
-        }
-
-        // Iterate through all key-value pairs
-        for (key, map_value) in data.iter() {
-            // Skip non-text values
-            if let Some(value) = map_value.as_text() {
-                // Deserialize the row
-                let row: T =
-                    serde_json::from_str(value).map_err(|e| StoreError::DeserializationFailed {
-                        store: self.name.clone(),
-                        reason: format!(
-                            "Failed to deserialize record for key '{key}' during search: {e}"
-                        ),
-                    })?;
-
-                // Check if the row matches the query
+        let mut cursor = None;
+        loop {
+            let page = self
+                .scan_page(cursor.as_ref(), DEFAULT_SCAN_PAGE_SIZE)
+                .await?;
+            for (key, row) in page.rows {
                 if query(&row) {
-                    result.push((key.clone(), row));
+                    result.push((key, row));
                 }
             }
+            cursor = page.next;
+            if cursor.is_none() {
+                break;
+            }
         }
-
         Ok(result)
+    }
+
+    /// Reads at most `limit` rows in deterministic primary-key byte order.
+    pub async fn scan_page(
+        &self,
+        cursor: Option<&TableCursor>,
+        limit: usize,
+    ) -> Result<TablePage<T>> {
+        let projection = TableProjection;
+        let page = self
+            .txn
+            .record_scan(
+                &self.name,
+                &projection,
+                cursor.map(|cursor| cursor.0.as_slice()),
+                limit,
+            )
+            .await?;
+        let mut rows = Vec::with_capacity(page.records.len());
+        for (key, value) in page.records {
+            let key =
+                String::from_utf8(key).map_err(|error| StoreError::DeserializationFailed {
+                    store: self.name.clone(),
+                    reason: error.to_string(),
+                })?;
+            let row = serde_json::from_slice(&value).map_err(|error| {
+                StoreError::DeserializationFailed {
+                    store: self.name.clone(),
+                    reason: format!("Failed to deserialize record for key '{key}': {error}"),
+                }
+            })?;
+            rows.push((key, row));
+        }
+        Ok(TablePage {
+            rows,
+            next: page.next.map(TableCursor),
+        })
     }
 }

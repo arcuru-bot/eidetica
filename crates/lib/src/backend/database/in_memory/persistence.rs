@@ -118,6 +118,8 @@ impl<'de> Deserialize<'de> for InMemory {
             // Cache rebuilds lazily as reads materialize state — see the
             // `cache` field's doc on SerializableDatabase.
             crdt_cache: std::sync::Mutex::new(InMemoryCrdtCache::new()),
+            store_state_point_reads: std::sync::atomic::AtomicUsize::new(0),
+            store_state_scan_reads: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 }

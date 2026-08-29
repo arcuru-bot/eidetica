@@ -21,7 +21,7 @@ pub mod errors;
 mod tests;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -39,13 +39,13 @@ use crate::{
         types::{AuthInfo, SigKey},
         validation::AuthValidator,
     },
-    backend::VerificationStatus,
+    backend::{RecordMutations, RecordRange, RecordView, VerificationStatus},
     constants::{INDEX, ROOT, SETTINGS},
     crdt::{CRDT, Data, Doc, doc::Value},
     entry::{Entry, EntryBuilder, ID},
     height::HeightStrategy,
     instance::WriteSource,
-    store::{ProjectionDescriptor, Registry, SettingsStore, StoreError, state},
+    store::{ProjectionDescriptor, RecordProjection, Registry, SettingsStore, StoreError, state},
 };
 
 /// Creates a synthetic entry ID for multi-tip merged CRDT state caching.
@@ -178,6 +178,8 @@ pub struct Transaction {
     /// `Registry::new` → `DocStore::load`) and `Store::register`'s own
     /// `_index` updates — bypass `get_store` and remain unaffected.
     system_subtrees_locked: Arc<AtomicBool>,
+    record_mutations: Arc<Mutex<HashMap<String, RecordMutations>>>,
+    record_views: Arc<Mutex<HashMap<String, RecordView>>>,
 }
 
 /// RAII guard returned by [`Transaction::lock_system_subtrees`]. Releases the
@@ -244,6 +246,8 @@ impl Transaction {
             provided_signing_key: None,
             encryptors: Arc::new(Mutex::new(HashMap::new())),
             system_subtrees_locked: Arc::new(AtomicBool::new(false)),
+            record_mutations: Arc::new(Mutex::new(HashMap::new())),
+            record_views: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -530,6 +534,337 @@ impl Transaction {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn stage_record(
+        &self,
+        store: &str,
+        projection: &dyn RecordProjection<Doc>,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    ) -> Result<()> {
+        let Some(key) = projection.normalize_record_key(&key)? else {
+            return Ok(());
+        };
+        let mut record_mutations = self.record_mutations.lock().unwrap();
+        let mutations = record_mutations.entry(store.to_string()).or_default();
+        mutations.retain(|staged_key, _| !projection.staged_keys_conflict(staged_key, &key));
+        mutations.insert(key, value);
+        Ok(())
+    }
+
+    pub(crate) async fn record_get(
+        &self,
+        store: &str,
+        projection: &dyn RecordProjection<Doc>,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(key) = projection.normalize_record_key(key)? else {
+            return Ok(None);
+        };
+        if let Some(mutations) = self.record_mutations.lock().unwrap().get(store) {
+            if let Some(value) = mutations.get(&key) {
+                return Ok(value.clone());
+            }
+            if mutations
+                .keys()
+                .any(|staged_key| projection.staged_key_shadows_cached(staged_key, &key))
+            {
+                return Ok(None);
+            }
+        }
+        if self.db.ops().local_engine().is_none()
+            || self.encryptors.lock().unwrap().contains_key(store)
+        {
+            return self.record_get_from_history(store, &key).await;
+        }
+        let view = match self.record_view(store, projection).await {
+            Err(err) if err.is_unsupported_store_state() => {
+                return self.record_get_from_history(store, &key).await;
+            }
+            result => result?,
+        };
+        match self.db.ops().store_state_record_get(&view, &key).await {
+            Err(err) if err.is_unsupported_store_state() => {
+                self.record_get_from_history(store, &key).await
+            }
+            Err(err) if err.is_invalid_store_state_view() => {
+                self.record_views.lock().unwrap().remove(store);
+                match self.record_view(store, projection).await {
+                    Err(err) if err.is_unsupported_store_state() => {
+                        self.record_get_from_history(store, &key).await
+                    }
+                    Ok(view) => match self.db.ops().store_state_record_get(&view, &key).await {
+                        Err(err) if err.is_unsupported_store_state() => {
+                            self.record_get_from_history(store, &key).await
+                        }
+                        result => result,
+                    },
+                    Err(err) => Err(err),
+                }
+            }
+            result => result,
+        }
+    }
+
+    pub(crate) fn record_has_staged_descendant(
+        &self,
+        store: &str,
+        projection: &dyn RecordProjection<Doc>,
+        key: &[u8],
+    ) -> Result<bool> {
+        let Some(key) = projection.normalize_record_key(key)? else {
+            return Ok(false);
+        };
+        Ok(self
+            .record_mutations
+            .lock()
+            .unwrap()
+            .get(store)
+            .is_some_and(|mutations| {
+                mutations.iter().any(|(staged_key, value)| {
+                    value.is_some() && projection.staged_key_descends_from(staged_key, &key)
+                })
+            }))
+    }
+
+    pub(crate) async fn record_scan(
+        &self,
+        store: &str,
+        projection: &dyn RecordProjection<Doc>,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<crate::backend::RecordPage> {
+        if limit == 0 {
+            return Ok(crate::backend::RecordPage::default());
+        }
+        if self.db.ops().local_engine().is_none()
+            || self.encryptors.lock().unwrap().contains_key(store)
+        {
+            return self
+                .record_scan_from_history(store, projection, after, limit)
+                .await;
+        }
+        let view = match self.record_view(store, projection).await {
+            Err(err) if err.is_unsupported_store_state() => {
+                return self
+                    .record_scan_from_history(store, projection, after, limit)
+                    .await;
+            }
+            result => result?,
+        };
+        let mutations = self
+            .record_mutations
+            .lock()
+            .unwrap()
+            .get(store)
+            .cloned()
+            .unwrap_or_default();
+        let mut merged = BTreeMap::new();
+        let mut backend_after = after.map(ToOwned::to_owned);
+        let mut backend_has_more = true;
+        while backend_has_more && merged.len() <= limit {
+            let page = match self
+                .db
+                .ops()
+                .store_state_record_scan(
+                    &view,
+                    &RecordRange::default(),
+                    backend_after.as_deref(),
+                    limit.max(1),
+                )
+                .await
+            {
+                Err(err) if err.is_unsupported_store_state() => {
+                    return self
+                        .record_scan_from_history(store, projection, after, limit)
+                        .await;
+                }
+                Err(err) if err.is_invalid_store_state_view() => {
+                    self.record_views.lock().unwrap().remove(store);
+                    match self.record_view(store, projection).await {
+                        Err(err) if err.is_unsupported_store_state() => {
+                            return self
+                                .record_scan_from_history(store, projection, after, limit)
+                                .await;
+                        }
+                        Ok(view) => match self
+                            .db
+                            .ops()
+                            .store_state_record_scan(
+                                &view,
+                                &RecordRange::default(),
+                                backend_after.as_deref(),
+                                limit.max(1),
+                            )
+                            .await
+                        {
+                            Err(err) if err.is_unsupported_store_state() => {
+                                return self
+                                    .record_scan_from_history(store, projection, after, limit)
+                                    .await;
+                            }
+                            result => result?,
+                        },
+                        Err(err) => return Err(err),
+                    }
+                }
+                result => result?,
+            };
+            merged.extend(page.records.into_iter().filter(|(cached_key, _)| {
+                !mutations
+                    .keys()
+                    .any(|staged_key| projection.staged_key_shadows_cached(staged_key, cached_key))
+            }));
+            backend_after = page.next;
+            backend_has_more = backend_after.is_some();
+            for (key, value) in &mutations {
+                if after.is_none_or(|after| key.as_slice() > after) {
+                    match value {
+                        Some(value) => {
+                            merged.insert(key.clone(), value.clone());
+                        }
+                        None => {
+                            merged.remove(key);
+                        }
+                    }
+                }
+            }
+        }
+        for (key, value) in mutations {
+            if after.is_none_or(|after| key.as_slice() > after) {
+                match value {
+                    Some(value) => {
+                        merged.insert(key, value);
+                    }
+                    None => {
+                        merged.remove(&key);
+                    }
+                }
+            }
+        }
+        let mut records = merged
+            .into_iter()
+            .take(limit.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more = records.len() > limit || backend_has_more;
+        records.truncate(limit);
+        let next = has_more.then(|| records.last().unwrap().0.clone());
+        Ok(crate::backend::RecordPage { records, next })
+    }
+
+    async fn record_get_from_history(&self, store: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let state: Doc = self.get_full_state(store).await?;
+        Ok(state
+            .get(std::str::from_utf8(key).map_err(|error| {
+                TransactionError::StoreDeserializationFailed {
+                    store: store.to_string(),
+                    reason: error.to_string(),
+                }
+            })?)
+            .and_then(Value::as_text)
+            .map(|value| value.as_bytes().to_vec()))
+    }
+
+    async fn record_scan_from_history(
+        &self,
+        store: &str,
+        projection: &dyn RecordProjection<Doc>,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<crate::backend::RecordPage> {
+        let state: Doc = self.get_full_state(store).await?;
+        let mut projected = RecordMutations::new();
+        projection.project_delta(&state, &mut projected)?;
+        let mutations = self
+            .record_mutations
+            .lock()
+            .unwrap()
+            .get(store)
+            .cloned()
+            .unwrap_or_default();
+        let mut records = projected
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| (key, value)))
+            .filter(|(cached_key, _)| {
+                !mutations
+                    .keys()
+                    .any(|staged_key| projection.staged_key_shadows_cached(staged_key, cached_key))
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (key, value) in mutations {
+            match value {
+                Some(value) => {
+                    records.insert(key, value);
+                }
+                None => {
+                    records.remove(&key);
+                }
+            }
+        }
+        let mut records = records
+            .into_iter()
+            .filter(|(key, _)| after.is_none_or(|after| key.as_slice() > after))
+            .take(limit.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more = records.len() > limit;
+        records.truncate(limit);
+        let next = has_more.then(|| records.last().unwrap().0.clone());
+        Ok(crate::backend::RecordPage { records, next })
+    }
+
+    async fn record_view(
+        &self,
+        store: &str,
+        projection: &dyn RecordProjection<Doc>,
+    ) -> Result<RecordView> {
+        if let Some(view) = self.record_views.lock().unwrap().get(store).cloned() {
+            return Ok(view);
+        }
+        if self.db.ops().local_engine().is_none() {
+            return Err(crate::backend::BackendError::StoreStateStorageUnsupported.into());
+        }
+        self.init_subtree_parents(store).await?;
+        let parents = self
+            .entry_builder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or(TransactionError::TransactionAlreadyCommitted)?
+            .subtree_parents(store)
+            .unwrap_or_default();
+        let source_key = create_merge_cache_id(&parents).to_string().into_bytes();
+        let request = state::records_request(
+            self.db.root_id(),
+            store,
+            projection.descriptor(),
+            source_key,
+            crate::backend::CacheScope::Shared,
+        );
+        let view = if let Some(view) = self.db.ops().resolve_store_state(&request).await? {
+            view
+        } else {
+            let boundary = Snapshot::from(parents);
+            let entries = self
+                .db
+                .ops()
+                .store_at(self.db.root_id(), store, &boundary)
+                .await?;
+            state::publish_records(
+                self.db.ops(),
+                request,
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.data(store).ok().map(|bytes| bytes.as_slice())),
+                projection,
+            )
+            .await?
+        };
+        self.record_views
+            .lock()
+            .unwrap()
+            .insert(store.to_string(), view.clone());
+        Ok(view)
     }
 
     /// Gets a handle to a specific `Store` for modification within this transaction.
@@ -1066,6 +1401,15 @@ impl Transaction {
     /// # Returns
     /// A `Result<ID>` containing the ID of the committed entry.
     pub async fn commit(self) -> Result<ID> {
+        {
+            let staged = self.record_mutations.lock().unwrap().clone();
+            for (store, mutations) in staged {
+                let delta = crate::store::table::encode_entry_delta(&mutations)?;
+                self.update_subtree(store, serde_json::to_vec(&delta)?)
+                    .await?;
+            }
+        }
+
         // Check if this is a settings subtree update and get the effective settings before any borrowing
         let has_settings_update = {
             let builder_cell = self.entry_builder.lock().unwrap();

@@ -3,6 +3,41 @@ use crate::crdt::{CRDT, Doc};
 use crate::{Result, Transaction};
 use async_trait::async_trait;
 use std::marker::PhantomData;
+use std::sync::Arc;
+
+use crate::backend::RecordMutations;
+
+/// Converts canonical Entry deltas to and from a Store's cached record format.
+pub trait RecordProjection<D: CRDT>: Send + Sync {
+    fn descriptor(&self) -> ProjectionDescriptor;
+    fn project_delta(&self, delta: &D, out: &mut RecordMutations) -> Result<()>;
+    fn encode_entry_delta(&self, mutations: &RecordMutations) -> Result<D>;
+
+    /// Converts a caller-facing key into its persisted record key.
+    fn normalize_record_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(Some(key.to_vec()))
+    }
+
+    /// Whether two staged keys conflict.
+    ///
+    /// Transactions retain only the newest staged value for each conflicting
+    /// pair. The default preserves exact-key projections.
+    fn staged_keys_conflict(&self, left: &[u8], right: &[u8]) -> bool {
+        left == right
+    }
+
+    /// Whether a staged key makes a cached key stale.
+    fn staged_key_shadows_cached(&self, staged_key: &[u8], cached_key: &[u8]) -> bool {
+        self.staged_keys_conflict(staged_key, cached_key)
+    }
+
+    /// Whether a staged key is a descendant of a caller-facing key.
+    fn staged_key_descends_from(&self, staged_key: &[u8], key: &[u8]) -> bool {
+        staged_key
+            .strip_prefix(key)
+            .is_some_and(|suffix| suffix.starts_with(b"."))
+    }
+}
 
 pub mod state;
 pub use crate::backend::ProjectionDescriptor;
@@ -10,9 +45,9 @@ pub use state::OPAQUE_STATE_KEY;
 
 /// Store-owned representation of cached current state.
 ///
-/// The only implemented model is [`StoreStateModel::Opaque`]: one serialized
-/// copy of the whole cached state. Reads always take the opaque
-/// path.
+/// [`StoreStateModel::Opaque`] caches the complete state in one record.
+/// [`StoreStateModel::Records`] stores individually addressable records derived
+/// from canonical Store deltas.
 pub enum StoreStateModel<D: CRDT + 'static> {
     /// Safe default: one opaque serialized whole-state record.
     Opaque {
@@ -20,6 +55,8 @@ pub enum StoreStateModel<D: CRDT + 'static> {
         descriptor: ProjectionDescriptor,
         data: PhantomData<D>,
     },
+    /// A Store-defined cached record format derived from canonical Store deltas.
+    Records(Arc<dyn RecordProjection<D>>),
 }
 
 impl<D: CRDT + 'static> StoreStateModel<D> {
@@ -33,9 +70,10 @@ impl<D: CRDT + 'static> StoreStateModel<D> {
         }
     }
 
-    pub fn descriptor(&self) -> &ProjectionDescriptor {
+    pub fn descriptor(&self) -> ProjectionDescriptor {
         match self {
-            Self::Opaque { descriptor, .. } => descriptor,
+            Self::Opaque { descriptor, .. } => descriptor.clone(),
+            Self::Records(projection) => projection.descriptor(),
         }
     }
 }
@@ -49,8 +87,8 @@ pub use docstore::{DocStore, DocStoreInit};
 mod value_editor;
 pub use value_editor::ValueEditor;
 
-mod table;
-pub use table::Table;
+pub(crate) mod table;
+pub use table::{Table, TableCursor, TablePage};
 
 mod settings_store;
 pub use settings_store::SettingsStore;
@@ -92,8 +130,8 @@ pub trait Store: Sized + Registered + Send + Sync {
 
     /// Representation of this store's cached current state.
     ///
-    /// Reserved hook: overriding it has no effect today — reads always load
-    /// the whole cached state. Keep the default.
+    /// By default, the complete state is cached in one opaque record. A Store can
+    /// instead return [`StoreStateModel::Records`] to define addressable records.
     fn state_model() -> StoreStateModel<Self::Data> {
         StoreStateModel::opaque("eidetica/opaque", 0)
     }

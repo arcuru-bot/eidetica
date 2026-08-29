@@ -45,10 +45,14 @@ The test suite runs against multiple storage backends via the `TEST_BACKEND` env
 
 The `service` backend starts a fresh in-process daemon with an InMemory backend for each `test_backend()` call, routing all operations through the Unix socket RPC layer. This maintains the same isolation semantics as other backends. The full integration suite passes 1:1 against `TEST_BACKEND=service`; see the [Service Architecture § Testing](./service.md#testing) chapter for the local/wire test-helper split and the rationale for routing subsystem tests (sync internals, raw-backend listings, delegation validation) through always-local helpers regardless of `TEST_BACKEND`.
 
-Backend conformance tests cover Store-state namespace separation, staging
-invisibility, atomic publication failure, concurrent publication of one target,
-derived immutability, half-open binary-key scans, empty and exclusive page
+Backend conformance tests cover Store-state record-set separation, private
+build invisibility, atomic publication failure, concurrent publication of one
+target, derived immutability, half-open binary-key scans, empty and exclusive page
 continuation, and lifecycle-safe clearing.
+Table cached-state tests instrument local record reads to prove zero reads while
+loading a handle, one point lookup for `get`, bounded ordered pages, and
+transaction-local put/delete overlays. They also assert that a cold record set
+contains one backend record per row while historical Entry deltas remain `Doc`.
 
 ## Writing Tests
 
