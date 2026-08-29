@@ -28,7 +28,10 @@ use async_trait::async_trait;
 use crate::service::client::RemoteConnection;
 use crate::{
     Result,
-    backend::{BackendImpl, InstanceMetadata, VerificationStatus},
+    backend::{
+        BackendError, BackendImpl, InstanceMetadata, RecordMutations, RecordPage, RecordRange,
+        RecordView, StagingToken, StoreStateRequest, VerificationStatus,
+    },
     entry::{Entry, ID},
     instance::WriteSource,
     snapshot::Snapshot,
@@ -62,6 +65,47 @@ pub struct MergeSlice {
 /// backend carries is its acting identity (see [`RemoteBackend`]).
 #[async_trait]
 pub trait Backend: Send + Sync + std::fmt::Debug {
+    async fn resolve_store_state(
+        &self,
+        _request: &StoreStateRequest,
+    ) -> Result<Option<RecordView>> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+    async fn begin_store_state_staging(&self, _request: StoreStateRequest) -> Result<StagingToken> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+    async fn stage_store_state_records(
+        &self,
+        _token: &StagingToken,
+        _records: RecordMutations,
+    ) -> Result<()> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+    async fn publish_store_state(&self, _token: StagingToken) -> Result<RecordView> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+    async fn abort_store_state(&self, _token: StagingToken) -> Result<()> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+    async fn store_state_record_get(
+        &self,
+        _view: &RecordView,
+        _key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+    async fn store_state_record_scan(
+        &self,
+        _view: &RecordView,
+        _range: &RecordRange,
+        _after: Option<&[u8]>,
+        _limit: usize,
+    ) -> Result<RecordPage> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+    async fn clear_derived_store_state(&self) -> Result<()> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
     /// Retrieve an entry by ID.
     async fn get(&self, id: &ID) -> Result<Entry>;
 

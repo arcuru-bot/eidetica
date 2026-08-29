@@ -18,6 +18,18 @@ use crate::entry::ID;
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum BackendError {
+    /// The backend does not implement the generic Store-state record substrate.
+    #[error("Store-state records are not supported by this backend")]
+    StoreStateStorageUnsupported,
+
+    /// A Store-state token does not identify a mutable staging namespace.
+    #[error("Invalid or expired Store-state staging token")]
+    InvalidStoreStateStagingToken,
+
+    /// A ready namespace cannot be changed after publication.
+    #[error("Published derived Store-state namespaces are immutable")]
+    StoreStateNamespaceImmutable,
+
     /// Entry not found by ID.
     #[error("Entry not found: {id}")]
     EntryNotFound {

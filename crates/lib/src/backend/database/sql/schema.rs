@@ -27,6 +27,34 @@ use super::{SqlxBackend, SqlxResultExt};
 /// Version 0 is fully unstable and should not be used in production.
 pub const SCHEMA_VERSION: i64 = 0;
 
+const CREATE_STORE_STATE_TABLES: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS store_state_namespaces (
+        namespace_id TEXT PRIMARY KEY NOT NULL,
+        database_id TEXT NOT NULL,
+        store_name TEXT NOT NULL,
+        lifecycle BIGINT NOT NULL,
+        status BIGINT NOT NULL,
+        scope_user_uuid TEXT NOT NULL,
+        projection_name TEXT NOT NULL,
+        projection_version BIGINT NOT NULL,
+        source_key BYTEA NOT NULL,
+        created_revision BIGINT,
+        UNIQUE (database_id, store_name, lifecycle, scope_user_uuid,
+                projection_name, projection_version, source_key)
+    )",
+    "CREATE TABLE IF NOT EXISTS store_state_records (
+        namespace_id TEXT NOT NULL,
+        record_key BYTEA NOT NULL,
+        record_value BYTEA,
+        PRIMARY KEY (namespace_id, record_key),
+        -- Dropping a namespace drops its records. SQLite enforces this because
+        -- sqlx sets `PRAGMA foreign_keys = ON` on every connection it opens;
+        -- it is off in a bare sqlite3 session, which makes this look inert.
+        FOREIGN KEY (namespace_id) REFERENCES store_state_namespaces(namespace_id)
+            ON DELETE CASCADE
+    )",
+];
+
 /// SQL statements to create the schema tables.
 ///
 /// Each statement uses portable SQL that works on both SQLite and PostgreSQL.
@@ -160,8 +188,9 @@ pub async fn initialize(backend: &SqlxBackend) -> Result<()> {
         .await
         .sql_context("Failed to check schema version")?;
 
+    initialize_store_state_tables(backend).await?;
+
     if row.is_none() {
-        // First initialization
         sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
             .bind(SCHEMA_VERSION)
             .execute(pool)
@@ -183,6 +212,24 @@ pub async fn initialize(backend: &SqlxBackend) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn initialize_store_state_tables(backend: &SqlxBackend) -> Result<()> {
+    let mut tx = backend
+        .pool()
+        .begin()
+        .await
+        .sql_context("Failed to begin schema initialization")?;
+    let blob_type = if backend.is_sqlite() { "BLOB" } else { "BYTEA" };
+    for statement in CREATE_STORE_STATE_TABLES {
+        sqlx::query(&statement.replace("BYTEA", blob_type))
+            .execute(&mut *tx)
+            .await
+            .sql_context("Failed to create Store-state tables")?;
+    }
+    tx.commit()
+        .await
+        .sql_context("Failed to commit Store-state table initialization")
 }
 
 /// Run migrations sequentially from one schema version to another.
@@ -231,16 +278,6 @@ async fn migrate(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
 /// }
 /// ```
 async fn run_migration(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
-    // When adding the first migration, replace this with:
-    //
-    // match from {
-    //     1 => migrate_v1_to_v2(backend).await,
-    //     _ => Err(BackendError::SqlxError { ... }.into()),
-    // }
-    //
-    // For now, since there are no migrations yet, any attempt to migrate is an error.
-
-    // Suppress unused variable warning until migrations are added
     let _ = backend;
 
     Err(BackendError::SqlxError {

@@ -38,7 +38,8 @@ use sqlx::any::AnyPoolOptions;
 use crate::Result;
 use crate::backend::errors::BackendError;
 use crate::backend::{
-    BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, VerificationStatus,
+    BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, RecordMutations, RecordPage,
+    RecordRange, RecordView, StagingToken, StoreStateRequest, VerificationStatus,
 };
 use crate::entry::{Entry, ID};
 use crate::snapshot::Snapshot;
@@ -375,6 +376,51 @@ impl SqlxBackend {
 
 #[async_trait]
 impl BackendImpl for SqlxBackend {
+    async fn resolve_store_state(&self, request: &StoreStateRequest) -> Result<Option<RecordView>> {
+        storage::resolve_store_state(self, request).await
+    }
+
+    async fn begin_store_state_staging(&self, request: StoreStateRequest) -> Result<StagingToken> {
+        storage::begin_store_state_staging(self, request).await
+    }
+
+    async fn stage_store_state_records(
+        &self,
+        token: &StagingToken,
+        records: RecordMutations,
+    ) -> Result<()> {
+        storage::stage_store_state_records(self, token, records).await
+    }
+
+    async fn publish_store_state(&self, token: StagingToken) -> Result<RecordView> {
+        storage::publish_store_state(self, token).await
+    }
+
+    async fn abort_store_state(&self, token: StagingToken) -> Result<()> {
+        storage::abort_store_state(self, token).await
+    }
+
+    async fn store_state_record_get(
+        &self,
+        view: &RecordView,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        storage::store_state_record_get(self, view, key).await
+    }
+
+    async fn store_state_record_scan(
+        &self,
+        view: &RecordView,
+        range: &RecordRange,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RecordPage> {
+        storage::store_state_record_scan(self, view, range, after, limit).await
+    }
+
+    async fn clear_derived_store_state(&self) -> Result<()> {
+        storage::clear_derived_store_state(self).await
+    }
     async fn get(&self, id: &ID) -> Result<Entry> {
         storage::get(self, id).await
     }

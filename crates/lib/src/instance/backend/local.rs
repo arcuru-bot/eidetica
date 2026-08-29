@@ -7,7 +7,10 @@ use async_trait::async_trait;
 use super::{Backend, MergeSlice};
 use crate::{
     Result,
-    backend::{BackendImpl, CacheScope, InstanceMetadata, VerificationStatus},
+    backend::{
+        BackendImpl, CacheScope, InstanceMetadata, RecordMutations, RecordPage, RecordRange,
+        RecordView, StagingToken, StoreStateRequest, VerificationStatus,
+    },
     entry::{Entry, ID},
     instance::WriteSource,
     snapshot::Snapshot,
@@ -36,6 +39,46 @@ impl std::fmt::Debug for LocalBackend {
 
 #[async_trait]
 impl Backend for LocalBackend {
+    async fn resolve_store_state(&self, request: &StoreStateRequest) -> Result<Option<RecordView>> {
+        self.0.resolve_store_state(request).await
+    }
+    async fn begin_store_state_staging(&self, request: StoreStateRequest) -> Result<StagingToken> {
+        self.0.begin_store_state_staging(request).await
+    }
+    async fn stage_store_state_records(
+        &self,
+        token: &StagingToken,
+        records: RecordMutations,
+    ) -> Result<()> {
+        self.0.stage_store_state_records(token, records).await
+    }
+    async fn publish_store_state(&self, token: StagingToken) -> Result<RecordView> {
+        self.0.publish_store_state(token).await
+    }
+    async fn abort_store_state(&self, token: StagingToken) -> Result<()> {
+        self.0.abort_store_state(token).await
+    }
+    async fn store_state_record_get(
+        &self,
+        view: &RecordView,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        self.0.store_state_record_get(view, key).await
+    }
+    async fn store_state_record_scan(
+        &self,
+        view: &RecordView,
+        range: &RecordRange,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RecordPage> {
+        self.0
+            .store_state_record_scan(view, range, after, limit)
+            .await
+    }
+    async fn clear_derived_store_state(&self) -> Result<()> {
+        self.0.clear_derived_store_state().await
+    }
     async fn get(&self, id: &ID) -> Result<Entry> {
         self.0.get(id).await
     }

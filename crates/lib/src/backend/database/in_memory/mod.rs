@@ -11,7 +11,7 @@ mod traversal;
 
 use std::{
     any::Any,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     sync::{Mutex, RwLock},
 };
@@ -22,8 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Result,
     backend::{
-        BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, VerificationStatus,
-        errors::BackendError,
+        BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, RecordMutations, RecordPage,
+        RecordRange, RecordView, StagingToken, StoreStateLifecycle, StoreStateRequest,
+        VerificationStatus, errors::BackendError,
     },
     entry::{Entry, ID},
     snapshot::Snapshot,
@@ -48,6 +49,7 @@ pub(crate) struct TreeTipsCache {
 #[derive(Debug)]
 pub(crate) struct InMemoryInner {
     pub(crate) entries: HashMap<ID, Entry>,
+    pub(crate) store_state_namespaces: HashMap<String, RecordNamespace>,
     pub(crate) verification_status: HashMap<ID, VerificationStatus>,
     /// Instance metadata containing device public key and system database IDs.
     ///
@@ -62,6 +64,13 @@ pub(crate) struct InMemoryInner {
     pub(crate) instance_secrets: Option<InstanceSecrets>,
     /// Cached tips grouped by tree: tree_id -> (tree_tips, subtree_name -> subtree_tips)
     pub(crate) tips: HashMap<ID, TreeTipsCache>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RecordNamespace {
+    request: StoreStateRequest,
+    ready: bool,
+    records: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 /// A simple in-memory database implementation using a `HashMap` for storage.
@@ -95,6 +104,7 @@ impl InMemory {
         Self {
             inner: RwLock::new(InMemoryInner {
                 entries: HashMap::new(),
+                store_state_namespaces: HashMap::new(),
                 verification_status: HashMap::new(),
                 instance_metadata: None,
                 instance_secrets: None,
@@ -201,6 +211,163 @@ impl Default for InMemory {
 
 #[async_trait]
 impl BackendImpl for InMemory {
+    async fn resolve_store_state(&self, request: &StoreStateRequest) -> Result<Option<RecordView>> {
+        let inner = self.inner.read().unwrap();
+        Ok(inner
+            .store_state_namespaces
+            .iter()
+            .find(|(_, namespace)| namespace.ready && namespace.request == *request)
+            .map(|(namespace_id, _)| RecordView {
+                namespace_id: namespace_id.clone(),
+            }))
+    }
+
+    async fn begin_store_state_staging(
+        &self,
+        mut request: StoreStateRequest,
+    ) -> Result<StagingToken> {
+        if request.lifecycle == StoreStateLifecycle::Staging {
+            return Err(BackendError::InvalidStoreStateStagingToken.into());
+        }
+        let target = request.clone();
+        request.lifecycle = StoreStateLifecycle::Staging;
+        let namespace_id = uuid::Uuid::new_v4().to_string();
+        self.inner.write().unwrap().store_state_namespaces.insert(
+            namespace_id.clone(),
+            RecordNamespace {
+                request,
+                ready: false,
+                records: BTreeMap::new(),
+            },
+        );
+        Ok(StagingToken {
+            namespace_id,
+            target,
+        })
+    }
+
+    async fn stage_store_state_records(
+        &self,
+        token: &StagingToken,
+        records: RecordMutations,
+    ) -> Result<()> {
+        let mut inner = self.inner.write().unwrap();
+        let namespace = inner
+            .store_state_namespaces
+            .get_mut(&token.namespace_id)
+            .ok_or(BackendError::InvalidStoreStateStagingToken)?;
+        if namespace.ready || namespace.request.lifecycle != StoreStateLifecycle::Staging {
+            return Err(BackendError::StoreStateNamespaceImmutable.into());
+        }
+        namespace.records.extend(records);
+        Ok(())
+    }
+
+    async fn publish_store_state(&self, token: StagingToken) -> Result<RecordView> {
+        let mut inner = self.inner.write().unwrap();
+        let staged = inner.store_state_namespaces.remove(&token.namespace_id);
+        // A concurrent materializer may have made this exact target ready
+        // first. Both derived the same state from the same source, so adopt the
+        // winner and discard this namespace rather than failing the loser.
+        if let Some((winner_id, _)) = inner
+            .store_state_namespaces
+            .iter()
+            .find(|(_, ready)| ready.ready && ready.request == token.target)
+        {
+            return Ok(RecordView {
+                namespace_id: winner_id.clone(),
+            });
+        }
+        let mut namespace = staged.ok_or(BackendError::InvalidStoreStateStagingToken)?;
+        if namespace.ready || namespace.request.lifecycle != StoreStateLifecycle::Staging {
+            return Err(BackendError::InvalidStoreStateStagingToken.into());
+        }
+        if namespace.records.values().any(Option::is_none) {
+            return Err(BackendError::InvalidStoreStateStagingToken.into());
+        }
+        namespace.request = token.target;
+        namespace.ready = true;
+        inner
+            .store_state_namespaces
+            .insert(token.namespace_id.clone(), namespace);
+        Ok(RecordView {
+            namespace_id: token.namespace_id,
+        })
+    }
+
+    async fn abort_store_state(&self, token: StagingToken) -> Result<()> {
+        let mut inner = self.inner.write().unwrap();
+        if inner
+            .store_state_namespaces
+            .get(&token.namespace_id)
+            .is_some_and(|namespace| !namespace.ready)
+        {
+            inner.store_state_namespaces.remove(&token.namespace_id);
+        }
+        Ok(())
+    }
+
+    async fn store_state_record_get(
+        &self,
+        view: &RecordView,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let inner = self.inner.read().unwrap();
+        let namespace = inner
+            .store_state_namespaces
+            .get(&view.namespace_id)
+            .filter(|namespace| namespace.ready)
+            .ok_or(BackendError::InvalidStoreStateStagingToken)?;
+        Ok(namespace.records.get(key).and_then(Clone::clone))
+    }
+
+    async fn store_state_record_scan(
+        &self,
+        view: &RecordView,
+        range: &RecordRange,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RecordPage> {
+        if limit == 0 {
+            return Ok(RecordPage::default());
+        }
+        let inner = self.inner.read().unwrap();
+        let namespace = inner
+            .store_state_namespaces
+            .get(&view.namespace_id)
+            .filter(|namespace| namespace.ready)
+            .ok_or(BackendError::InvalidStoreStateStagingToken)?;
+        let mut records = namespace
+            .records
+            .iter()
+            .filter(|(key, value)| {
+                value.is_some()
+                    && range
+                        .start
+                        .as_deref()
+                        .is_none_or(|start| key.as_slice() >= start)
+                    && range.end.as_deref().is_none_or(|end| key.as_slice() < end)
+                    && after.is_none_or(|after| key.as_slice() > after)
+            })
+            .take(limit.saturating_add(1))
+            .filter_map(|(key, value)| value.clone().map(|value| (key.clone(), value)))
+            .collect::<Vec<_>>();
+        let has_more = records.len() > limit;
+        records.truncate(limit);
+        let next = has_more.then(|| records.last().unwrap().0.clone());
+        Ok(RecordPage { records, next })
+    }
+
+    async fn clear_derived_store_state(&self) -> Result<()> {
+        self.inner
+            .write()
+            .unwrap()
+            .store_state_namespaces
+            .retain(|_, namespace| {
+                !(namespace.ready && namespace.request.lifecycle == StoreStateLifecycle::Derived)
+            });
+        Ok(())
+    }
     /// Retrieves an entry by its unique content-addressable ID.
     ///
     /// # Arguments
@@ -423,7 +590,8 @@ impl BackendImpl for InMemory {
     }
 
     async fn clear_crdt_cache(&self) -> Result<()> {
-        cache::clear_crdt_cache(self)
+        cache::clear_crdt_cache(self)?;
+        self.clear_derived_store_state().await
     }
 
     async fn get_sorted_store_parents(
