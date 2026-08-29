@@ -1,9 +1,58 @@
 //! Tests for the transaction module.
 
 use super::*;
+use serde::{Deserialize, Serialize};
+
 use crate::{
-    Instance, auth::crypto::generate_keypair, backend::database::InMemory, store::DocStore,
+    Instance,
+    auth::crypto::generate_keypair,
+    backend::database::InMemory,
+    backend::{CacheScope, ProjectionDescriptor, StoreStateLifecycle, StoreStateRequest},
+    crdt::{CRDT, Data},
+    store::{DocStore, Registered},
 };
+
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct MaxCounter(u64);
+
+impl Data for MaxCounter {}
+
+impl CRDT for MaxCounter {
+    fn merge(&self, other: &Self) -> Result<Self> {
+        Ok(Self(self.0.max(other.0)))
+    }
+}
+
+struct CounterStore {
+    name: String,
+    txn: Transaction,
+}
+
+impl Registered for CounterStore {
+    fn type_id() -> &'static str {
+        "test:max-counter"
+    }
+}
+
+#[async_trait::async_trait]
+impl Store for CounterStore {
+    type Data = MaxCounter;
+
+    async fn load(txn: &Transaction, name: String) -> Result<Self> {
+        Ok(Self {
+            name,
+            txn: txn.clone(),
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn transaction(&self) -> &Transaction {
+        &self.txn
+    }
+}
 
 /// Test that corrupted auth configuration prevents commit
 ///
@@ -69,4 +118,78 @@ async fn test_prevent_auth_corruption() {
     tx.commit()
         .await
         .expect("Normal operations should still work");
+}
+
+#[tokio::test]
+async fn opaque_non_doc_state_materializes_cold_warm_and_after_clear() {
+    let backend = InMemory::new();
+    let (instance, _admin) =
+        Instance::create_backend(Box::new(backend), crate::NewUser::passwordless("admin"))
+            .await
+            .unwrap();
+    let (private_key, _) = generate_keypair();
+    let database = Database::create(&instance, private_key, Doc::new())
+        .await
+        .unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    tx.update_subtree("counter", serde_json::to_vec(&MaxCounter(7)).unwrap())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let tx = database.new_transaction().await.unwrap();
+    let cold = tx.get_full_state::<MaxCounter>("counter").await.unwrap();
+    let warm = tx.get_full_state::<MaxCounter>("counter").await.unwrap();
+    assert_eq!(cold, MaxCounter(7));
+    assert_eq!(warm, cold);
+
+    let backend = database.backend().unwrap();
+    let entry_id = backend
+        .store_snapshot(database.root_id(), "counter")
+        .await
+        .unwrap()
+        .into_tips()
+        .pop()
+        .unwrap();
+    let request = StoreStateRequest {
+        database: database.root_id().clone(),
+        store: "counter".to_string(),
+        lifecycle: StoreStateLifecycle::Derived,
+        scope: CacheScope::Shared,
+        projection: ProjectionDescriptor {
+            name: "eidetica/opaque".to_string(),
+            version: 0,
+        },
+        source_key: entry_id.to_string().into_bytes(),
+    };
+    assert!(
+        backend
+            .resolve_store_state(&request)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    backend.clear_derived_store_state().await.unwrap();
+    assert!(
+        backend
+            .resolve_store_state(&request)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let rebuilt = tx.get_full_state::<MaxCounter>("counter").await.unwrap();
+    assert_eq!(rebuilt, cold);
+    assert!(
+        backend
+            .resolve_store_state(&request)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        CounterStore::state_model().descriptor().name,
+        "eidetica/opaque"
+    );
 }

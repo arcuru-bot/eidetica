@@ -45,7 +45,7 @@ use crate::{
     entry::{Entry, EntryBuilder, ID},
     height::HeightStrategy,
     instance::WriteSource,
-    store::{Registry, SettingsStore, StoreError},
+    store::{ProjectionDescriptor, Registry, SettingsStore, StoreError, state},
 };
 
 /// Creates a synthetic entry ID for multi-tip merged CRDT state caching.
@@ -709,6 +709,24 @@ impl Transaction {
     where
         T: CRDT + Send,
     {
+        self.get_full_state_with_descriptor::<T>(
+            subtree_name,
+            ProjectionDescriptor {
+                name: "eidetica/opaque".to_string(),
+                version: 0,
+            },
+        )
+        .await
+    }
+
+    async fn get_full_state_with_descriptor<T>(
+        &self,
+        subtree_name: impl AsRef<str> + Send,
+        descriptor: ProjectionDescriptor,
+    ) -> Result<T>
+    where
+        T: CRDT + Send,
+    {
         let subtree_name = subtree_name.as_ref();
 
         // Check if we need to initialize subtree tips (get data from RefCell before await)
@@ -770,7 +788,7 @@ impl Transaction {
         }
 
         // Compute the CRDT state using merge-base ROOT-to-target computation
-        self.compute_subtree_state_merge_based(subtree_name, &parents)
+        self.compute_subtree_state_merge_based(subtree_name, &parents, &descriptor)
             .await
     }
 
@@ -794,6 +812,7 @@ impl Transaction {
         &self,
         subtree_name: impl AsRef<str> + Send,
         entry_ids: &[ID],
+        descriptor: &ProjectionDescriptor,
     ) -> Result<T>
     where
         T: CRDT + Send,
@@ -808,20 +827,24 @@ impl Transaction {
         // If we have a single entry, compute its state recursively
         if entry_ids.len() == 1 {
             return self
-                .compute_single_entry_state_recursive(subtree_name, &entry_ids[0])
+                .compute_single_entry_state_recursive(subtree_name, &entry_ids[0], descriptor)
                 .await;
         }
 
         // Multiple entries: check multi-tip cache first
         let cache_id = create_merge_cache_id(entry_ids);
 
-        if let Some(cached_state) = self
-            .db
-            .ops()
-            .get_cached_crdt_state(self.db.root_id(), &cache_id, subtree_name)
-            .await?
+        let cache_request = state::opaque_request(
+            self.db.root_id(),
+            subtree_name,
+            descriptor.clone(),
+            cache_id.to_string().into_bytes(),
+            crate::backend::CacheScope::Shared,
+        );
+        if let Some(view) = self.db.ops().resolve_store_state(&cache_request).await?
+            && let Some(bytes) = state::load_opaque(self.db.ops(), &view).await?
         {
-            let decrypted = self.decrypt_if_needed(subtree_name, &cached_state)?;
+            let decrypted = self.decrypt_if_needed(subtree_name, &bytes)?;
             let result: T = serde_json::from_slice(&decrypted)?;
             return Ok(result);
         }
@@ -838,8 +861,8 @@ impl Transaction {
             Some(base) => {
                 // Compute the base state recursively, then fold the path
                 // entries (deduplicated, height/ID sorted) on top of it.
-                let state = self
-                    .compute_single_entry_state_recursive(subtree_name, base)
+                let state: T = self
+                    .compute_single_entry_state_recursive(subtree_name, base, descriptor)
                     .await?;
                 self.merge_path_entries(subtree_name, state, &merge.path)
                     .await?
@@ -862,15 +885,8 @@ impl Transaction {
         };
 
         // Cache the computed merge result
-        let serialized = serde_json::to_vec(&result)?;
-        let to_cache = self.encrypt_if_needed(subtree_name, &serialized)?;
-        // FIXME: Multiple tips in the cache is a hack
-        // cache_crdt_state is supposed to take in (ID, subtree, data)
-        // This caching only technically works by constructing a custom ID
-        self.db
-            .ops()
-            .cache_crdt_state(self.db.root_id(), &cache_id, subtree_name, to_cache)
-            .await?;
+        let bytes = self.encrypt_if_needed(subtree_name, &serde_json::to_vec(&result)?)?;
+        state::publish_opaque(self.db.ops(), cache_request, bytes).await?;
 
         Ok(result)
     }
@@ -896,20 +912,23 @@ impl Transaction {
         &'a self,
         subtree_name: &'a str,
         entry_id: &'a ID,
+        descriptor: &'a ProjectionDescriptor,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>
     where
         T: CRDT + Send + 'a,
     {
         Box::pin(async move {
-            // Step 1: Check if already cached
-            if let Some(cached_state) = self
-                .db
-                .ops()
-                .get_cached_crdt_state(self.db.root_id(), entry_id, subtree_name)
-                .await?
+            let request = state::opaque_request(
+                self.db.root_id(),
+                subtree_name,
+                descriptor.clone(),
+                entry_id.to_string().into_bytes(),
+                crate::backend::CacheScope::Shared,
+            );
+            if let Some(view) = self.db.ops().resolve_store_state(&request).await?
+                && let Some(bytes) = state::load_opaque(self.db.ops(), &view).await?
             {
-                // Decrypt cached state if encryptor is registered
-                let decrypted = self.decrypt_if_needed(subtree_name, &cached_state)?;
+                let decrypted = self.decrypt_if_needed(subtree_name, &bytes)?;
                 let result: T = serde_json::from_slice(&decrypted)?;
                 return Ok(result);
             }
@@ -927,12 +946,8 @@ impl Transaction {
             let result: T = self.fold_store_entries(subtree_name, &entries)?;
 
             // Step 4: Cache only the final result (encrypted if encryptor is registered)
-            let serialized_state = serde_json::to_vec(&result)?;
-            let to_cache = self.encrypt_if_needed(subtree_name, &serialized_state)?;
-            self.db
-                .ops()
-                .cache_crdt_state(self.db.root_id(), entry_id, subtree_name, to_cache)
-                .await?;
+            let bytes = self.encrypt_if_needed(subtree_name, &serde_json::to_vec(&result)?)?;
+            state::publish_opaque(self.db.ops(), request, bytes).await?;
 
             Ok(result)
         })
