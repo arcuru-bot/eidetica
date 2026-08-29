@@ -2,6 +2,38 @@ use crate::HeightStrategy;
 use crate::crdt::{CRDT, Doc};
 use crate::{Result, Transaction};
 use async_trait::async_trait;
+use std::marker::PhantomData;
+
+pub mod state;
+pub use crate::backend::ProjectionDescriptor;
+pub use state::OPAQUE_STATE_KEY;
+
+/// Store-owned representation of materialized current state.
+pub enum StoreStateModel<D: CRDT + 'static> {
+    /// Safe default: one opaque serialized whole-state record.
+    Opaque {
+        descriptor: ProjectionDescriptor,
+        data: PhantomData<D>,
+    },
+}
+
+impl<D: CRDT + 'static> StoreStateModel<D> {
+    pub fn opaque(name: impl Into<String>, version: u32) -> Self {
+        Self::Opaque {
+            descriptor: ProjectionDescriptor {
+                name: name.into(),
+                version,
+            },
+            data: PhantomData,
+        }
+    }
+
+    pub fn descriptor(&self) -> &ProjectionDescriptor {
+        match self {
+            Self::Opaque { descriptor, .. } => descriptor,
+        }
+    }
+}
 
 mod errors;
 pub use errors::StoreError;
@@ -51,7 +83,12 @@ pub trait Store: Sized + Registered + Send + Sync {
     /// The CRDT data type used for local (staged) data in this store.
     ///
     /// This is the type stored within each individual Entry.
-    type Data: CRDT;
+    type Data: CRDT + 'static;
+
+    /// Representation used for historical projections and current-state authority.
+    fn state_model() -> StoreStateModel<Self::Data> {
+        StoreStateModel::opaque("eidetica/opaque", 0)
+    }
 
     /// Creates a new `Store` handle associated with a specific transaction.
     ///
