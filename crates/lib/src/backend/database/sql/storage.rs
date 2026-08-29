@@ -85,6 +85,12 @@ pub async fn stage_store_state_records(
         .begin()
         .await
         .sql_context("Failed to stage Store-state records")?;
+    if backend.is_sqlite() {
+        sqlx::query("COMMIT; BEGIN IMMEDIATE")
+            .execute(&mut *tx)
+            .await
+            .sql_context("Failed to lock Store-state staging transaction")?;
+    }
     let staging: Option<(i64,)> = sqlx::query_as(
         "SELECT lifecycle FROM store_state_namespaces WHERE namespace_id = $1 AND status = 0",
     )
@@ -141,6 +147,12 @@ async fn publish_staged_namespace(
         .begin()
         .await
         .sql_context("Failed to publish Store-state")?;
+    if backend.is_sqlite() {
+        sqlx::query("COMMIT; BEGIN IMMEDIATE")
+            .execute(&mut *tx)
+            .await
+            .sql_context("Failed to lock Store-state publish transaction")?;
+    }
     let deletes: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM store_state_records WHERE namespace_id = $1 AND record_value IS NULL",
     )
