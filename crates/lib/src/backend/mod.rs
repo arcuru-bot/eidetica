@@ -8,7 +8,7 @@
 //!
 //! Instance wraps BackendImpl in a `Backend` struct that provides a layer for future development.
 
-use std::any::Any;
+use std::{any::Any, collections::BTreeMap};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,82 @@ pub enum CacheScope {
     Shared,
     /// Client-uploaded; visible only to the named user.
     User(String),
+}
+
+/// Lifecycle of a ready Store-state namespace.
+///
+/// Derived namespaces are immutable, disposable projections of historical
+/// Entries. Authoritative namespaces are durable current state. Staging is an
+/// internal unpublished state and can never be returned by record reads.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StoreStateLifecycle {
+    Derived,
+    Authoritative,
+    Staging,
+}
+
+impl StoreStateLifecycle {
+    pub(crate) fn as_db_int(self) -> i64 {
+        match self {
+            Self::Derived => 0,
+            Self::Authoritative => 1,
+            Self::Staging => 2,
+        }
+    }
+}
+
+/// Store-owned identity of a state representation.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionDescriptor {
+    pub name: String,
+    pub version: u32,
+}
+
+/// Backend-owned identity for one ready namespace.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordView {
+    pub(crate) namespace_id: String,
+}
+
+/// Metadata used to resolve or build a namespace.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreStateRequest {
+    pub database: ID,
+    pub store: String,
+    pub lifecycle: StoreStateLifecycle,
+    pub scope: CacheScope,
+    pub projection: ProjectionDescriptor,
+    /// Canonical historical source key. Empty only for authoritative state.
+    pub source_key: Vec<u8>,
+}
+
+/// Unpublished namespace capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagingToken {
+    pub(crate) namespace_id: String,
+    pub(crate) target: StoreStateRequest,
+}
+
+/// Ordered record changes.
+///
+/// `None` is reserved for a staged delete. No lifecycle publishes one yet:
+/// [`BackendImpl::publish_store_state`] rejects a namespace containing a
+/// `None`-valued record, so deletes can be staged but not made ready.
+pub type RecordMutations = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
+
+/// Half-open byte-key range `[start, end)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordRange {
+    pub start: Option<Vec<u8>>,
+    pub end: Option<Vec<u8>>,
+}
+
+/// One bounded ordered scan page. `next` is the last returned key and must be
+/// supplied as the exclusive continuation on the next request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordPage {
+    pub records: Vec<(Vec<u8>, Vec<u8>)>,
+    pub next: Option<Vec<u8>>,
 }
 
 impl CacheScope {
@@ -247,6 +323,68 @@ impl VerificationStatus {
 /// set by the calling code (typically Database/Transaction implementations).
 #[async_trait]
 pub trait BackendImpl: Send + Sync + Any {
+    /// Resolve a ready namespace. Staging namespaces are never returned.
+    async fn resolve_store_state(
+        &self,
+        _request: &StoreStateRequest,
+    ) -> Result<Option<RecordView>> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+
+    /// Create an invisible staging namespace for a later atomic publish.
+    async fn begin_store_state_staging(&self, _request: StoreStateRequest) -> Result<StagingToken> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+
+    /// Apply a chunk to an unpublished staging namespace.
+    async fn stage_store_state_records(
+        &self,
+        _token: &StagingToken,
+        _records: RecordMutations,
+    ) -> Result<()> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+
+    /// Atomically make a complete staging namespace ready.
+    ///
+    /// Returns the view of the ready namespace for the token's target. When a
+    /// concurrent materializer published that same target first, its namespace
+    /// is returned and this one is discarded — publishing the same derived
+    /// state twice is a race, not an error. Rejects a namespace holding a
+    /// `None`-valued record, since staged deletes cannot yet be published.
+    async fn publish_store_state(&self, _token: StagingToken) -> Result<RecordView> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+
+    /// Discard an unpublished namespace. Aborting an already-published token is harmless.
+    async fn abort_store_state(&self, _token: StagingToken) -> Result<()> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+
+    async fn store_state_record_get(
+        &self,
+        _view: &RecordView,
+        _key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+
+    /// Read one ordered page of records. A `limit` of zero yields an empty page
+    /// with no continuation.
+    async fn store_state_record_scan(
+        &self,
+        _view: &RecordView,
+        _range: &RecordRange,
+        _after: Option<&[u8]>,
+        _limit: usize,
+    ) -> Result<RecordPage> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
+
+    /// Remove only ready derived namespaces. Authority and staging are not selectable.
+    async fn clear_derived_store_state(&self) -> Result<()> {
+        Err(BackendError::StoreStateStorageUnsupported.into())
+    }
     /// Retrieves an entry by its unique content-addressable ID.
     ///
     /// # Arguments

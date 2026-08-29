@@ -32,6 +32,8 @@
 - [DAG Structure](internal/dag.md)
 - [Subtrees](internal/subtrees.md)
 - [CRDT Merging](internal/crdt.md)
+- [Store State](internal/store_state.md)
+- [Historical Store-state Cache](internal/cache.md)
 - [Authentication](internal/authentication.md)
 - [Sync](internal/sync.md)
 - [Service (Daemon)](internal/service.md)

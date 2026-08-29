@@ -4,11 +4,251 @@
 
 use crate::Result;
 use crate::backend::errors::BackendError;
-use crate::backend::{CacheScope, InstanceMetadata, InstanceSecrets, VerificationStatus};
+use crate::backend::{
+    CacheScope, InstanceMetadata, InstanceSecrets, RecordMutations, RecordPage, RecordRange,
+    RecordView, StagingToken, StoreStateLifecycle, StoreStateRequest, VerificationStatus,
+};
 use crate::entry::{Entry, ID};
 
 use super::{SqlxBackend, SqlxResultExt};
 use crate::backend::database::sorting;
+
+fn store_state_scope(scope: &CacheScope) -> &str {
+    match scope {
+        CacheScope::Shared => "",
+        CacheScope::User(user) => user,
+    }
+}
+
+pub async fn resolve_store_state(
+    backend: &SqlxBackend,
+    request: &StoreStateRequest,
+) -> Result<Option<RecordView>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT namespace_id FROM store_state_namespaces
+         WHERE database_id = $1 AND store_name = $2 AND lifecycle = $3 AND status = 1
+           AND scope_user_uuid = $4 AND projection_name = $5
+           AND projection_version = $6 AND source_key = $7",
+    )
+    .bind(request.database.to_string())
+    .bind(&request.store)
+    .bind(request.lifecycle.as_db_int())
+    .bind(store_state_scope(&request.scope))
+    .bind(&request.projection.name)
+    .bind(i64::from(request.projection.version))
+    .bind(&request.source_key)
+    .fetch_optional(backend.pool())
+    .await
+    .sql_context("Failed to resolve Store-state namespace")?;
+    Ok(row.map(|(namespace_id,)| RecordView { namespace_id }))
+}
+
+pub async fn begin_store_state_staging(
+    backend: &SqlxBackend,
+    request: StoreStateRequest,
+) -> Result<StagingToken> {
+    if request.lifecycle == StoreStateLifecycle::Staging {
+        return Err(BackendError::InvalidStoreStateStagingToken.into());
+    }
+    let namespace_id = uuid::Uuid::new_v4().to_string();
+    let staging_source = namespace_id.as_bytes();
+    sqlx::query(
+        "INSERT INTO store_state_namespaces
+         (namespace_id, database_id, store_name, lifecycle, status, scope_user_uuid,
+          projection_name, projection_version, source_key, created_revision)
+         VALUES ($1, $2, $3, $4, 0, $5, $6, $7, $8, NULL)",
+    )
+    .bind(&namespace_id)
+    .bind(request.database.to_string())
+    .bind(&request.store)
+    .bind(StoreStateLifecycle::Staging.as_db_int())
+    .bind(store_state_scope(&request.scope))
+    .bind(&request.projection.name)
+    .bind(i64::from(request.projection.version))
+    .bind(staging_source)
+    .execute(backend.pool())
+    .await
+    .sql_context("Failed to begin Store-state staging")?;
+    Ok(StagingToken {
+        namespace_id,
+        target: request,
+    })
+}
+
+pub async fn stage_store_state_records(
+    backend: &SqlxBackend,
+    token: &StagingToken,
+    records: RecordMutations,
+) -> Result<()> {
+    let mut tx = backend
+        .pool()
+        .begin()
+        .await
+        .sql_context("Failed to stage Store-state records")?;
+    let staging: Option<(i64,)> = sqlx::query_as(
+        "SELECT lifecycle FROM store_state_namespaces WHERE namespace_id = $1 AND status = 0",
+    )
+    .bind(&token.namespace_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .sql_context("Failed to validate Store-state staging token")?;
+    if staging != Some((StoreStateLifecycle::Staging.as_db_int(),)) {
+        return Err(BackendError::InvalidStoreStateStagingToken.into());
+    }
+    for (key, value) in records {
+        sqlx::query(
+            "INSERT INTO store_state_records (namespace_id, record_key, record_value)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (namespace_id, record_key)
+             DO UPDATE SET record_value = EXCLUDED.record_value",
+        )
+        .bind(&token.namespace_id)
+        .bind(key)
+        .bind(value)
+        .execute(&mut *tx)
+        .await
+        .sql_context("Failed to stage Store-state record")?;
+    }
+    tx.commit()
+        .await
+        .sql_context("Failed to commit Store-state record chunk")
+}
+
+/// Make a staging namespace ready.
+///
+/// A concurrent materializer can publish the same target first. That is not an
+/// error: both callers derived the same state from the same source, so the
+/// winner's namespace is adopted and this one is discarded. Any other failure
+/// also discards the staging namespace, because the caller has surrendered its
+/// token and can no longer abort it.
+pub async fn publish_store_state(backend: &SqlxBackend, token: StagingToken) -> Result<RecordView> {
+    match publish_staged_namespace(backend, &token).await {
+        Ok(view) => Ok(view),
+        Err(err) => {
+            let winner = resolve_store_state(backend, &token.target).await?;
+            discard_staging_namespace(backend, &token.namespace_id).await?;
+            winner.ok_or(err)
+        }
+    }
+}
+
+async fn publish_staged_namespace(
+    backend: &SqlxBackend,
+    token: &StagingToken,
+) -> Result<RecordView> {
+    let mut tx = backend
+        .pool()
+        .begin()
+        .await
+        .sql_context("Failed to publish Store-state")?;
+    let deletes: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM store_state_records WHERE namespace_id = $1 AND record_value IS NULL",
+    )
+    .bind(&token.namespace_id)
+    .fetch_one(&mut *tx)
+    .await
+    .sql_context("Failed to validate Store-state records")?;
+    if deletes.0 != 0 {
+        return Err(BackendError::InvalidStoreStateStagingToken.into());
+    }
+    let result = sqlx::query(
+        "UPDATE store_state_namespaces SET lifecycle = $1, status = 1, source_key = $2
+         WHERE namespace_id = $3 AND lifecycle = $4 AND status = 0",
+    )
+    .bind(token.target.lifecycle.as_db_int())
+    .bind(&token.target.source_key)
+    .bind(&token.namespace_id)
+    .bind(StoreStateLifecycle::Staging.as_db_int())
+    .execute(&mut *tx)
+    .await
+    .sql_context("Failed to publish Store-state namespace")?;
+    if result.rows_affected() != 1 {
+        return Err(BackendError::InvalidStoreStateStagingToken.into());
+    }
+    tx.commit()
+        .await
+        .sql_context("Failed to commit Store-state publish")?;
+    Ok(RecordView {
+        namespace_id: token.namespace_id.clone(),
+    })
+}
+
+/// Drop an unpublished namespace. Its records go with it through the schema's
+/// `ON DELETE CASCADE`.
+async fn discard_staging_namespace(backend: &SqlxBackend, namespace_id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM store_state_namespaces WHERE namespace_id = $1 AND status = 0")
+        .bind(namespace_id)
+        .execute(backend.pool())
+        .await
+        .sql_context("Failed to discard Store-state staging namespace")?;
+    Ok(())
+}
+
+pub async fn abort_store_state(backend: &SqlxBackend, token: StagingToken) -> Result<()> {
+    discard_staging_namespace(backend, &token.namespace_id).await
+}
+
+pub async fn store_state_record_get(
+    backend: &SqlxBackend,
+    view: &RecordView,
+    key: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let row: Option<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT r.record_value FROM store_state_records r
+         JOIN store_state_namespaces n ON n.namespace_id = r.namespace_id
+         WHERE r.namespace_id = $1 AND r.record_key = $2 AND n.status = 1",
+    )
+    .bind(&view.namespace_id)
+    .bind(key)
+    .fetch_optional(backend.pool())
+    .await
+    .sql_context("Failed to get Store-state record")?;
+    Ok(row.map(|(value,)| value))
+}
+
+pub async fn store_state_record_scan(
+    backend: &SqlxBackend,
+    view: &RecordView,
+    range: &RecordRange,
+    after: Option<&[u8]>,
+    limit: usize,
+) -> Result<RecordPage> {
+    if limit == 0 {
+        return Ok(RecordPage::default());
+    }
+    let sql_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT r.record_key, r.record_value FROM store_state_records r
+         JOIN store_state_namespaces n ON n.namespace_id = r.namespace_id
+         WHERE r.namespace_id = $1 AND n.status = 1
+           AND ($2 IS NULL OR r.record_key >= $2)
+           AND ($3 IS NULL OR r.record_key < $3)
+           AND ($4 IS NULL OR r.record_key > $4)
+         ORDER BY r.record_key ASC LIMIT $5",
+    )
+    .bind(&view.namespace_id)
+    .bind(range.start.as_deref())
+    .bind(range.end.as_deref())
+    .bind(after)
+    .bind(sql_limit)
+    .fetch_all(backend.pool())
+    .await
+    .sql_context("Failed to scan Store-state records")?;
+    let mut records = rows;
+    let has_more = records.len() > limit;
+    records.truncate(limit);
+    let next = has_more.then(|| records.last().unwrap().0.clone());
+    Ok(RecordPage { records, next })
+}
+
+pub async fn clear_derived_store_state(backend: &SqlxBackend) -> Result<()> {
+    sqlx::query("DELETE FROM store_state_namespaces WHERE lifecycle = $1 AND status = 1")
+        .bind(StoreStateLifecycle::Derived.as_db_int())
+        .execute(backend.pool())
+        .await
+        .sql_context("Failed to clear derived Store-state namespaces")?;
+    Ok(())
+}
 
 /// Get an entry by ID.
 pub async fn get(backend: &SqlxBackend, id: &ID) -> Result<Entry> {
@@ -654,6 +894,5 @@ pub async fn clear_crdt_cache(backend: &SqlxBackend) -> Result<()> {
         .execute(pool)
         .await
         .sql_context("Failed to clear CRDT cache")?;
-
-    Ok(())
+    clear_derived_store_state(backend).await
 }
