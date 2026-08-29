@@ -3,10 +3,30 @@
 //! This module contains tests for complex scenarios involving LCA (Lowest Common Ancestor)
 //! computation, path finding, and deterministic ordering in diamond and merge patterns.
 
-use eidetica::{Snapshot, entry::ID, store::DocStore};
+use eidetica::{
+    Snapshot,
+    backend::{CacheScope, ProjectionDescriptor, StoreStateLifecycle, StoreStateRequest},
+    entry::ID,
+    store::DocStore,
+};
 
 use super::helpers::*;
 use crate::helpers::*;
+
+/// The derived namespace the opaque projection publishes a merge result into.
+fn opaque_cache_request(database: &ID, store: &str, cache_id: &ID) -> StoreStateRequest {
+    StoreStateRequest {
+        database: database.clone(),
+        store: store.to_string(),
+        lifecycle: StoreStateLifecycle::Derived,
+        scope: CacheScope::Shared,
+        projection: ProjectionDescriptor {
+            name: "eidetica/opaque".to_string(),
+            version: 0,
+        },
+        source_key: cache_id.to_string().into_bytes(),
+    }
+}
 
 #[tokio::test]
 async fn test_transaction_diamond_pattern() {
@@ -708,11 +728,12 @@ async fn test_multi_tip_merge_state_caching() {
     );
 
     // Verify cache is now populated
+    let cache_request = opaque_cache_request(ctx.database().root_id(), "data", &cache_id);
     let cached_after = ctx
         .database()
         .backend()
         .unwrap()
-        .get_cached_crdt_state(ctx.database().root_id(), &cache_id, "data")
+        .resolve_store_state(&cache_request)
         .await
         .unwrap();
     assert!(
@@ -787,11 +808,12 @@ async fn test_multi_tip_cache_key_is_order_independent() {
     let cache_id = ID::from_bytes(cache_key);
 
     // Verify cache was populated
+    let cache_request = opaque_cache_request(ctx.database().root_id(), "data", &cache_id);
     let cached = ctx
         .database()
         .backend()
         .unwrap()
-        .get_cached_crdt_state(ctx.database().root_id(), &cache_id, "data")
+        .resolve_store_state(&cache_request)
         .await
         .unwrap();
     assert!(cached.is_some(), "Cache should be populated");
@@ -821,7 +843,7 @@ async fn test_multi_tip_cache_key_is_order_independent() {
         .database()
         .backend()
         .unwrap()
-        .get_cached_crdt_state(ctx.database().root_id(), &cache_id, "data")
+        .resolve_store_state(&cache_request)
         .await
         .unwrap();
     assert!(
