@@ -39,6 +39,13 @@ pub enum BackendError {
     #[error("Published derived Store state is immutable")]
     StoreStateNamespaceImmutable,
 
+    /// One encoded record cannot fit in a protocol frame.
+    #[error("Store-state record is too large for the service protocol ({encoded_bytes} bytes)")]
+    RecordTooLarge {
+        /// Encoded record size rejected before transmission.
+        encoded_bytes: usize,
+    },
+
     /// Entry not found by ID.
     #[error("Entry not found: {id}")]
     EntryNotFound {

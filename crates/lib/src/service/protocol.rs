@@ -36,7 +36,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::auth::crypto::PublicKey;
 use crate::auth::types::{Permission, SigKey};
-use crate::backend::InstanceMetadata;
+use crate::backend::{InstanceMetadata, RecordPage, RecordRange, StoreStateRequest};
 use crate::entry::{Entry, ID};
 use crate::instance::WriteSource;
 use crate::service::error::ServiceError;
@@ -56,6 +56,12 @@ pub const PROTOCOL_VERSION: u32 = 0;
 
 /// Maximum frame size: 64 MiB.
 pub const MAX_FRAME_SIZE: u32 = 64 * 1024 * 1024;
+
+/// Record payload budget leaving room for the JSON envelope and length prefix.
+pub const MAX_RECORD_CHUNK_BYTES: u32 = MAX_FRAME_SIZE - 1024 * 1024;
+
+/// Default upper bound for an encoded record page.
+pub const MAX_RECORD_PAGE_BYTES: u32 = 4 * 1024 * 1024;
 
 /// Handshake message sent by the client on connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +132,9 @@ pub struct MergeState {
     pub path: Vec<ID>,
 }
 
+/// JSON-safe wire representation of opaque byte-keyed record mutations.
+pub type WireRecordMutations = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+
 /// Database-level operations the server runs on its local `Database`.
 ///
 /// The target database (`root_id`) and identity claim travel in
@@ -134,6 +143,30 @@ pub struct MergeState {
 /// set-metadata) before dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DatabaseOp {
+    /// Resolve an immutable historical projection through an opaque view token.
+    ResolveStoreState { request: StoreStateRequest },
+    /// Begin an invisible historical projection build.
+    BeginStoreStateStaging { request: StoreStateRequest },
+    /// Upload one idempotent historical projection chunk.
+    StageStoreStateRecords {
+        token: String,
+        chunk_id: u64,
+        records: WireRecordMutations,
+    },
+    /// Publish an historical projection and return an opaque read view.
+    PublishStoreState { token: String },
+    /// Discard an unfinished historical projection build.
+    AbortStoreState { token: String },
+    /// Fetch one record from a resolved historical projection.
+    StoreStateRecordGet { view: String, key: Vec<u8> },
+    /// Fetch one bounded page from a resolved historical projection.
+    StoreStateRecordScan {
+        view: String,
+        range: RecordRange,
+        after: Option<Vec<u8>>,
+        max_records: u32,
+        max_encoded_bytes: u32,
+    },
     /// Acquire everything needed to build+sign a transaction locally for the
     /// given stores, with parents drawn from `scope`'s projection. Gate Read.
     BeginTransaction {
@@ -260,15 +293,28 @@ impl DatabaseOp {
     /// (kept for completeness / non-submit callers that inspect it).
     pub fn required_permission(&self) -> Permission {
         match self {
-            DatabaseOp::SubmitSignedEntry { .. } => Permission::Write(0),
+            DatabaseOp::SubmitSignedEntry { .. }
+            | DatabaseOp::BeginStoreStateStaging { .. }
+            | DatabaseOp::StageStoreStateRecords { .. }
+            | DatabaseOp::PublishStoreState { .. }
+            | DatabaseOp::AbortStoreState { .. } => Permission::Write(0),
             // Gated against `_databases`, not the request's `root_id`; the
             // dispatcher special-cases this so the value here is advisory.
             DatabaseOp::SetInstanceMetadata { .. } => Permission::Admin(0),
-            DatabaseOp::GetStoreTipsUpToEntries { .. } => Permission::Read,
-            DatabaseOp::ComputeMergeState { .. } => Permission::Read,
-            DatabaseOp::SubscribeWrites { .. } => Permission::Read,
-            DatabaseOp::UnsubscribeWrites => Permission::Read,
-            _ => Permission::Read,
+            DatabaseOp::BeginTransaction { .. }
+            | DatabaseOp::GetVerifiedTips
+            | DatabaseOp::GetStoreState { .. }
+            | DatabaseOp::GetStoreEntries { .. }
+            | DatabaseOp::GetStoreTipsUpToEntries { .. }
+            | DatabaseOp::ComputeMergeState { .. }
+            | DatabaseOp::GetEntry { .. }
+            | DatabaseOp::GetCachedCrdtState { .. }
+            | DatabaseOp::CacheCrdtState { .. }
+            | DatabaseOp::ResolveStoreState { .. }
+            | DatabaseOp::StoreStateRecordGet { .. }
+            | DatabaseOp::StoreStateRecordScan { .. }
+            | DatabaseOp::SubscribeWrites { .. }
+            | DatabaseOp::UnsubscribeWrites => Permission::Read,
         }
     }
 }
@@ -444,6 +490,14 @@ pub enum ServiceResponse {
     Ids(Snapshot),
     /// Success with no data
     Ok,
+    /// One optional opaque record.
+    Record(Option<Vec<u8>>),
+    /// One bounded, ordered record page.
+    RecordPage(RecordPage),
+    /// Opaque immutable projection view.
+    RecordView(Option<String>),
+    /// Opaque staging capability.
+    Token(String),
     /// Transaction-build context (response to `DatabaseOp::BeginTransaction`).
     TransactionContext(TransactionContext),
     /// Materialized CRDT store state (response to `DatabaseOp::GetStoreState`).

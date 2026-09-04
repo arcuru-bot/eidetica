@@ -1,12 +1,20 @@
 //! [`RemoteBackend`]: the seam backed by a service connection.
 
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+
 use async_trait::async_trait;
 
 use super::{Backend, MergeSlice};
 use crate::{
     Result,
     auth::SigKey,
-    backend::{InstanceMetadata, VerificationStatus},
+    backend::{
+        InstanceMetadata, RecordMutations, RecordPage, RecordRange, RecordView, StagingToken,
+        StoreStateRequest, VerificationStatus,
+    },
     entry::{Entry, ID},
     instance::WriteSource,
     service::{client::RemoteConnection, protocol::ReadScope},
@@ -31,15 +39,24 @@ use crate::{
 /// CRDT-state caching is two-tiered: a connection-scoped process-lifetime LRU
 /// (tier 1) backed by the daemon's unified scope-keyed cache (tier 2) reached
 /// via `GetCachedCrdtState` / `CacheCrdtState` RPCs.
+///
+/// Store-state views are server-issued opaque tokens that carry no database of
+/// their own, so `views` remembers which database each token was resolved
+/// against and every later record read is routed back to it.
 #[derive(Debug, Clone)]
 pub struct RemoteBackend {
     conn: RemoteConnection,
     identity: Option<SigKey>,
+    views: Arc<Mutex<BTreeMap<String, ID>>>,
 }
 
 impl RemoteBackend {
     pub fn new(conn: RemoteConnection, identity: Option<SigKey>) -> Self {
-        Self { conn, identity }
+        Self {
+            conn,
+            identity,
+            views: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 
     /// The acting identity for authenticated RPCs: the bound per-handle
@@ -54,6 +71,155 @@ impl RemoteBackend {
 
 #[async_trait]
 impl Backend for RemoteBackend {
+    async fn resolve_store_state(&self, request: &StoreStateRequest) -> Result<Option<RecordView>> {
+        let view = self
+            .conn
+            .resolve_store_state(self.identity(), request.clone())
+            .await?;
+        if let Some(token) = &view {
+            self.views
+                .lock()
+                .unwrap()
+                .insert(token.clone(), request.database.clone());
+        }
+        Ok(view.map(|namespace_id| RecordView { namespace_id }))
+    }
+
+    async fn begin_store_state_staging(&self, request: StoreStateRequest) -> Result<StagingToken> {
+        let namespace_id = self
+            .conn
+            .begin_store_state_staging(self.identity(), request.clone())
+            .await?;
+        Ok(StagingToken {
+            namespace_id,
+            target: request,
+        })
+    }
+
+    async fn stage_store_state_records(
+        &self,
+        token: &StagingToken,
+        records: RecordMutations,
+    ) -> Result<()> {
+        let mut chunk_id = 0;
+        let mut chunk = RecordMutations::new();
+        let mut encoded = 0usize;
+        for (key, value) in records {
+            let size = serde_json::to_vec(&(key.clone(), value.clone()))?.len();
+            if size > crate::service::protocol::MAX_RECORD_CHUNK_BYTES as usize {
+                return Err(crate::backend::BackendError::RecordTooLarge {
+                    encoded_bytes: size,
+                }
+                .into());
+            }
+            if !chunk.is_empty()
+                && encoded + size > crate::service::protocol::MAX_RECORD_CHUNK_BYTES as usize
+            {
+                self.conn
+                    .stage_store_state_records(
+                        token.target.database.clone(),
+                        self.identity(),
+                        token.namespace_id.clone(),
+                        chunk_id,
+                        std::mem::take(&mut chunk),
+                    )
+                    .await?;
+                chunk_id += 1;
+                encoded = 0;
+            }
+            encoded += size;
+            chunk.insert(key, value);
+        }
+        if !chunk.is_empty() {
+            self.conn
+                .stage_store_state_records(
+                    token.target.database.clone(),
+                    self.identity(),
+                    token.namespace_id.clone(),
+                    chunk_id,
+                    chunk,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn publish_store_state(&self, token: StagingToken) -> Result<RecordView> {
+        let database = token.target.database.clone();
+        let namespace_id = self
+            .conn
+            .publish_store_state(token.target.database, self.identity(), token.namespace_id)
+            .await?;
+        self.views
+            .lock()
+            .unwrap()
+            .insert(namespace_id.clone(), database);
+        Ok(RecordView { namespace_id })
+    }
+
+    async fn abort_store_state(&self, token: StagingToken) -> Result<()> {
+        self.conn
+            .abort_store_state(token.target.database, self.identity(), token.namespace_id)
+            .await
+    }
+
+    async fn store_state_record_get(
+        &self,
+        view: &RecordView,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let database = self
+            .views
+            .lock()
+            .unwrap()
+            .get(&view.namespace_id)
+            .cloned()
+            .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?;
+        self.conn
+            .store_state_record_get(
+                database,
+                self.identity(),
+                view.namespace_id.clone(),
+                key.to_vec(),
+            )
+            .await
+    }
+
+    async fn store_state_record_scan(
+        &self,
+        view: &RecordView,
+        range: &RecordRange,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RecordPage> {
+        let database = self
+            .views
+            .lock()
+            .unwrap()
+            .get(&view.namespace_id)
+            .cloned()
+            .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?;
+        self.conn
+            .store_state_record_scan(
+                database,
+                self.identity(),
+                view.namespace_id.clone(),
+                range.clone(),
+                after.map(ToOwned::to_owned),
+                u32::try_from(limit).unwrap_or(u32::MAX),
+                crate::service::protocol::MAX_RECORD_PAGE_BYTES,
+            )
+            .await
+    }
+
+    async fn clear_derived_store_state(&self) -> Result<()> {
+        // Clearing is an administrative operation on daemon-owned derived
+        // state. A connected client cannot safely clear projections used by
+        // other sessions, so a client-side clear is a no-op; natural
+        // descriptor/source misses rebuild through the record seam.
+        Ok(())
+    }
+
     async fn get(&self, id: &ID) -> Result<Entry> {
         // `ID::default()` is never a real database, so the pre-dispatch gate
         // waves it through; the server then gates post-fetch against the
