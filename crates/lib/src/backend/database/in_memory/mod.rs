@@ -418,7 +418,11 @@ impl BackendImpl for InMemory {
             .collect::<Vec<_>>();
         let has_more = records.len() > limit;
         records.truncate(limit);
-        let next = has_more.then(|| records.last().unwrap().0.clone());
+        let next = if has_more {
+            records.last().map(|record| record.0.clone())
+        } else {
+            None
+        };
         Ok(RecordPage { records, next })
     }
 

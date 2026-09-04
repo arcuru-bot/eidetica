@@ -457,6 +457,21 @@ async fn test_table_doc_path_normalization_keeps_empty_key_and_ignores_all_dots(
 }
 
 #[tokio::test]
+async fn test_table_zero_limit_scan_is_empty_and_terminal() {
+    let ctx = TestContext::new().with_database().await;
+    let txn = ctx.database().new_transaction().await.unwrap();
+    let table = txn
+        .get_store::<Table<SimpleRecord>>("zero_limit")
+        .await
+        .unwrap();
+    table.set("row", SimpleRecord { value: 1 }).await.unwrap();
+
+    let page = table.scan_page(None, 0).await.unwrap();
+    assert!(page.rows.is_empty());
+    assert!(page.next.is_none());
+}
+
+#[tokio::test]
 async fn test_table_multiple_records() {
     let ctx = TestContext::new().with_database().await;
 
