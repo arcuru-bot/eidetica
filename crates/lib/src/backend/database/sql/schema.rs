@@ -13,8 +13,11 @@
 //!
 //! 1. Increment `SCHEMA_VERSION`
 //! 2. Add a new `migrate_vN_to_vM` async function
-//! 3. Add the migration to the match statement in `run_migration`
-//! 4. Document what the migration does
+//! 3. Have that function update `schema_version` to its target version inside
+//!    the same transaction as its schema changes, so the version write and the
+//!    schema change commit or roll back together
+//! 4. Add the migration to the match statement in `run_migration`
+//! 5. Document what the migration does
 
 use crate::Result;
 use crate::backend::errors::BackendError;
@@ -39,7 +42,7 @@ const CREATE_STORE_STATE_TABLES: &[&str] = &[
         projection_version BIGINT NOT NULL,
         source_key BYTEA NOT NULL,
         created_revision BIGINT,
-        UNIQUE (database_id, store_name, lifecycle, scope_user_uuid,
+        UNIQUE (database_id, store_name, lifecycle, status, scope_user_uuid,
                 projection_name, projection_version, source_key)
     )",
     "CREATE TABLE IF NOT EXISTS store_state_records (
@@ -234,8 +237,12 @@ async fn initialize_store_state_tables(backend: &SqlxBackend) -> Result<()> {
 
 /// Run migrations sequentially from one schema version to another.
 ///
-/// Migrations are run one at a time, incrementing the version after each.
-/// This allows for proper error handling and rollback semantics.
+/// Migrations are run one step at a time, each advancing the schema by a single
+/// version. This function only tracks the step it is on; persisting the new
+/// `schema_version` is the responsibility of each migration function, which
+/// writes it in the same transaction as its schema changes. A failed step
+/// therefore leaves the recorded version at the last successfully committed
+/// migration.
 async fn migrate(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
     tracing::info!(from, to, "Starting SQL schema migration");
 
@@ -245,13 +252,6 @@ async fn migrate(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
         tracing::info!(from = current, to = next, "Running migration");
 
         run_migration(backend, current, next).await?;
-
-        // Update schema version after successful migration
-        sqlx::query("UPDATE schema_version SET version = $1")
-            .bind(next)
-            .execute(backend.pool())
-            .await
-            .sql_context("Failed to update schema version")?;
 
         tracing::info!(version = next, "Migration completed");
         current = next;
@@ -271,12 +271,15 @@ async fn migrate(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
 /// When incrementing `SCHEMA_VERSION`, add a match arm here:
 ///
 /// ```ignore
-/// match from {
-///     1 => migrate_v1_to_v2(backend).await,
+/// match (from, to) {
+///     (1, 2) => migrate_v1_to_v2(backend).await,
 ///     // ... existing migrations ...
 ///     _ => { /* error handling */ }
 /// }
 /// ```
+///
+/// The migration function is responsible for persisting the new
+/// `schema_version` itself, inside the same transaction as its schema changes.
 async fn run_migration(backend: &SqlxBackend, from: i64, to: i64) -> Result<()> {
     let _ = backend;
 

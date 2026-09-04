@@ -11,9 +11,9 @@ Cached-state construction writes into a private build first.
 A failed fold, serialization, private write, or publish leaves no partial published record set.
 Published derived record sets are immutable.
 
-Clearing the CRDT cache removes derived record sets as well as the legacy cache entries.
-The deletion predicate selects only the `Derived` lifecycle, so authoritative records remain byte-for-byte unchanged.
-The next historical read rebuilds from immutable Entries.
+Clearing selects only the `Derived` lifecycle, so authoritative records remain byte-for-byte unchanged.
+Clearing is two-phase: it unlinks every published derived record set and reclaims the generation unlinked by the previous clear.
+An unlinked record set is no longer resolvable, so the next read rebuilds from immutable Entries, while a reader that resolved its view before the clear keeps reading the generation it is walking until the following clear reclaims it.
 
 The legacy SQL `crdt_cache_v2` table and InMemory LRU are no longer the active local historical materialization path, but remain available for current service compatibility.
 Remote historical cache calls continue using the existing service protocol until record paging is implemented.
