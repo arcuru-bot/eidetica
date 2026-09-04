@@ -26,7 +26,9 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use crate::auth::crypto::PrivateKey;
 use crate::auth::crypto::{PublicKey, create_challenge_response};
 use crate::auth::types::SigKey;
-use crate::backend::InstanceMetadata;
+use crate::backend::{
+    InstanceMetadata, RecordMutations, RecordPage, RecordRange, StoreStateRequest,
+};
 use crate::entry::{Entry, ID};
 use crate::instance::WeakInstance;
 use crate::service::error::service_error_to_eidetica_error;
@@ -1303,6 +1305,146 @@ impl RemoteConnection {
         match resp {
             ServiceResponse::MergeState(state) => Ok(state),
             other => Err(unexpected_response("MergeState", &other)),
+        }
+    }
+
+    /// Resolve a ready projection, returning its opaque server-issued view.
+    pub async fn resolve_store_state(
+        &self,
+        identity: SigKey,
+        request: StoreStateRequest,
+    ) -> crate::Result<Option<String>> {
+        match self
+            .db_request(
+                request.database.clone(),
+                identity,
+                DatabaseOp::ResolveStoreState { request },
+            )
+            .await?
+        {
+            ServiceResponse::RecordView(view) => Ok(view),
+            other => Err(unexpected_response("RecordView", &other)),
+        }
+    }
+
+    /// Open an invisible staging namespace, returning its opaque token.
+    pub async fn begin_store_state_staging(
+        &self,
+        identity: SigKey,
+        request: StoreStateRequest,
+    ) -> crate::Result<String> {
+        match self
+            .db_request(
+                request.database.clone(),
+                identity,
+                DatabaseOp::BeginStoreStateStaging { request },
+            )
+            .await?
+        {
+            ServiceResponse::Token(token) => Ok(token),
+            other => Err(unexpected_response("Token", &other)),
+        }
+    }
+
+    /// Upload one idempotent chunk of records into a staging namespace.
+    pub async fn stage_store_state_records(
+        &self,
+        root: ID,
+        identity: SigKey,
+        token: String,
+        chunk_id: u64,
+        records: RecordMutations,
+    ) -> crate::Result<()> {
+        self.db_request(
+            root,
+            identity,
+            DatabaseOp::StageStoreStateRecords {
+                token,
+                chunk_id,
+                records: records.into_iter().collect(),
+            },
+        )
+        .await
+        .and_then(Self::expect_ok)
+    }
+
+    /// Publish a staged namespace and return its opaque read view.
+    pub async fn publish_store_state(
+        &self,
+        root: ID,
+        identity: SigKey,
+        token: String,
+    ) -> crate::Result<String> {
+        match self
+            .db_request(root, identity, DatabaseOp::PublishStoreState { token })
+            .await?
+        {
+            ServiceResponse::RecordView(Some(view)) => Ok(view),
+            other => Err(unexpected_response("RecordView", &other)),
+        }
+    }
+
+    /// Discard an unfinished staging namespace and its bytes.
+    pub async fn abort_store_state(
+        &self,
+        root: ID,
+        identity: SigKey,
+        token: String,
+    ) -> crate::Result<()> {
+        self.db_request(root, identity, DatabaseOp::AbortStoreState { token })
+            .await
+            .and_then(Self::expect_ok)
+    }
+
+    /// Read one record through a resolved view.
+    pub async fn store_state_record_get(
+        &self,
+        root: ID,
+        identity: SigKey,
+        view: String,
+        key: Vec<u8>,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        match self
+            .db_request(
+                root,
+                identity,
+                DatabaseOp::StoreStateRecordGet { view, key },
+            )
+            .await?
+        {
+            ServiceResponse::Record(record) => Ok(record),
+            other => Err(unexpected_response("Record", &other)),
+        }
+    }
+
+    /// Read one bounded ordered page through a resolved view.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn store_state_record_scan(
+        &self,
+        root: ID,
+        identity: SigKey,
+        view: String,
+        range: RecordRange,
+        after: Option<Vec<u8>>,
+        max_records: u32,
+        max_encoded_bytes: u32,
+    ) -> crate::Result<RecordPage> {
+        match self
+            .db_request(
+                root,
+                identity,
+                DatabaseOp::StoreStateRecordScan {
+                    view,
+                    range,
+                    after,
+                    max_records,
+                    max_encoded_bytes,
+                },
+            )
+            .await?
+        {
+            ServiceResponse::RecordPage(page) => Ok(page),
+            other => Err(unexpected_response("RecordPage", &other)),
         }
     }
 

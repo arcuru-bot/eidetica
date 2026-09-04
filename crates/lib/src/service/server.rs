@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, watch};
@@ -18,7 +19,9 @@ use crate::auth::crypto::{PublicKey, generate_challenge, verify_challenge_respon
 use crate::auth::errors::AuthError;
 use crate::auth::types::{Permission, SigKey};
 use crate::auth::validation::permissions::resolve_identity_permission;
-use crate::backend::{CacheScope, VerificationStatus};
+use crate::backend::{
+    CacheScope, StagingToken, StoreStateLifecycle, StoreStateRequest, VerificationStatus,
+};
 use crate::database::Database;
 use crate::entry::ID;
 use crate::instance::{CallbackId, WriteSource};
@@ -34,6 +37,22 @@ use crate::user::system_databases::lookup_user_record;
 /// diagnostic now — registry-based routing went away in the per-db
 /// callback refactor.
 type ConnectionId = u64;
+
+/// How long an idle session token survives before the next dispatch reclaims
+/// its backend resources.
+const TOKEN_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// One server-issued Store-state capability, bound to the session that minted
+/// it. `published` distinguishes a readable view from a staging namespace that
+/// still owes an abort if the session goes away.
+struct SessionStaging {
+    backend: StagingToken,
+    user_uuid: String,
+    database: ID,
+    published: bool,
+    chunks: HashMap<u64, Vec<u8>>,
+    last_used: Instant,
+}
 
 /// Per-connection context carried through the dispatch chain. Holds:
 ///
@@ -57,6 +76,8 @@ struct ConnectionContext {
     tx: mpsc::UnboundedSender<ServerFrame>,
     instance: Instance,
     subscribed: std::sync::Mutex<HashMap<ID, CallbackId>>,
+    staging: std::sync::Mutex<HashMap<String, SessionStaging>>,
+    token_idle_ttl: Duration,
 }
 
 impl ConnectionContext {
@@ -64,6 +85,21 @@ impl ConnectionContext {
         self.subscribed
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Drop session tokens that have gone idle, returning the backend staging
+    /// tokens whose namespaces the caller must abort.
+    fn cleanup_expired(&self) -> Vec<StagingToken> {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        self.staging.lock().unwrap().retain(|_, value| {
+            let keep = now.duration_since(value.last_used) <= self.token_idle_ttl;
+            if !keep && !value.published {
+                expired.push(value.backend.clone());
+            }
+            keep
+        });
+        expired
     }
 }
 
@@ -88,6 +124,20 @@ impl Drop for ConnectionGuard {
         }
         for (tree_id, id) in subs.iter() {
             self.ctx.instance.remove_write_callback(tree_id, *id);
+        }
+        drop(subs);
+        let staging = std::mem::take(&mut *self.ctx.staging.lock().unwrap())
+            .into_values()
+            .filter(|value| !value.published)
+            .map(|value| value.backend)
+            .collect::<Vec<_>>();
+        if !staging.is_empty() {
+            let backend = self.ctx.instance.backend().clone();
+            tokio::spawn(async move {
+                for token in staging {
+                    let _ = backend.abort_store_state(token).await;
+                }
+            });
         }
     }
 }
@@ -152,6 +202,7 @@ enum ConnectionState {
 pub struct ServiceServer {
     instance: Instance,
     socket_path: PathBuf,
+    token_idle_ttl: Duration,
 }
 
 impl ServiceServer {
@@ -164,7 +215,16 @@ impl ServiceServer {
         Self {
             instance,
             socket_path: socket_path.into(),
+            token_idle_ttl: TOKEN_IDLE_TTL,
         }
+    }
+
+    /// Shorten the idle lifetime of session tokens so expiry is observable
+    /// without waiting out the production timeout.
+    #[cfg(feature = "testing")]
+    pub fn with_token_idle_ttl_for_test(mut self, ttl: Duration) -> Self {
+        self.token_idle_ttl = ttl;
+        self
     }
 
     /// Get the socket path.
@@ -219,9 +279,10 @@ impl ServiceServer {
                     match accept_result {
                         Ok((stream, _addr)) => {
                             let instance = self.instance.clone();
+                            let token_idle_ttl = self.token_idle_ttl;
                             let conn_id = next_conn_id.fetch_add(1, Ordering::Relaxed);
                             handlers.spawn(async move {
-                                if let Err(e) = handle_connection(stream, instance, conn_id).await {
+                                if let Err(e) = handle_connection(stream, instance, conn_id, token_idle_ttl).await {
                                     tracing::debug!(conn_id, "Connection handler error: {e}");
                                 }
                             });
@@ -282,6 +343,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     instance: Instance,
     conn_id: ConnectionId,
+    token_idle_ttl: Duration,
 ) -> crate::Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -356,6 +418,8 @@ async fn handle_connection(
         tx: frame_tx.clone(),
         instance: instance.clone(),
         subscribed: std::sync::Mutex::new(HashMap::new()),
+        staging: std::sync::Mutex::new(HashMap::new()),
+        token_idle_ttl,
     });
     let guard = ConnectionGuard { ctx: ctx.clone() };
 
@@ -438,6 +502,9 @@ async fn dispatch_inner(
     ctx: &ConnectionContext,
     request: ServiceRequest,
 ) -> crate::Result<ServiceResponse> {
+    for token in ctx.cleanup_expired() {
+        let _ = instance.backend().abort_store_state(token).await;
+    }
     match request {
         // === Pre-auth: login handshake ===
         ServiceRequest::TrustedLoginUser { username } => {
@@ -484,9 +551,10 @@ async fn dispatch_inner(
                 _ => {
                     return Err(crate::Error::Auth(Box::new(
                         AuthError::InvalidAuthConfiguration {
-                            reason: "database operation requires an authenticated connection; \
-                                 complete TrustedLogin* first"
-                                .to_string(),
+                            reason: format!(
+                                "database operation requires an authenticated connection; complete TrustedLogin* first (op: {:?})",
+                                inner.op
+                            ),
                         },
                     )));
                 }
@@ -631,6 +699,215 @@ async fn dispatch_database_op(
     op: DatabaseOp,
 ) -> crate::Result<ServiceResponse> {
     match op {
+        DatabaseOp::ResolveStoreState { request } => {
+            let request = session_store_state_request(request, user_uuid, &root_id)?;
+            let view = match instance.backend().resolve_store_state(&request).await? {
+                Some(view) => Some(view),
+                // A client asks with its own scope; the daemon's own
+                // materialized state is shared, so fall back to it rather than
+                // rebuilding per user.
+                None => {
+                    let shared = StoreStateRequest {
+                        scope: CacheScope::Shared,
+                        ..request.clone()
+                    };
+                    instance.backend().resolve_store_state(&shared).await?
+                }
+            };
+            let token = view.map(|view| {
+                let token = random_token();
+                ctx.staging.lock().unwrap().insert(
+                    token.clone(),
+                    SessionStaging {
+                        backend: StagingToken {
+                            namespace_id: view.namespace_id,
+                            target: request.clone(),
+                        },
+                        user_uuid: user_uuid.to_string(),
+                        database: request.database.clone(),
+                        published: true,
+                        chunks: HashMap::new(),
+                        last_used: Instant::now(),
+                    },
+                );
+                token
+            });
+            Ok(ServiceResponse::RecordView(token))
+        }
+        DatabaseOp::BeginStoreStateStaging { request } => {
+            let request = session_store_state_request(request, user_uuid, &root_id)?;
+            let backend = instance
+                .backend()
+                .begin_store_state_staging(request.clone())
+                .await?;
+            let token = random_token();
+            ctx.staging.lock().unwrap().insert(
+                token.clone(),
+                SessionStaging {
+                    backend,
+                    user_uuid: user_uuid.to_string(),
+                    database: request.database,
+                    published: false,
+                    chunks: HashMap::new(),
+                    last_used: Instant::now(),
+                },
+            );
+            Ok(ServiceResponse::Token(token))
+        }
+        DatabaseOp::StageStoreStateRecords {
+            token,
+            chunk_id,
+            records,
+        } => {
+            let digest = serde_json::to_vec(&records)?;
+            if digest.len() > crate::service::protocol::MAX_RECORD_CHUNK_BYTES as usize {
+                return Err(crate::backend::BackendError::RecordTooLarge {
+                    encoded_bytes: digest.len(),
+                }
+                .into());
+            }
+            let records = records
+                .into_iter()
+                .collect::<crate::backend::RecordMutations>();
+            let (backend, duplicate) =
+                session_staging(ctx, user_uuid, &root_id, &token, chunk_id, &digest)?;
+            if duplicate {
+                return Ok(ServiceResponse::Ok);
+            }
+            if let Err(error) = instance
+                .backend()
+                .stage_store_state_records(&backend, records)
+                .await
+            {
+                if let Some(value) = ctx.staging.lock().unwrap().get_mut(&token) {
+                    value.chunks.remove(&chunk_id);
+                }
+                return Err(error);
+            }
+            Ok(ServiceResponse::Ok)
+        }
+        DatabaseOp::PublishStoreState { token } => {
+            let staged = ctx
+                .staging
+                .lock()
+                .unwrap()
+                .remove(&token)
+                .filter(|value| value.user_uuid == user_uuid && value.database == root_id)
+                .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?;
+            let backend_token = staged.backend;
+            let view = match instance
+                .backend()
+                .publish_store_state(backend_token.clone())
+                .await
+            {
+                Ok(view) => view,
+                Err(error) => {
+                    let _ = instance.backend().abort_store_state(backend_token).await;
+                    return Err(error);
+                }
+            };
+            let view_token = random_token();
+            let database = root_id.clone();
+            ctx.staging.lock().unwrap().insert(
+                view_token.clone(),
+                SessionStaging {
+                    backend: StagingToken {
+                        namespace_id: view.namespace_id,
+                        target: StoreStateRequest {
+                            database: database.clone(),
+                            store: String::new(),
+                            lifecycle: StoreStateLifecycle::Derived,
+                            scope: CacheScope::User(user_uuid.to_string()),
+                            projection: crate::backend::ProjectionDescriptor {
+                                name: String::new(),
+                                version: 0,
+                            },
+                            source_key: Vec::new(),
+                        },
+                    },
+                    user_uuid: user_uuid.to_string(),
+                    database,
+                    published: true,
+                    chunks: HashMap::new(),
+                    last_used: Instant::now(),
+                },
+            );
+            Ok(ServiceResponse::RecordView(Some(view_token)))
+        }
+        DatabaseOp::AbortStoreState { token } => {
+            let staged = {
+                let mut staging = ctx.staging.lock().unwrap();
+                if staging
+                    .get(&token)
+                    .is_some_and(|value| value.user_uuid != user_uuid || value.database != root_id)
+                {
+                    return Err(crate::backend::BackendError::InvalidStoreStateStagingToken.into());
+                }
+                staging.remove(&token)
+            };
+            if let Some(staged) = staged {
+                instance.backend().abort_store_state(staged.backend).await?;
+            }
+            Ok(ServiceResponse::Ok)
+        }
+        DatabaseOp::StoreStateRecordGet { view, key } => {
+            let namespace_id = {
+                let mut staged = ctx.staging.lock().unwrap();
+                staged
+                    .get_mut(&view)
+                    .filter(|value| {
+                        value.user_uuid == user_uuid && value.database == root_id && value.published
+                    })
+                    .map(|value| {
+                        value.last_used = Instant::now();
+                        value.backend.namespace_id.clone()
+                    })
+                    .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?
+            };
+            let record = instance
+                .backend()
+                .store_state_record_get(&crate::backend::RecordView { namespace_id }, &key)
+                .await?;
+            ensure_record_fits(record.as_ref())?;
+            Ok(ServiceResponse::Record(record))
+        }
+        DatabaseOp::StoreStateRecordScan {
+            view,
+            range,
+            after,
+            max_records,
+            max_encoded_bytes,
+        } => {
+            let backend = {
+                let mut staged = ctx.staging.lock().unwrap();
+                staged
+                    .get_mut(&view)
+                    .filter(|value| {
+                        value.user_uuid == user_uuid && value.database == root_id && value.published
+                    })
+                    .map(|value| {
+                        value.last_used = Instant::now();
+                        value.backend.clone()
+                    })
+                    .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?
+            };
+            let page = bounded_page(
+                instance
+                    .backend()
+                    .store_state_record_scan(
+                        &crate::backend::RecordView {
+                            namespace_id: backend.namespace_id,
+                        },
+                        &range,
+                        after.as_deref(),
+                        max_records as usize,
+                    )
+                    .await?,
+                max_encoded_bytes,
+            )?;
+            Ok(ServiceResponse::RecordPage(page))
+        }
+
         DatabaseOp::GetEntry { id } => {
             let entry = instance.backend().get(&id).await?;
             // Post-fetch owning-tree Read gate: a raw entry id carries no
@@ -909,6 +1186,106 @@ async fn dispatch_database_op(
             Ok(ServiceResponse::Ok)
         }
     }
+}
+
+fn random_token() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Refuse a record the wire cannot carry, before it is framed.
+fn ensure_record_fits(record: Option<&Vec<u8>>) -> crate::Result<()> {
+    if let Some(record) = record {
+        let encoded = serde_json::to_vec(record)?.len();
+        if encoded > crate::service::protocol::MAX_RECORD_CHUNK_BYTES as usize {
+            return Err(crate::backend::BackendError::RecordTooLarge {
+                encoded_bytes: encoded,
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Trim a page to the caller's encoded-byte budget, re-deriving the exclusive
+/// continuation key from what actually survives. A single record that cannot
+/// fit under the budget is an error rather than a silently empty page.
+fn bounded_page(
+    mut page: crate::backend::RecordPage,
+    max_encoded_bytes: u32,
+) -> crate::Result<crate::backend::RecordPage> {
+    let limit = max_encoded_bytes.min(crate::service::protocol::MAX_RECORD_CHUNK_BYTES) as usize;
+    let mut size = 2usize;
+    let mut keep = 0usize;
+    for record in &page.records {
+        let record_size = serde_json::to_vec(record)?.len();
+        if record_size > limit {
+            return Err(crate::backend::BackendError::RecordTooLarge {
+                encoded_bytes: record_size,
+            }
+            .into());
+        }
+        if size + record_size > limit {
+            break;
+        }
+        size += record_size;
+        keep += 1;
+    }
+    if keep < page.records.len() {
+        page.records.truncate(keep);
+        page.next = page.records.last().map(|(key, _)| key.clone());
+    }
+    Ok(page)
+}
+
+/// Bind a client-supplied Store-state request to the authenticated session.
+///
+/// The request travels with its own database and scope, so both are checked
+/// against the gate the dispatcher already applied: the database must be the
+/// authorized one, and a client may only address shared state or its own user
+/// scope. Client-computed state is written under the user scope, so one
+/// session cannot publish into another's namespace or into the daemon's.
+fn session_store_state_request(
+    mut request: StoreStateRequest,
+    user_uuid: &str,
+    database: &ID,
+) -> crate::Result<StoreStateRequest> {
+    if request.database != *database || request.lifecycle != StoreStateLifecycle::Derived {
+        return Err(crate::backend::BackendError::InvalidStoreStateStagingToken.into());
+    }
+    match &request.scope {
+        CacheScope::Shared => request.scope = CacheScope::User(user_uuid.to_string()),
+        CacheScope::User(uuid) if uuid == user_uuid => {}
+        CacheScope::User(_) => {
+            return Err(crate::backend::BackendError::InvalidStoreStateStagingToken.into());
+        }
+    }
+    Ok(request)
+}
+
+/// Resolve a session staging token, recording the chunk digest so a retried
+/// upload is idempotent and a changed one is refused.
+fn session_staging(
+    ctx: &ConnectionContext,
+    user_uuid: &str,
+    database: &ID,
+    token: &str,
+    chunk_id: u64,
+    digest: &[u8],
+) -> crate::Result<(StagingToken, bool)> {
+    let mut staging = ctx.staging.lock().unwrap();
+    let value = staging
+        .get_mut(token)
+        .filter(|value| value.user_uuid == user_uuid && value.database == *database)
+        .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?;
+    if let Some(existing) = value.chunks.get(&chunk_id) {
+        if existing != digest {
+            return Err(crate::backend::BackendError::InvalidStoreStateStagingToken.into());
+        }
+        return Ok((value.backend.clone(), true));
+    }
+    value.chunks.insert(chunk_id, digest.to_vec());
+    value.last_used = Instant::now();
+    Ok((value.backend.clone(), false))
 }
 
 /// Handle `ServiceRequest::TrustedLoginUser`: look up the user's full record,

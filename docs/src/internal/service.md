@@ -40,7 +40,7 @@ The protocol uses **length-prefixed JSON frames** over a Unix domain socket.
 
 Each frame is a 4-byte big-endian length prefix followed by a JSON-serialized payload. Maximum frame size is 64 MiB (`MAX_FRAME_SIZE`); frames exceeding this are rejected on both read and write. `write_frame`/`read_frame` handle serialization and framing; `read_frame` returns `None` on clean EOF.
 
-`PROTOCOL_VERSION` is currently `0`, indicating an unstable protocol that may change without notice.
+`PROTOCOL_VERSION` is currently `0`, indicating an unstable protocol that may change without notice. Version mismatches fail the handshake.
 
 `#[non_exhaustive]` does not protect wire compatibility — it only covers Rust source compatibility (exhaustive `match` arms in downstream code). Serialized enums like `WriteSource` (carried by `Notification::DatabaseWrite`) are versioned by `PROTOCOL_VERSION`: a peer on an older version fails to deserialize an unknown variant, so adding a variant is a version bump, not a backward-compatible addition.
 
@@ -139,13 +139,16 @@ Every storage operation rides a single `DatabaseOp` enum carried in `Authenticat
 | `GetEntry { id }`                        | Fetch a single entry by id (gating tree resolved server-side post-fetch). Read.                                                                                                  |
 | `GetCachedCrdtState { store, key }`      | Look up a previously cached materialized CRDT state for `(session user, root_id, key, store)`. Read.                                                                             |
 | `CacheCrdtState { store, key, blob }`    | Stash a client-computed materialized CRDT state. The blob is opaque to the daemon and scoped to the authenticated user. Read.                                                    |
+| Store-state resolve / staging / record get/scan | Resolve, build, and lazily read immutable historical projections through opaque server-issued views. Read for reads, Write for staging.                                     |
 | `SetInstanceMetadata { metadata }`       | Rewrite daemon-level pointers to its own system DBs. Special-cased server-side to gate `Admin` on `_databases` (a daemon-global system tree) instead of the request's `root_id`. |
 
 Operations deliberately **not** exposed over the wire — `update_verification_status`, `get_instance_secrets`, `all_roots`, and the verification/enumeration queries — live on the concrete local `BackendImpl` engine (reached via `Backend::local_engine`), so a `RemoteBackend` simply does not provide them.
 
 `update_verification_status` is off-wire **by design, not just for tidiness**: verification is a local trust decision. If a client could set it over the socket, a client (or anything that reached the socket) could assert "this entry is `Verified`" without the server having validated it — exactly the caller-asserted-status hole the storage API was hardened to close. So the daemon's Instance owns verification: it stores everything `Unverified` and runs `Database::verify()` itself. The frontier/`allow_unverified` distinction is applied by the daemon-side `Database`, and every client connected to the same daemon therefore observes the same verified view.
 
-`DatabaseOp::required_permission() -> Permission` returns `Write(0)` for `SubmitSignedEntry` (advisory only — the per-tree gate is skipped for submit), `Admin(0)` for `SetInstanceMetadata` (advisory — gated against `_databases` instead of `root_id`), and `Read` for every other variant.
+`DatabaseOp::required_permission() -> Permission` returns `Write(0)` for `SubmitSignedEntry` (advisory only — the per-tree gate is skipped for submit) and for the Store-state staging operations, `Admin(0)` for `SetInstanceMetadata` (advisory — gated against `_databases` instead of `root_id`), and `Read` for every other variant. The match is exhaustive, so a new operation cannot inherit `Read` by falling through.
+
+Projection-view and staging tokens are random opaque capabilities stored only in the connection context. Every use rechecks the authenticated user, the database, and the connection. Disconnect, explicit abort, and bounded idle expiry delete unpublished staging namespaces. The unchanged 64 MiB frame cap is enforced per request and response, so multi-record state is paged or chunked and a single record that cannot fit is refused with `RecordTooLarge`.
 
 ### ServiceResponse
 
@@ -154,6 +157,8 @@ Operations deliberately **not** exposed over the wire — `update_verification_s
 | `Entry(Entry)` / `Entries(Vec<Entry>)`                      | One or many entries                                                |
 | `Ids(Vec<ID>)`                                              | One or many IDs                                                    |
 | `Ok`                                                        | Success with no data                                               |
+| `Token(String)`                                             | Opaque server-issued staging capability                            |
+| `Record` / `RecordPage` / `RecordView`                      | Lazy point, bounded page, and immutable projection responses       |
 | `TransactionContext(TransactionContext)`                    | Parent tips + settings, response to `DatabaseOp::BeginTransaction` |
 | `CrdtValue(WireCrdtValue)`                                  | Materialized merged state, response to `DatabaseOp::GetStoreState` |
 | `MergeState(MergeState)`                                    | LCA + path, response to `DatabaseOp::ComputeMergeState`            |

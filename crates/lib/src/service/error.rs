@@ -44,6 +44,10 @@ impl From<&crate::Error> for ServiceError {
 /// combinations.
 pub fn service_error_to_eidetica_error(err: ServiceError) -> crate::Error {
     match (err.module.as_str(), err.kind.as_str()) {
+        ("backend", "InvalidStoreStateStagingToken") => {
+            BackendError::InvalidStoreStateStagingToken.into()
+        }
+        ("backend", "RecordTooLarge") => BackendError::RecordTooLarge { encoded_bytes: 0 }.into(),
         ("backend", "EntryNotFound") => BackendError::EntryNotFound {
             id: extract_id_from_message(&err.message).unwrap_or_default(),
         }
@@ -198,6 +202,8 @@ mod tests {
     #[test]
     fn test_all_mapped_pairs_roundtrip_module_and_kind() {
         let cases: Vec<crate::Error> = vec![
+            crate::Error::Backend(Box::new(BackendError::InvalidStoreStateStagingToken)),
+            crate::Error::Backend(Box::new(BackendError::RecordTooLarge { encoded_bytes: 42 })),
             crate::Error::Backend(Box::new(BackendError::EntryNotFound {
                 id: ID::from_bytes("rt-entry"),
             })),
