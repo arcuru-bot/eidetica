@@ -677,7 +677,7 @@ async fn test_multi_tip_merge_state_caching() {
     ctx.database()
         .backend()
         .unwrap()
-        .clear_crdt_cache()
+        .clear_derived_store_state()
         .await
         .unwrap();
 
@@ -695,11 +695,12 @@ async fn test_multi_tip_merge_state_caching() {
     let cache_id = ID::from_bytes(cache_key);
 
     // Verify cache is empty before read
+    let cache_request = opaque_cache_request(ctx.database().root_id(), "data", &cache_id);
     let cached_before = ctx
         .database()
         .backend()
         .unwrap()
-        .get_cached_crdt_state(ctx.database().root_id(), &cache_id, "data")
+        .resolve_store_state(&cache_request)
         .await
         .unwrap();
     assert!(
@@ -728,7 +729,6 @@ async fn test_multi_tip_merge_state_caching() {
     );
 
     // Verify cache is now populated
-    let cache_request = opaque_cache_request(ctx.database().root_id(), "data", &cache_id);
     let cached_after = ctx
         .database()
         .backend()
@@ -778,7 +778,7 @@ async fn test_multi_tip_cache_key_is_order_independent() {
     ctx.database()
         .backend()
         .unwrap()
-        .clear_crdt_cache()
+        .clear_derived_store_state()
         .await
         .unwrap();
 
@@ -822,7 +822,7 @@ async fn test_multi_tip_cache_key_is_order_independent() {
     ctx.database()
         .backend()
         .unwrap()
-        .clear_crdt_cache()
+        .clear_derived_store_state()
         .await
         .unwrap();
 

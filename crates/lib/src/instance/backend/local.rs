@@ -8,8 +8,8 @@ use super::{Backend, MergeSlice};
 use crate::{
     Result,
     backend::{
-        BackendImpl, CacheScope, InstanceMetadata, RecordMutations, RecordPage, RecordRange,
-        RecordView, StagingToken, StoreStateRequest, VerificationStatus,
+        BackendImpl, InstanceMetadata, RecordMutations, RecordPage, RecordRange, RecordView,
+        StagingToken, StoreStateRequest, VerificationStatus,
     },
     entry::{Entry, ID},
     instance::WriteSource,
@@ -125,29 +125,6 @@ impl Backend for LocalBackend {
             None => Vec::new(),
         };
         Ok(MergeSlice { merge_base, path })
-    }
-
-    async fn get_cached_crdt_state(
-        &self,
-        _tree: &ID,
-        entry_id: &ID,
-        store: &str,
-    ) -> Result<Option<Vec<u8>>> {
-        self.0
-            .get_cached_crdt_state(&CacheScope::Shared, entry_id, store)
-            .await
-    }
-
-    async fn cache_crdt_state(
-        &self,
-        _tree: &ID,
-        entry_id: &ID,
-        store: &str,
-        state: Vec<u8>,
-    ) -> Result<()> {
-        self.0
-            .cache_crdt_state(CacheScope::Shared, entry_id, store, state)
-            .await
     }
 
     async fn put(&self, entry: Entry) -> Result<()> {

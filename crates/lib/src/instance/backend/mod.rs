@@ -56,8 +56,8 @@ pub struct MergeSlice {
     pub path: Vec<ID>,
 }
 
-/// The storage operations `Transaction`/`Store`/`Database`/`Instance` perform,
-/// independent of whether storage is in-process or served by a daemon.
+/// Storage operations shared by transactions, Stores, databases, and instances,
+/// whether storage is local or served by a daemon.
 ///
 /// Tree-scoped methods take the tree explicitly; the remote implementation uses
 /// the argument directly (callers already pass the owning database's root), so
@@ -142,25 +142,6 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         entry_ids: &[ID],
     ) -> Result<MergeSlice>;
 
-    /// Cached materialized CRDT state for `(entry_id, store)` within `tree`, if
-    /// present. `tree` keys the daemon-side cache and gates the wire RPC; the
-    /// local engine ignores it (it serves the trusted shared scope).
-    async fn get_cached_crdt_state(
-        &self,
-        tree: &ID,
-        entry_id: &ID,
-        store: &str,
-    ) -> Result<Option<Vec<u8>>>;
-
-    /// Cache materialized CRDT state for `(entry_id, store)` within `tree`.
-    async fn cache_crdt_state(
-        &self,
-        tree: &ID,
-        entry_id: &ID,
-        store: &str,
-        state: Vec<u8>,
-    ) -> Result<()>;
-
     /// Persist an entry. Local stores it directly; remote submits it via
     /// `DatabaseOp::SubmitSignedEntry` (stored `Unverified`, server-verified).
     async fn put(&self, entry: Entry) -> Result<()>;
@@ -184,7 +165,7 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
     /// The concrete in-process storage engine, if this is a local backend.
     ///
     /// Off-seam local-only operations (instance secrets, verification-status
-    /// mutation, `all_roots`/`get_tree` raw dumps, scope-keyed cache) are
+    /// mutation, and `all_roots`/`get_tree` raw dumps) are
     /// reached through this accessor, so they are usable only where a concrete
     /// local backend exists. Returns `None` for remote backends.
     fn local_engine(&self) -> Option<Arc<dyn BackendImpl>> {

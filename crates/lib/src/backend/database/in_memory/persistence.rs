@@ -7,7 +7,7 @@ use std::{collections::HashMap, path::Path, sync::RwLock};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{InMemory, InMemoryInner, TreeTipsCache, cache::InMemoryCrdtCache};
+use super::{InMemory, InMemoryInner, TreeTipsCache};
 use crate::{
     Error, Result,
     backend::{InstanceMetadata, InstanceSecrets, VerificationStatus, errors::BackendError},
@@ -115,9 +115,6 @@ impl<'de> Deserialize<'de> for InMemory {
                 instance_secrets: serializable.instance_secrets,
                 tips: serializable.tips,
             }),
-            // Cache rebuilds lazily as reads materialize state — see the
-            // `cache` field's doc on SerializableDatabase.
-            crdt_cache: std::sync::Mutex::new(InMemoryCrdtCache::new()),
             store_state_point_reads: std::sync::atomic::AtomicUsize::new(0),
             store_state_scan_reads: std::sync::atomic::AtomicUsize::new(0),
         })

@@ -317,7 +317,7 @@ pub async fn assert_caching_consistency(tree: &Database, subtree_name: &str) {
     // Force cache clear
     tree.backend()
         .expect("Failed to get backend")
-        .clear_crdt_cache()
+        .clear_derived_store_state()
         .await
         .expect("Failed to clear cache");
 

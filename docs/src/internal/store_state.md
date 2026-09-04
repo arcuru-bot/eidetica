@@ -17,8 +17,9 @@ payload and wire semantics are unchanged.
 
 Table handles retain only their name and transaction. `get` deserializes one
 row, `scan_page` reads bounded deterministic pages, and `search` collects those
-pages only because its public return type is a `Vec`. Custom and remote backends
-without cached-record support keep the existing whole-state behavior.
+pages only because its public return type is a `Vec`. Local and service-backed
+Tables use the same point and page operations. Custom backends without cached-record
+support keep the existing whole-state behavior.
 
 A record set has one lifecycle:
 
@@ -30,7 +31,9 @@ Clearing derived state unlinks published record sets and reclaims the generation
 
 A builder creates private state, writes record chunks, then publishes atomically.
 Aborting or failing publication leaves no published record set and no private build behind.
-Two materializers can derive the same target concurrently; publication resolves that race to one shared record set rather than failing the loser.
+Two builders can derive the same target concurrently. Publication resolves that race to one shared record set rather than failing the other builder.
 Format descriptors identify the Store-owned record format and version, so cached state from different formats or historical sources cannot collide.
 
-Remote record operations remain unsupported until the service protocol exposes bounded paging and staging.
+Remote record operations use opaque server-issued views and staging tokens.
+Pages have exclusive continuation keys and encoded-byte bounds; one record that
+cannot fit fails with `RecordTooLarge`.

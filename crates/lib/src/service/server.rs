@@ -862,7 +862,7 @@ async fn dispatch_database_op(
                         value.last_used = Instant::now();
                         value.backend.namespace_id.clone()
                     })
-                    .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?
+                    .ok_or(crate::backend::BackendError::InvalidStoreStateView)?
             };
             let record = instance
                 .backend()
@@ -889,7 +889,7 @@ async fn dispatch_database_op(
                         value.last_used = Instant::now();
                         value.backend.clone()
                     })
-                    .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?
+                    .ok_or(crate::backend::BackendError::InvalidStoreStateView)?
             };
             let page = bounded_page(
                 instance
@@ -1002,41 +1002,6 @@ async fn dispatch_database_op(
                 merge_base: slice.merge_base,
                 path: slice.path,
             }))
-        }
-
-        DatabaseOp::GetCachedCrdtState { store, key } => {
-            // Per-tree Read gate already ran above. Try the caller's own
-            // User-scoped slot first (where client-uploaded ciphertext for
-            // encrypted stores lives), then fall back to Shared (where the
-            // daemon's own materialization of unencrypted stores lives).
-            // The fallback is what gives cross-user dedup on plaintext
-            // stores: alice triggers a server materialization, blob lands
-            // in Shared, bob's later read finds it without recomputing.
-            let backend = instance.require_local_engine()?;
-            let mut blob = backend
-                .get_cached_crdt_state(&CacheScope::User(user_uuid.to_string()), &key, &store)
-                .await?;
-            if blob.is_none() {
-                blob = backend
-                    .get_cached_crdt_state(&CacheScope::Shared, &key, &store)
-                    .await?;
-            }
-            Ok(ServiceResponse::CachedCrdtState(blob))
-        }
-
-        DatabaseOp::CacheCrdtState { store, key, blob } => {
-            // Per-tree Read gate already ran above. Per-user trust: the
-            // blob is opaque (cipher- or plaintext) and stored verbatim;
-            // only the submitting user can read it back. We never promote
-            // a client upload to Shared — the daemon can't verify the
-            // merge result, so cross-user visibility would be a poison
-            // vector. Shared writes only come from the daemon's own
-            // in-process (LocalBackend) materialization path.
-            instance
-                .require_local_engine()?
-                .cache_crdt_state(CacheScope::User(user_uuid.to_string()), &key, &store, blob)
-                .await?;
-            Ok(ServiceResponse::Ok)
         }
 
         DatabaseOp::SetInstanceMetadata { metadata } => {
@@ -1614,7 +1579,7 @@ mod tests {
 
         // Send wrong version
         let handshake = Handshake {
-            protocol_version: 999,
+            protocol_version: 1,
         };
         write_frame(&mut writer, &handshake).await.unwrap();
 

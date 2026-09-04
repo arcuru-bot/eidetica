@@ -36,11 +36,7 @@ use crate::{
 /// `get` derives its gating tree server-side from the fetched entry, so it
 /// passes `ID::default()` as the (waved-through) request root.
 ///
-/// CRDT-state caching is two-tiered: a connection-scoped process-lifetime LRU
-/// (tier 1) backed by the daemon's unified scope-keyed cache (tier 2) reached
-/// via `GetCachedCrdtState` / `CacheCrdtState` RPCs.
-///
-/// Store-state views are server-issued opaque tokens that carry no database of
+/// Views onto published record sets are server-issued opaque tokens that carry no database of
 /// their own, so `views` remembers which database each token was resolved
 /// against and every later record read is routed back to it.
 #[derive(Debug, Clone)]
@@ -174,7 +170,7 @@ impl Backend for RemoteBackend {
             .unwrap()
             .get(&view.namespace_id)
             .cloned()
-            .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?;
+            .ok_or(crate::backend::BackendError::InvalidStoreStateView)?;
         self.conn
             .store_state_record_get(
                 database,
@@ -198,7 +194,7 @@ impl Backend for RemoteBackend {
             .unwrap()
             .get(&view.namespace_id)
             .cloned()
-            .ok_or(crate::backend::BackendError::InvalidStoreStateStagingToken)?;
+            .ok_or(crate::backend::BackendError::InvalidStoreStateView)?;
         self.conn
             .store_state_record_scan(
                 database,
@@ -214,7 +210,7 @@ impl Backend for RemoteBackend {
 
     async fn clear_derived_store_state(&self) -> Result<()> {
         // Clearing is an administrative operation on daemon-owned derived
-        // state. A connected client cannot safely clear projections used by
+        // state. A connected client cannot safely clear published record sets used by
         // other sessions, so a client-side clear is a no-op; natural
         // descriptor/source misses rebuild through the record seam.
         Ok(())
@@ -325,60 +321,6 @@ impl Backend for RemoteBackend {
             merge_base: state.merge_base,
             path: state.path,
         })
-    }
-
-    async fn get_cached_crdt_state(
-        &self,
-        tree: &ID,
-        entry_id: &ID,
-        store: &str,
-    ) -> Result<Option<Vec<u8>>> {
-        // Tier 1: connection-shared process-lifetime LRU.
-        if let Some(blob) = self.conn.cache_get(tree, entry_id, store) {
-            return Ok(Some(blob));
-        }
-        // Tier 2: daemon-side unified cache, durable across sessions.
-        let blob = self
-            .conn
-            .get_cached_crdt_state_remote(
-                tree.clone(),
-                self.identity(),
-                store.to_string(),
-                entry_id.clone(),
-            )
-            .await?;
-        if let Some(b) = &blob {
-            self.conn
-                .cache_put(tree.clone(), entry_id.clone(), store.to_string(), b.clone());
-        }
-        Ok(blob)
-    }
-
-    async fn cache_crdt_state(
-        &self,
-        tree: &ID,
-        entry_id: &ID,
-        store: &str,
-        state: Vec<u8>,
-    ) -> Result<()> {
-        // Tier 1: stash locally first so a same-session re-read hits even if
-        // the tier-2 write later fails.
-        self.conn.cache_put(
-            tree.clone(),
-            entry_id.clone(),
-            store.to_string(),
-            state.clone(),
-        );
-        // Tier 2: propagate to the daemon. Awaited so wire errors surface.
-        self.conn
-            .cache_crdt_state_remote(
-                tree.clone(),
-                self.identity(),
-                store.to_string(),
-                entry_id.clone(),
-                state,
-            )
-            .await
     }
 
     async fn put(&self, entry: Entry) -> Result<()> {

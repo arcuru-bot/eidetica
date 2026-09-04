@@ -22,28 +22,26 @@ use crate::{
 
 /// Trust/visibility scope for a cached CRDT state entry.
 ///
-/// Cached materializations are the same kind of data — opaque serialized
-/// CRDT state bytes — regardless of where they came from. They differ only
-/// in *provenance*, which determines who is allowed to see them:
+/// Cached state holds the same kind of data — opaque serialized
+/// Store state — regardless of where they came from. They differ only in
+/// *provenance*, which determines who is allowed to see them:
 ///
-/// - **Shared**: bytes the daemon computed itself via a local Transaction.
-///   The daemon is the trusted computer; these bytes are good for any user
-///   with read permission on the database. Populated automatically as a
-///   side effect of `Database::get_store_state` and other daemon-side
-///   materialization paths. Encrypted stores never land here (daemon has no
-///   encryptor key — see [`crate::store::PasswordStore`]), so Shared
-///   entries are always plaintext.
+/// - **Shared**: state the daemon materialized itself via a local
+///   Transaction. The daemon is the trusted computer, so these bytes are
+///   good for any user with read permission on the database. Encrypted
+///   stores never land here (the daemon has no encryptor key — see
+///   [`crate::store::PasswordStore`]), so shared state is always plaintext.
 ///
-/// - **User(uuid)**: bytes a specific user uploaded over the service wire
-///   via `CacheCrdtState`. The daemon cannot verify the merge result, so
-///   it is scoped to that user only — alice's upload is invisible to bob.
+/// - **User(uuid)**: state a specific user computed and published over the
+///   service wire. The daemon cannot verify the merge result, so it is
+///   scoped to that user only — alice's publication is invisible to bob.
 ///   This is where encrypted-store materializations live (the client
-///   decrypts, merges, re-encrypts, and pushes the ciphertext).
+///   decrypts, merges, re-encrypts, and publishes the ciphertext).
 ///
-/// On read, the wire handler tries `User(session_user)` first and falls
+/// On read, the wire handler resolves `User(session_user)` first and falls
 /// back to `Shared` on miss — so a remote read of an unencrypted store
-/// benefits from cross-user dedup via the Shared scope, while encrypted
-/// store reads only ever hit User-scoped entries.
+/// benefits from cross-user dedup via the shared scope, while encrypted
+/// store reads only ever hit user-scoped cached state.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CacheScope {
     /// Daemon-computed; visible to every user with database read permission.
@@ -85,7 +83,7 @@ pub struct ProjectionDescriptor {
     pub version: u32,
 }
 
-/// Backend-owned handle to one published record set.
+/// An immutable view onto a published record set.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordView {
     pub(crate) namespace_id: String,
@@ -103,10 +101,10 @@ pub struct StoreStateRequest {
     pub source_key: Vec<u8>,
 }
 
-/// Claim on one private unpublished build.
+/// Opaque token for one private unpublished build.
 ///
-/// Minted by [`BackendImpl::begin_store_state_staging`]; handed back to stage,
-/// publish, or abort that same build. Opaque to everyone but the backend.
+/// Minted by [`BackendImpl::begin_store_state_staging`] and used to stage,
+/// publish, or abort that build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagingToken {
     pub(crate) namespace_id: String,
@@ -765,63 +763,6 @@ pub trait BackendImpl: Send + Sync + Any {
     /// * `store` - The name of the store to retrieve.
     /// * `snapshot` - The store snapshot defining the state to read from.
     async fn store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>>;
-
-    // === CRDT State Cache Methods ===
-    //
-    // These methods provide caching for computed CRDT state at specific
-    // entry+store combinations, scoped by [`CacheScope`]. This optimizes
-    // repeated computations of the same store state from the same set of
-    // tip entries and serves both daemon-local materialization (Shared) and
-    // client-uploaded materialization over the service wire (User).
-
-    /// Get cached CRDT state for a store at a specific entry within a scope.
-    ///
-    /// # Arguments
-    /// * `scope` - Trust scope: [`CacheScope::Shared`] for daemon-computed
-    ///   entries (visible to all users), [`CacheScope::User`] for
-    ///   client-uploaded entries scoped to that user.
-    /// * `entry_id` - The entry ID where the state is cached.
-    /// * `store` - The name of the store.
-    ///
-    /// # Returns
-    /// A `Result` containing an `Option<Vec<u8>>`. Returns `None` if not cached.
-    /// The bytes are the serialized CRDT state in the store's chosen format
-    /// (plaintext for Shared; ciphertext or plaintext for User, decided
-    /// client-side by the Transaction's encryptor map).
-    async fn get_cached_crdt_state(
-        &self,
-        scope: &CacheScope,
-        entry_id: &ID,
-        store: &str,
-    ) -> Result<Option<Vec<u8>>>;
-
-    /// Cache CRDT state for a store at a specific entry within a scope.
-    ///
-    /// # Arguments
-    /// * `scope` - Trust scope: [`CacheScope::Shared`] for daemon-computed
-    ///   entries, [`CacheScope::User`] for client-uploaded entries.
-    /// * `entry_id` - The entry ID where the state should be cached.
-    /// * `store` - The name of the store.
-    /// * `state` - The serialized CRDT state to cache (opaque bytes).
-    ///
-    /// # Returns
-    /// A `Result` indicating success or an error during storage.
-    async fn cache_crdt_state(
-        &self,
-        scope: CacheScope,
-        entry_id: &ID,
-        store: &str,
-        state: Vec<u8>,
-    ) -> Result<()>;
-
-    /// Clear all cached CRDT states.
-    ///
-    /// This is used when the CRDT computation algorithm changes and existing
-    /// cached states may have been computed incorrectly.
-    ///
-    /// # Returns
-    /// A `Result` indicating success or an error during the clear operation.
-    async fn clear_crdt_cache(&self) -> Result<()>;
 
     /// Get the store parent IDs for a specific entry and store, sorted by height then ID.
     ///

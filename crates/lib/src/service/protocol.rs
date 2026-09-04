@@ -84,8 +84,8 @@ pub struct HandshakeAck {
 // (tree, store, identity)-scoped. Carried in `ServiceRequest::AuthenticatedDb`.
 // ===========================================================================
 
-/// Which projection of the DAG an op observes. Mirrors the `Database`
-/// read posture: a write's parent tips are the tips of the *same* projection
+/// Which snapshot of the DAG an op observes. Mirrors the `Database`
+/// read posture: a write's parent tips are the tips of the *same* snapshot
 /// the caller reads (see the Verification Model design doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ReadScope {
@@ -143,23 +143,23 @@ pub type WireRecordMutations = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 /// set-metadata) before dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DatabaseOp {
-    /// Resolve an immutable historical projection through an opaque view token.
+    /// Resolve cached state through an opaque view onto one published record set.
     ResolveStoreState { request: StoreStateRequest },
-    /// Begin an invisible historical projection build.
+    /// Begin a private build.
     BeginStoreStateStaging { request: StoreStateRequest },
-    /// Upload one idempotent historical projection chunk.
+    /// Upload one idempotent chunk into the private build.
     StageStoreStateRecords {
         token: String,
         chunk_id: u64,
         records: WireRecordMutations,
     },
-    /// Publish an historical projection and return an opaque read view.
+    /// Publish the private build and return a view onto the published record set.
     PublishStoreState { token: String },
-    /// Discard an unfinished historical projection build.
+    /// Discard an unfinished private build.
     AbortStoreState { token: String },
-    /// Fetch one record from a resolved historical projection.
+    /// Fetch one record from a published record set.
     StoreStateRecordGet { view: String, key: Vec<u8> },
-    /// Fetch one bounded page from a resolved historical projection.
+    /// Fetch one bounded page from a published record set.
     StoreStateRecordScan {
         view: String,
         range: RecordRange,
@@ -168,7 +168,7 @@ pub enum DatabaseOp {
         max_encoded_bytes: u32,
     },
     /// Acquire everything needed to build+sign a transaction locally for the
-    /// given stores, with parents drawn from `scope`'s projection. Gate Read.
+    /// given stores, with parents drawn from `scope`'s snapshot. Gate Read.
     BeginTransaction {
         stores: Vec<String>,
         scope: ReadScope,
@@ -208,38 +208,6 @@ pub enum DatabaseOp {
     /// Fetch a single entry by id (gated post-fetch by its owning tree). Gate
     /// Read.
     GetEntry { id: ID },
-
-    /// Look up a cached materialized CRDT state. Server returns the previously
-    /// `CacheCrdtState`-submitted blob for `(session user, root_id, key, store)`,
-    /// or `None` on miss. Gate Read.
-    ///
-    /// Used by [`RemoteBackend::get_cached_crdt_state`](crate::instance::backend::RemoteBackend)
-    /// as the second tier of a two-level cache: the client first checks its own
-    /// per-connection LRU, then falls back to this RPC. The daemon's cache is
-    /// the cross-session source of truth.
-    GetCachedCrdtState { store: String, key: ID },
-
-    /// Stash a client-computed materialized CRDT state for `(session user,
-    /// root_id, key, store)`. Gate Read.
-    ///
-    /// **Per-user trust model**: the daemon stores whatever bytes the
-    /// authenticated user sends, scoped to their `user_uuid`. The blob is
-    /// **opaque** to the daemon — ciphertext for encrypted stores, plaintext
-    /// for plain ones — and the daemon performs no verification of the
-    /// merge result. The trust boundary is the same one the client would have
-    /// with a local-only cache: only the submitting user can poison their
-    /// future reads on this slot.
-    ///
-    /// **Tip-based natural expiry**: keys are derived from tip sets (see
-    /// `create_merge_cache_id`), so an entry whose tip set has advanced is
-    /// simply unreachable — future reads miss against a fresh key. Stale
-    /// entries fall out of the LRU under memory pressure rather than via
-    /// explicit invalidation.
-    CacheCrdtState {
-        store: String,
-        key: ID,
-        blob: Vec<u8>,
-    },
 
     /// Rewrite the daemon's instance metadata (system-DB pointers). Gated by
     /// `Admin` on `_databases` (a daemon-global system tree, resolved
@@ -308,8 +276,6 @@ impl DatabaseOp {
             | DatabaseOp::GetStoreTipsUpToEntries { .. }
             | DatabaseOp::ComputeMergeState { .. }
             | DatabaseOp::GetEntry { .. }
-            | DatabaseOp::GetCachedCrdtState { .. }
-            | DatabaseOp::CacheCrdtState { .. }
             | DatabaseOp::ResolveStoreState { .. }
             | DatabaseOp::StoreStateRecordGet { .. }
             | DatabaseOp::StoreStateRecordScan { .. }
@@ -494,9 +460,9 @@ pub enum ServiceResponse {
     Record(Option<Vec<u8>>),
     /// One bounded, ordered record page.
     RecordPage(RecordPage),
-    /// Opaque immutable projection view.
+    /// View onto one published record set.
     RecordView(Option<String>),
-    /// Opaque staging capability.
+    /// Capability for one private build.
     Token(String),
     /// Transaction-build context (response to `DatabaseOp::BeginTransaction`).
     TransactionContext(TransactionContext),
@@ -507,11 +473,6 @@ pub enum ServiceResponse {
     MergeState(MergeState),
     /// Optional instance metadata
     InstanceMetadata(Option<InstanceMetadata>),
-    /// Optional cached CRDT state blob (response to
-    /// `DatabaseOp::GetCachedCrdtState`). `None` on cache miss; the daemon
-    /// does not synthesize a value, so the client falls back to recomputing
-    /// from store entries.
-    CachedCrdtState(Option<Vec<u8>>),
     /// Error response
     Error(ServiceError),
     /// Challenge bytes returned in response to `TrustedLoginUser`, plus the
