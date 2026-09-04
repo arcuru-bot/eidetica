@@ -47,6 +47,7 @@ pub fn service_error_to_eidetica_error(err: ServiceError) -> crate::Error {
         ("backend", "InvalidStoreStateStagingToken") => {
             BackendError::InvalidStoreStateStagingToken.into()
         }
+        ("backend", "InvalidStoreStateView") => BackendError::InvalidStoreStateView.into(),
         ("backend", "RecordTooLarge") => BackendError::RecordTooLarge { encoded_bytes: 0 }.into(),
         ("backend", "EntryNotFound") => BackendError::EntryNotFound {
             id: extract_id_from_message(&err.message).unwrap_or_default(),
@@ -188,6 +189,29 @@ mod tests {
         assert!(err.is_io_error());
     }
 
+    #[test]
+    fn test_store_state_view_and_staging_token_stay_distinct_on_wire() {
+        // Published-view expiry must cross the wire as a retryable
+        // `InvalidStoreStateView`; private-build token failures stay
+        // `InvalidStoreStateStagingToken`. Collapsing the two would either
+        // retry staging misuse or stop retrying stale views.
+        let view = crate::Error::Backend(Box::new(BackendError::InvalidStoreStateView));
+        let view_round = service_error_to_eidetica_error(ServiceError::from(&view));
+        assert!(view_round.is_invalid_store_state_view());
+
+        let staging = crate::Error::Backend(Box::new(BackendError::InvalidStoreStateStagingToken));
+        let staging_round = service_error_to_eidetica_error(ServiceError::from(&staging));
+        assert!(
+            matches!(
+                staging_round,
+                crate::Error::Backend(ref e)
+                    if matches!(**e, BackendError::InvalidStoreStateStagingToken)
+            ),
+            "staging-token failure must stay a staging-token error, got {staging_round:?}"
+        );
+        assert!(!staging_round.is_invalid_store_state_view());
+    }
+
     /// Every `(module, kind)` pair that `service_error_to_eidetica_error`
     /// claims to map specifically must survive a full round-trip with its
     /// `(module, kind)` intact.
@@ -203,6 +227,7 @@ mod tests {
     fn test_all_mapped_pairs_roundtrip_module_and_kind() {
         let cases: Vec<crate::Error> = vec![
             crate::Error::Backend(Box::new(BackendError::InvalidStoreStateStagingToken)),
+            crate::Error::Backend(Box::new(BackendError::InvalidStoreStateView)),
             crate::Error::Backend(Box::new(BackendError::RecordTooLarge { encoded_bytes: 42 })),
             crate::Error::Backend(Box::new(BackendError::EntryNotFound {
                 id: ID::from_bytes("rt-entry"),

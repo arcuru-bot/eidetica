@@ -693,7 +693,7 @@ pub trait LocalBackendTestExt {
     ) -> eidetica::Result<()>;
     async fn get_tree(&self, tree: &ID) -> eidetica::Result<Vec<Entry>>;
     async fn all_roots(&self) -> eidetica::Result<Vec<ID>>;
-    async fn clear_crdt_cache(&self) -> eidetica::Result<()>;
+    async fn clear_derived_store_state(&self) -> eidetica::Result<()>;
 }
 
 impl LocalBackendTestExt for Arc<dyn Backend> {
@@ -716,12 +716,7 @@ impl LocalBackendTestExt for Arc<dyn Backend> {
     async fn all_roots(&self) -> eidetica::Result<Vec<ID>> {
         self.engine().all_roots().await
     }
-    async fn clear_crdt_cache(&self) -> eidetica::Result<()> {
-        // No local cache exists on a connected instance — the daemon owns it.
-        // Mirror the production seam: a client-side clear is a no-op.
-        match self.local_engine() {
-            Some(engine) => engine.clear_crdt_cache().await,
-            None => Ok(()),
-        }
+    async fn clear_derived_store_state(&self) -> eidetica::Result<()> {
+        eidetica::instance::backend::Backend::clear_derived_store_state(self.as_ref()).await
     }
 }

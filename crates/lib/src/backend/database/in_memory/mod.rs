@@ -4,7 +4,6 @@
 //! suitable for testing, development, or scenarios where data persistence
 //! is not strictly required or is handled externally.
 
-mod cache;
 mod persistence;
 mod storage;
 mod traversal;
@@ -14,7 +13,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     sync::{
-        Mutex, RwLock,
+        RwLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -25,17 +24,15 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Result,
     backend::{
-        BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, RecordMutations, RecordPage,
-        RecordRange, RecordView, StagingToken, StoreStateLifecycle, StoreStateRequest,
-        VerificationStatus, errors::BackendError,
+        BackendImpl, InstanceMetadata, InstanceSecrets, RecordMutations, RecordPage, RecordRange,
+        RecordView, StagingToken, StoreStateLifecycle, StoreStateRequest, VerificationStatus,
+        errors::BackendError,
     },
     entry::{Entry, ID},
     snapshot::Snapshot,
 };
 
 use crate::backend::database::sorting;
-
-use cache::InMemoryCrdtCache;
 
 /// Grouped tree tips cache: (tree_tips, subtree_name -> subtree_tips)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -97,11 +94,6 @@ pub struct InMemory {
     /// to eliminate lock ordering concerns between entries, verification
     /// status, and tips.
     pub(crate) inner: RwLock<InMemoryInner>,
-    /// Scope-keyed, byte-bounded LRU cache for materialized CRDT state.
-    /// `Mutex` (not `RwLock`) because `LruCache::get` mutates ordering, so
-    /// every read is effectively a write under LRU semantics. Hosts both
-    /// `Shared` (daemon-trusted) and `User` (client-attested) entries.
-    pub(crate) crdt_cache: Mutex<InMemoryCrdtCache>,
     store_state_point_reads: AtomicUsize,
     store_state_scan_reads: AtomicUsize,
 }
@@ -146,7 +138,6 @@ impl InMemory {
                 instance_secrets: None,
                 tips: HashMap::new(),
             }),
-            crdt_cache: Mutex::new(InMemoryCrdtCache::new()),
             store_state_point_reads: AtomicUsize::new(0),
             store_state_scan_reads: AtomicUsize::new(0),
         }
@@ -646,30 +637,6 @@ impl BackendImpl for InMemory {
         let mut inner = self.inner.write().unwrap();
         inner.instance_secrets = Some(secrets.clone());
         Ok(())
-    }
-
-    async fn get_cached_crdt_state(
-        &self,
-        scope: &CacheScope,
-        entry_id: &ID,
-        subtree: &str,
-    ) -> Result<Option<Vec<u8>>> {
-        cache::get_cached_crdt_state(self, scope, entry_id, subtree)
-    }
-
-    async fn cache_crdt_state(
-        &self,
-        scope: CacheScope,
-        entry_id: &ID,
-        subtree: &str,
-        state: Vec<u8>,
-    ) -> Result<()> {
-        cache::cache_crdt_state(self, scope, entry_id, subtree, state)
-    }
-
-    async fn clear_crdt_cache(&self) -> Result<()> {
-        cache::clear_crdt_cache(self)?;
-        self.clear_derived_store_state().await
     }
 
     async fn get_sorted_store_parents(

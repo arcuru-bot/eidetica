@@ -38,8 +38,8 @@ use sqlx::any::AnyPoolOptions;
 use crate::Result;
 use crate::backend::errors::BackendError;
 use crate::backend::{
-    BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, RecordMutations, RecordPage,
-    RecordRange, RecordView, StagingToken, StoreStateRequest, VerificationStatus,
+    BackendImpl, InstanceMetadata, InstanceSecrets, RecordMutations, RecordPage, RecordRange,
+    RecordView, StagingToken, StoreStateRequest, VerificationStatus,
 };
 use crate::entry::{Entry, ID};
 use crate::snapshot::Snapshot;
@@ -604,29 +604,6 @@ impl BackendImpl for SqlxBackend {
 
     async fn store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>> {
         traversal::store_at(self, tree, store, snapshot.tips()).await
-    }
-
-    async fn get_cached_crdt_state(
-        &self,
-        scope: &CacheScope,
-        entry_id: &ID,
-        store: &str,
-    ) -> Result<Option<Vec<u8>>> {
-        storage::get_cached_crdt_state(self, scope, entry_id, store).await
-    }
-
-    async fn cache_crdt_state(
-        &self,
-        scope: CacheScope,
-        entry_id: &ID,
-        store: &str,
-        state: Vec<u8>,
-    ) -> Result<()> {
-        storage::cache_crdt_state(self, scope, entry_id, store, state).await
-    }
-
-    async fn clear_crdt_cache(&self) -> Result<()> {
-        storage::clear_crdt_cache(self).await
     }
 
     async fn get_sorted_store_parents(

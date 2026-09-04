@@ -18,7 +18,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
-use lru::LruCache;
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
@@ -41,10 +40,6 @@ use crate::snapshot::Snapshot;
 use crate::user::UserError;
 use crate::user::crypto::{decrypt_private_key, derive_encryption_key};
 use crate::user::types::{KeyStorage, UserInfo};
-
-/// Default cap on the client-side CRDT-state LRU. Matches `MAX_FRAME_SIZE`
-/// (64 MiB) so a single oversized cached blob can still ride the wire.
-const CLIENT_CACHE_CAPACITY_BYTES: usize = 64 * 1024 * 1024;
 
 /// How long an `Idle` per-tree subscription is kept warm before the
 /// sweep sends `UnsubscribeWrites`. A re-registration arriving inside
@@ -118,61 +113,6 @@ pub fn set_idle_grace_window_for_test(d: std::time::Duration) {
 #[cfg(feature = "testing")]
 pub fn set_sweep_interval_for_test(d: std::time::Duration) {
     let _ = TEST_SWEEP_INTERVAL.set(d);
-}
-
-/// Process-lifetime LRU of materialized CRDT states for this connection.
-///
-/// Tier 1 of a two-level cache: local hits short-circuit any wire activity;
-/// misses fall through to `GetCachedCrdtState` against the daemon. Cleared
-/// on connection drop — durability across the daemon's lifetime is the
-/// unified [`crate::backend::CacheScope`]-keyed cache in the daemon's
-/// `BackendImpl`, not this one.
-///
-/// Keys are `(root_id, key, store_name)`; values are opaque bytes (cipher-
-/// or plaintext depending on the store, decided by the Transaction's
-/// `encryptors` map). The cache itself is byte-blind.
-struct ClientCrdtCache {
-    lru: LruCache<(ID, ID, String), Vec<u8>>,
-    current_bytes: usize,
-    capacity_bytes: usize,
-}
-
-impl ClientCrdtCache {
-    fn new(capacity_bytes: usize) -> Self {
-        Self {
-            lru: LruCache::unbounded(),
-            current_bytes: 0,
-            capacity_bytes,
-        }
-    }
-
-    fn get(&mut self, root_id: &ID, key: &ID, store: &str) -> Option<Vec<u8>> {
-        // `LruCache::get` promotes the entry to most-recently-used.
-        self.lru
-            .get(&(root_id.clone(), key.clone(), store.to_string()))
-            .cloned()
-    }
-
-    fn put(&mut self, root_id: ID, key: ID, store: String, blob: Vec<u8>) {
-        let blob_size = blob.len();
-        let cache_key = (root_id, key, store);
-        if let Some(prev) = self.lru.put(cache_key.clone(), blob) {
-            self.current_bytes = self.current_bytes.saturating_sub(prev.len());
-        }
-        self.current_bytes = self.current_bytes.saturating_add(blob_size);
-        // Evict LRU until under cap. Soft cap: a single oversized blob is
-        // allowed to exceed the limit alone rather than thrashing.
-        while self.current_bytes > self.capacity_bytes {
-            let Some((k, v)) = self.lru.pop_lru() else {
-                break;
-            };
-            if k == cache_key {
-                self.lru.put(k, v);
-                break;
-            }
-            self.current_bytes = self.current_bytes.saturating_sub(v.len());
-        }
-    }
 }
 
 /// Per-connection session state, populated by `trusted_login` on success.
@@ -363,16 +303,6 @@ struct RemoteConnectionInner {
     /// of `Arc<tokio::sync::Mutex<()>>` so the per-tree guard can be
     /// cloned out and held across awaits.
     subscription_locks: std::sync::Mutex<HashMap<ID, Arc<Mutex<()>>>>,
-    /// Process-lifetime CRDT-state LRU shared across every `Database` handle
-    /// (every `RemoteBackend`) on this connection. Tier 1 of the
-    /// two-level cache; tier 2 is the daemon's unified scope-keyed cache
-    /// (lives in `BackendImpl`), reached via `GetCachedCrdtState` /
-    /// `CacheCrdtState` RPCs.
-    ///
-    /// Accessed poison-tolerantly via [`Self::crdt_cache_lock`]: same
-    /// rationale as `session` — a panic in one task must not strand the
-    /// rest of the connection, since cache state is rebuildable.
-    crdt_cache: std::sync::Mutex<ClientCrdtCache>,
     /// Set to `true` when the reader task exits (clean EOF, socket error,
     /// or deserialization failure). Once set, [`RemoteConnection::request`]
     /// short-circuits with `ConnectionAborted` instead of pushing a fresh
@@ -447,14 +377,6 @@ impl RemoteConnectionInner {
     fn session_write(&self) -> std::sync::RwLockWriteGuard<'_, Option<SessionState>> {
         self.session
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Acquire the CRDT cache lock, tolerating poisoning. See the field-level
-    /// doc on [`Self::crdt_cache`] for the recovery rationale.
-    fn crdt_cache_lock(&self) -> std::sync::MutexGuard<'_, ClientCrdtCache> {
-        self.crdt_cache
-            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
@@ -609,7 +531,6 @@ impl RemoteConnection {
             registered_keys: Mutex::new(HashSet::new()),
             subscribed_trees: std::sync::Mutex::new(HashMap::new()),
             subscription_locks: std::sync::Mutex::new(HashMap::new()),
-            crdt_cache: std::sync::Mutex::new(ClientCrdtCache::new(CLIENT_CACHE_CAPACITY_BYTES)),
             closed: AtomicBool::new(false),
             tree_workers: std::sync::Mutex::new(HashMap::new()),
             reader_abort: std::sync::Mutex::new(None),
@@ -652,18 +573,6 @@ impl RemoteConnection {
             .weak_instance
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(weak);
-    }
-
-    /// Look up a cached materialized CRDT state in the connection-shared
-    /// process-lifetime LRU. Promotes the entry to most-recently-used.
-    pub(crate) fn cache_get(&self, root_id: &ID, key: &ID, store: &str) -> Option<Vec<u8>> {
-        self.inner.crdt_cache_lock().get(root_id, key, store)
-    }
-
-    /// Insert a materialized CRDT state into the connection-shared LRU.
-    /// Triggers byte-bounded eviction if over capacity.
-    pub(crate) fn cache_put(&self, root_id: ID, key: ID, store: String, blob: Vec<u8>) {
-        self.inner.crdt_cache_lock().put(root_id, key, store, blob);
     }
 
     /// Send a request and await its response.
@@ -1308,7 +1217,7 @@ impl RemoteConnection {
         }
     }
 
-    /// Resolve a ready projection, returning its opaque server-issued view.
+    /// Resolve cached state, returning its opaque server-issued view onto the published record set.
     pub async fn resolve_store_state(
         &self,
         identity: SigKey,
@@ -1327,7 +1236,7 @@ impl RemoteConnection {
         }
     }
 
-    /// Open an invisible staging namespace, returning its opaque token.
+    /// Begin a private build, returning its opaque capability.
     pub async fn begin_store_state_staging(
         &self,
         identity: SigKey,
@@ -1346,7 +1255,7 @@ impl RemoteConnection {
         }
     }
 
-    /// Upload one idempotent chunk of records into a staging namespace.
+    /// Upload one idempotent chunk of records into the private build.
     pub async fn stage_store_state_records(
         &self,
         root: ID,
@@ -1368,7 +1277,7 @@ impl RemoteConnection {
         .and_then(Self::expect_ok)
     }
 
-    /// Publish a staged namespace and return its opaque read view.
+    /// Publish the private build and return a view onto the published record set.
     pub async fn publish_store_state(
         &self,
         root: ID,
@@ -1384,7 +1293,7 @@ impl RemoteConnection {
         }
     }
 
-    /// Discard an unfinished staging namespace and its bytes.
+    /// Discard an unfinished private build and its bytes.
     pub async fn abort_store_state(
         &self,
         root: ID,
@@ -1445,54 +1354,6 @@ impl RemoteConnection {
         {
             ServiceResponse::RecordPage(page) => Ok(page),
             other => Err(unexpected_response("RecordPage", &other)),
-        }
-    }
-
-    /// Tier 2 cache read: ask the daemon for a previously-stashed CRDT
-    /// state blob. `None` on miss; the caller falls back to a full
-    /// recompute from store entries.
-    pub async fn get_cached_crdt_state_remote(
-        &self,
-        root_id: ID,
-        identity: SigKey,
-        store: String,
-        key: ID,
-    ) -> crate::Result<Option<Vec<u8>>> {
-        let resp = self
-            .db_request(
-                root_id,
-                identity,
-                DatabaseOp::GetCachedCrdtState { store, key },
-            )
-            .await?;
-        match resp {
-            ServiceResponse::CachedCrdtState(blob) => Ok(blob),
-            other => Err(unexpected_response("CachedCrdtState", &other)),
-        }
-    }
-
-    /// Tier 2 cache write: stash a client-computed CRDT state blob in the
-    /// daemon's unified cache, scoped to the session user
-    /// ([`crate::backend::CacheScope::User`]). Per-user trust; the daemon
-    /// stores opaque bytes verbatim.
-    pub async fn cache_crdt_state_remote(
-        &self,
-        root_id: ID,
-        identity: SigKey,
-        store: String,
-        key: ID,
-        blob: Vec<u8>,
-    ) -> crate::Result<()> {
-        let resp = self
-            .db_request(
-                root_id,
-                identity,
-                DatabaseOp::CacheCrdtState { store, key, blob },
-            )
-            .await?;
-        match resp {
-            ServiceResponse::Ok => Ok(()),
-            other => Err(unexpected_response("Ok", &other)),
         }
     }
 }
@@ -1859,56 +1720,6 @@ async fn run_sweep_task(weak_inner: Weak<RemoteConnectionInner>) {
 mod tests {
     use super::*;
 
-    fn eid(s: &str) -> ID {
-        ID::from_bytes(s)
-    }
-
-    fn root() -> ID {
-        eid("root")
-    }
-
-    #[test]
-    fn client_cache_round_trip() {
-        let mut c = ClientCrdtCache::new(1024);
-        c.put(root(), eid("e1"), "store1".into(), b"hello".to_vec());
-        assert_eq!(
-            c.get(&root(), &eid("e1"), "store1"),
-            Some(b"hello".to_vec())
-        );
-    }
-
-    #[test]
-    fn client_cache_evicts_under_byte_pressure() {
-        let mut c = ClientCrdtCache::new(100);
-        c.put(root(), eid("e1"), "s".into(), vec![1u8; 50]);
-        c.put(root(), eid("e2"), "s".into(), vec![2u8; 50]);
-        assert_eq!(c.current_bytes, 100);
-        c.put(root(), eid("e3"), "s".into(), vec![3u8; 50]);
-        assert!(
-            c.get(&root(), &eid("e1"), "s").is_none(),
-            "least-recently-used entry must be evicted"
-        );
-        assert_eq!(c.get(&root(), &eid("e2"), "s"), Some(vec![2u8; 50]));
-        assert_eq!(c.get(&root(), &eid("e3"), "s"), Some(vec![3u8; 50]));
-    }
-
-    #[test]
-    fn client_cache_get_promotes_to_most_recent() {
-        let mut c = ClientCrdtCache::new(100);
-        c.put(root(), eid("e1"), "s".into(), vec![1u8; 50]);
-        c.put(root(), eid("e2"), "s".into(), vec![2u8; 50]);
-        let _ = c.get(&root(), &eid("e1"), "s"); // promote e1
-        c.put(root(), eid("e3"), "s".into(), vec![3u8; 50]);
-        assert!(
-            c.get(&root(), &eid("e1"), "s").is_some(),
-            "promoted entry must survive eviction"
-        );
-        assert!(
-            c.get(&root(), &eid("e2"), "s").is_none(),
-            "older un-touched entry must be evicted"
-        );
-    }
-
     /// Build a `RemoteConnection` over a socketpair — enough to exercise the
     /// subscription state machine without a daemon. No reader task is
     /// spawned and no wire traffic is sent; the peer end is returned so the
@@ -1924,7 +1735,6 @@ mod tests {
             registered_keys: Mutex::new(HashSet::new()),
             subscribed_trees: std::sync::Mutex::new(HashMap::new()),
             subscription_locks: std::sync::Mutex::new(HashMap::new()),
-            crdt_cache: std::sync::Mutex::new(ClientCrdtCache::new(CLIENT_CACHE_CAPACITY_BYTES)),
             closed: AtomicBool::new(false),
             tree_workers: std::sync::Mutex::new(HashMap::new()),
             reader_abort: std::sync::Mutex::new(None),
@@ -1996,18 +1806,5 @@ mod tests {
             ),
             "with no callbacks left the subscription must go Idle"
         );
-    }
-
-    #[test]
-    fn client_cache_replaces_in_place() {
-        let mut c = ClientCrdtCache::new(1024);
-        c.put(root(), eid("e1"), "s".into(), b"v1".to_vec());
-        c.put(root(), eid("e1"), "s".into(), b"v2-different-len".to_vec());
-        assert_eq!(
-            c.get(&root(), &eid("e1"), "s"),
-            Some(b"v2-different-len".to_vec())
-        );
-        // current_bytes should reflect only the replacement, not the sum.
-        assert_eq!(c.current_bytes, b"v2-different-len".len());
     }
 }

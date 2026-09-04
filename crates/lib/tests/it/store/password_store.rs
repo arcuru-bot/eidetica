@@ -199,14 +199,26 @@ async fn test_password_store_cache_is_encrypted() {
     let docstore = store.inner().await.unwrap();
     let _ = docstore.get("key1").await; // triggers state computation and caching
 
-    // Check cache contains encrypted data, not plaintext
+    // Check the derived projection holds encrypted data, not plaintext
     let backend = database.backend().unwrap();
-    if let Some(cached) = backend
-        .get_cached_crdt_state(database.root_id(), &entry_id2, "secrets")
+    let request = eidetica::backend::StoreStateRequest {
+        database: database.root_id().clone(),
+        store: "secrets".to_string(),
+        lifecycle: eidetica::backend::StoreStateLifecycle::Derived,
+        scope: eidetica::backend::CacheScope::Shared,
+        projection: eidetica::backend::ProjectionDescriptor {
+            name: "eidetica/opaque".to_string(),
+            version: 0,
+        },
+        source_key: entry_id2.to_string().into_bytes(),
+    };
+    let view = backend
+        .resolve_store_state(&request)
         .await
         .unwrap()
-    {
-        // Cache holds raw ciphertext bytes; no plaintext should leak.
+        .expect("reading an encrypted store must publish its derived projection");
+    if let Some(cached) = backend.store_state_record_get(&view, &[0]).await.unwrap() {
+        // The projection holds raw ciphertext bytes; no plaintext should leak.
         let contains_bytes = |needle: &[u8]| cached.windows(needle.len()).any(|w| w == needle);
         assert!(
             !contains_bytes(b"value1"),

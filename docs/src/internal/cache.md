@@ -15,14 +15,15 @@ Clearing selects only the `Derived` lifecycle, so authoritative records remain b
 Clearing is two-phase: it unlinks every published derived record set and reclaims the generation unlinked by the previous clear.
 An unlinked record set is no longer resolvable, so the next read rebuilds from immutable Entries, while a reader that resolved its view before the clear keeps reading the generation it is walking until the following clear reclaims it.
 
-The legacy SQL `crdt_cache_v2` table and InMemory LRU are no longer the active local historical materialization path, but remain available for current service compatibility.
-Remote historical cache calls continue using the existing service protocol until record paging is implemented.
+The legacy SQL `crdt_cache_v2` table and the in-memory LRU are removed. Local and connected reads use Store-state records.
 
 Historical `Table` state uses the `eidetica/table/rows` format, with one
 record per logical row keyed by its UTF-8 primary key. Opening a Table handle
 reads no rows. Point reads fetch one record, and ordered iteration uses bounded
 pages with exclusive continuation while transaction-local changes overlay the
-cached record set.
+published record set.
 
-The existing service protocol still uses opaque whole-state cache calls. Remote
-record paging and authoritative Table records are not provided here.
+Connected instances use the same cached-state path over the service record
+protocol. The daemon binds each request to the authenticated session. It narrows a
+shared-scope request to the session user, refuses a foreign scope, and falls
+back to shared cached state on a user-scope miss.

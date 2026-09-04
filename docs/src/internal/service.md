@@ -23,7 +23,7 @@ The server wraps a full `Instance` (not just a backend) so it can handle both st
 | `service::server`   | `ServiceServer` — accepts connections, runs the auth state machine, gates and dispatches requests |
 | `service::client`   | `RemoteConnection` — the `RemoteBackend` transport + `trusted_login`                              |
 
-The daemon-side, per-user CRDT-state cache lives on the backend engine itself (`backend::BackendImpl`, keyed by [`CacheScope`](#crdt-cache)) rather than in a separate service-layer cache module.
+Historical Store state is served through the shared Store-state record substrate rather than a service-layer cache module; every request is bound to the authenticated session (see [Store state](#store-state)).
 
 ## Wire Protocol
 
@@ -137,8 +137,6 @@ Every storage operation rides a single `DatabaseOp` enum carried in `Authenticat
 | `GetStoreTipsUpToEntries { store, .. }`  | Store tips reachable from given main-tree entry IDs. Read.                                                                                                                       |
 | `ComputeMergeState { store, .. }`        | Lowest common ancestor + path to tip entries in a store DAG, fused into one RPC. Read.                                                                                           |
 | `GetEntry { id }`                        | Fetch a single entry by id (gating tree resolved server-side post-fetch). Read.                                                                                                  |
-| `GetCachedCrdtState { store, key }`      | Look up a previously cached materialized CRDT state for `(session user, root_id, key, store)`. Read.                                                                             |
-| `CacheCrdtState { store, key, blob }`    | Stash a client-computed materialized CRDT state. The blob is opaque to the daemon and scoped to the authenticated user. Read.                                                    |
 | Store-state resolve / staging / record get/scan | Resolve, build, and lazily read immutable historical projections through opaque server-issued views. Read for reads, Write for staging.                                     |
 | `SetInstanceMetadata { metadata }`       | Rewrite daemon-level pointers to its own system DBs. Special-cased server-side to gate `Admin` on `_databases` (a daemon-global system tree) instead of the request's `root_id`. |
 
@@ -148,7 +146,7 @@ Operations deliberately **not** exposed over the wire — `update_verification_s
 
 `DatabaseOp::required_permission() -> Permission` returns `Write(0)` for `SubmitSignedEntry` (advisory only — the per-tree gate is skipped for submit) and for the Store-state staging operations, `Admin(0)` for `SetInstanceMetadata` (advisory — gated against `_databases` instead of `root_id`), and `Read` for every other variant. The match is exhaustive, so a new operation cannot inherit `Read` by falling through.
 
-Projection-view and staging tokens are random opaque capabilities stored only in the connection context. Every use rechecks the authenticated user, the database, and the connection. Disconnect, explicit abort, and bounded idle expiry delete unpublished staging namespaces. The unchanged 64 MiB frame cap is enforced per request and response, so multi-record state is paged or chunked and a single record that cannot fit is refused with `RecordTooLarge`.
+Published views and private builds use opaque random tokens stored only in the connection context. Every use rechecks the authenticated user, the database, and the connection. Disconnect, explicit abort, and bounded idle expiry delete unpublished private builds. The unchanged 64 MiB frame cap is enforced per request and response, so multi-record state is paged or chunked and a single record that cannot fit is refused with `RecordTooLarge`.
 
 ### ServiceResponse
 
@@ -258,16 +256,16 @@ A connected client subscribes lazily: the first `Database::on_write` registratio
 
 Teardown is refcounted with hysteresis rather than immediate. Dropping the last local callback for a tree moves its wire subscription to `Idle` without any round-trip; a sweep task sends `DatabaseOp::UnsubscribeWrites` once the idle grace window elapses, and a re-registration before that transitions straight back to `Subscribed`. Both the sweep and `subscribe_writes` hold a per-tree fence across their wire round-trips so an Unsubscribe and a racing Subscribe can't reorder. Client-side teardown hangs off the last user-facing `RemoteConnection` handle: it carries a drop token that marks the connection dead, aborting the reader task so the socket's `WriteHalf` can close and the daemon sees EOF.
 
-## CRDT Cache
+## Store state
 
-CRDT-state caching is unified on the local backend engine (`BackendImpl`) under a single LRU keyed by [`CacheScope`](crate::backend::CacheScope):
+Historical current state is materialized into derived namespaces in the shared Store-state record substrate (see [Store state](store_state.md)). The daemon owns those records; clients resolve views and read points or bounded pages through them, so a `Table` read fetches the rows it asks for rather than a whole materialized `Doc`.
 
-- `CacheScope::Shared` — daemon-computed state for unencrypted stores (visible to every connected user; the bytes were produced by the trusted server-side merge).
-- `CacheScope::User(uuid)` — client-uploaded state for encrypted stores or any other client-merged result (scoped to the submitting user's uuid; only that user can poison their own future reads on this slot).
+Namespaces are scoped by [`CacheScope`](crate::backend::CacheScope):
 
-When the daemon serves `DatabaseOp::GetCachedCrdtState` / `CacheCrdtState`, it routes through the same `BackendImpl` LRU as a local instance, supplying `CacheScope::User(session_user)` so user-supplied blobs cannot leak across connections. Local (non-service) flows still use `CacheScope::Shared` for daemon-computed merges. The single cache is the source of truth on either path; the two scopes give cross-user isolation without a separate `ServiceCache` data structure.
+- `CacheScope::Shared` — daemon-computed state (visible to every authorized user; the bytes were produced by the trusted server-side merge).
+- `CacheScope::User(uuid)` — client-computed state (scoped to the submitting user's uuid; only that user can poison their own future reads).
 
-Clients additionally keep a per-connection in-memory LRU on `RemoteBackend` so repeated subtree-state materialization within one transaction does not round-trip to the daemon.
+Every client-supplied `StoreStateRequest` is rebound to the session before it reaches the backend: its database must be the one the request was gated against, a shared-scope request is narrowed to the session user, and a request naming another user's scope is refused. Resolution then falls back from the user scope to the shared one, so a daemon materialization is reused instead of rebuilt per user, while a client can never publish into the shared or another user's namespace.
 
 ## Database-Level Wire API
 
@@ -284,12 +282,12 @@ The server runs its own `Database` on a local `Instance`, so verification-on-rea
 | `store_snapshot_at(tree, store, up_to)`           | Store tips reachable from given main-tree entries                             |
 | `store_at(tree, store, snapshot)`                 | Every store entry reachable from `snapshot`                                   |
 | `compute_merge_state(tree, store, ids)`           | LCA + path within a store, resolved together against one view                 |
-| `get_cached_crdt_state` / `cache_crdt_state`      | CRDT merge cache (see [CRDT Cache](#crdt-cache))                              |
+| `resolve_store_state` / record get / record scan  | Store-state projections (see [Store state](#store-state))                     |
 | `put(entry)`                                      | Persist an entry                                                              |
 | `write_entry(verification, entry, source)`        | Persist a signed entry, applying verification and dispatching local callbacks |
 | `get_instance_metadata` / `set_instance_metadata` | Daemon-global system-DB pointers                                              |
 
-The trait is the _intersection_ of what both implementations can honor with the same meaning. Off-seam local-only operations (instance secrets, verification-status mutation, raw `all_roots`/`get_tree` listings, scope-keyed cache access) are deliberately **not** on the trait and live on the concrete in-process engine. They are reached only where one exists, via `Backend::local_engine() -> Option<Arc<dyn BackendImpl>>` (returns `None` on a remote backend).
+The trait is the _intersection_ of what both implementations can honor with the same meaning. Off-seam local-only operations (instance secrets, verification-status mutation, raw `all_roots`/`get_tree` listings) are deliberately **not** on the trait and live on the concrete in-process engine. They are reached only where one exists, via `Backend::local_engine() -> Option<Arc<dyn BackendImpl>>` (returns `None` on a remote backend).
 
 Two implementations exist:
 
@@ -314,7 +312,7 @@ Encrypted stores (wrapped in `PasswordStore`) are opaque to the daemon — the d
 
 - **`GetStoreEntries { store, tips, scope }`** — the **universal primitive** for encrypted stores. Returns opaque `Entry` objects reachable from `tips`, ordered by subtree height, already verified against the server's Verified frontier. The client receives encrypted entries it can decrypt and CRDT-merge locally. This works identically for encrypted and unencrypted stores — the server never touches content.
 
-- **`GetCachedCrdtState`/`CacheCrdtState`** provide a CRDT-merge fast-path that avoids re-fetching entries whose merged state is already cached. The daemon serves these through its `BackendImpl`'s `CacheScope::User(uuid)` slot (cross-session, per-user); `RemoteBackend` also keeps its own per-connection in-memory LRU for intra-transaction repeats without a round-trip. See [CRDT Cache](#crdt-cache).
+- **Store-state resolve/stage/publish and record reads** provide a merge fast-path that avoids re-folding entries whose merged state is already materialized. The daemon serves them from the shared record substrate under the session's scope. See [Store state](#store-state).
 
 The encrypted-store-over-service test (`test_database_encrypted_store_roundtrip`) exercises the full path: writes encrypted data server-side via a local `Database`, then reads entries via `RemoteConnection::get_store_entries` and confirms the opaque entries carry the correct subtree markers. Decryption and local merge are client-only.
 

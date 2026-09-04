@@ -397,7 +397,7 @@ async fn test_incorrect_parent_merging_would_fail() {
     // Clear cache to force computation
     tree.backend()
         .expect("Failed to get backend")
-        .clear_crdt_cache()
+        .clear_derived_store_state()
         .await
         .unwrap();
 
@@ -575,7 +575,7 @@ async fn test_true_diamond_pattern() {
     // Clear cache to force fresh computation
     tree.backend()
         .expect("Failed to get backend")
-        .clear_crdt_cache()
+        .clear_derived_store_state()
         .await
         .unwrap();
 
