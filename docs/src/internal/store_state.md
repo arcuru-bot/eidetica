@@ -26,6 +26,8 @@ A record set has one lifecycle:
 - **Authoritative** record sets contain durable current state and are not eligible for cache clearing.
 - **Staging** builds are unpublished private state and are invisible to record readers.
 
+Clearing derived state unlinks published record sets and reclaims the generation unlinked by the previous clear. An active reader keeps its view, while a new lookup misses and rebuilds. Authoritative record sets are never selected.
+
 A builder creates private state, writes record chunks, then publishes atomically.
 Aborting or failing publication leaves no published record set and no private build behind.
 Two materializers can derive the same target concurrently; publication resolves that race to one shared record set rather than failing the loser.

@@ -378,7 +378,7 @@ async fn repeat_publish_of_a_cloned_token_keeps_published_state() {
 /// live view still reads as absent, and a published-but-empty snapshot still
 /// scans as an empty page, so callers can tell the three cases apart.
 #[tokio::test]
-async fn cleared_view_errors_instead_of_reading_missing_or_empty() {
+async fn reclaimed_view_errors_instead_of_reading_missing_or_empty() {
     let backend = test_backend().await;
     let derived_request = request("cleared", "store", StoreStateLifecycle::Derived);
     let view = publish(
@@ -395,6 +395,12 @@ async fn cleared_view_errors_instead_of_reading_missing_or_empty() {
         None
     );
 
+    backend.clear_derived_store_state().await.unwrap();
+    assert_eq!(
+        backend.store_state_record_get(&view, b"key").await.unwrap(),
+        Some(b"value".to_vec()),
+        "an unlinked generation remains readable to an existing view"
+    );
     backend.clear_derived_store_state().await.unwrap();
     assert!(
         backend
@@ -520,6 +526,7 @@ async fn invalid_view_rejects_zero_limit_scan() {
     .await;
 
     backend.clear_derived_store_state().await.unwrap();
+    backend.clear_derived_store_state().await.unwrap();
 
     let err = backend
         .store_state_record_scan(&view, &RecordRange::default(), None, 0)
@@ -629,5 +636,108 @@ async fn same_token_stage_vs_publish_is_serialized() {
     assert_eq!(
         backend.store_state_record_get(&retry, b"ok").await.unwrap(),
         Some(b"value".to_vec())
+    );
+}
+
+#[tokio::test]
+async fn clearing_derived_records_preserves_an_active_reader_and_rebuilds() {
+    let backend = test_backend().await;
+    let authoritative_request = request("pinned", "store", StoreStateLifecycle::Authoritative);
+    let authoritative = publish(
+        backend.as_ref(),
+        authoritative_request.clone(),
+        [(b"key".to_vec(), b"authority".to_vec())],
+    )
+    .await;
+    let derived_request = request("pinned", "store", StoreStateLifecycle::Derived);
+    let reader = publish(
+        backend.as_ref(),
+        derived_request.clone(),
+        [
+            (b"a".to_vec(), b"first".to_vec()),
+            (b"b".to_vec(), b"second".to_vec()),
+        ],
+    )
+    .await;
+
+    backend.clear_derived_store_state().await.unwrap();
+
+    // The reader resolved its view before the clear, so both its point and
+    // page reads keep serving the generation it is walking.
+    assert_eq!(
+        backend.store_state_record_get(&reader, b"a").await.unwrap(),
+        Some(b"first".to_vec())
+    );
+    assert_eq!(
+        backend
+            .store_state_record_scan(&reader, &RecordRange::default(), None, 10)
+            .await
+            .unwrap()
+            .records,
+        vec![
+            (b"a".to_vec(), b"first".to_vec()),
+            (b"b".to_vec(), b"second".to_vec()),
+        ]
+    );
+    // A new lookup misses and rebuilds instead of joining the cleared one.
+    assert!(
+        backend
+            .resolve_store_state(&derived_request)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let rebuilt = publish(
+        backend.as_ref(),
+        derived_request.clone(),
+        [(b"a".to_vec(), b"rebuilt".to_vec())],
+    )
+    .await;
+    assert_ne!(rebuilt, reader);
+    assert_eq!(
+        backend
+            .store_state_record_get(&rebuilt, b"a")
+            .await
+            .unwrap(),
+        Some(b"rebuilt".to_vec())
+    );
+    assert_eq!(
+        backend.store_state_record_get(&reader, b"a").await.unwrap(),
+        Some(b"first".to_vec())
+    );
+
+    // Clearing cannot reach authoritative state in either generation.
+    assert_eq!(
+        backend
+            .store_state_record_get(&authoritative, b"key")
+            .await
+            .unwrap(),
+        Some(b"authority".to_vec())
+    );
+    assert!(
+        backend
+            .resolve_store_state(&authoritative_request)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // The following clear reclaims the unlinked generation.
+    backend.clear_derived_store_state().await.unwrap();
+    assert_ne!(
+        backend
+            .store_state_record_get(&reader, b"a")
+            .await
+            .ok()
+            .flatten(),
+        Some(b"first".to_vec()),
+        "the unlinked generation must not survive a second clear"
+    );
+    assert_eq!(
+        backend
+            .store_state_record_get(&authoritative, b"key")
+            .await
+            .unwrap(),
+        Some(b"authority".to_vec())
     );
 }

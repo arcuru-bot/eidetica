@@ -73,6 +73,9 @@ pub(crate) struct InMemoryInner {
 pub(crate) struct RecordNamespace {
     request: StoreStateRequest,
     ready: bool,
+    /// Unlinked by a derived clear: no longer resolvable, still readable
+    /// through views resolved before the clear.
+    unlinked: bool,
     records: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
@@ -251,7 +254,9 @@ impl BackendImpl for InMemory {
         Ok(inner
             .store_state_namespaces
             .iter()
-            .find(|(_, namespace)| namespace.ready && namespace.request == *request)
+            .find(|(_, namespace)| {
+                namespace.ready && !namespace.unlinked && namespace.request == *request
+            })
             .map(|(namespace_id, _)| RecordView {
                 namespace_id: namespace_id.clone(),
             }))
@@ -272,6 +277,7 @@ impl BackendImpl for InMemory {
             RecordNamespace {
                 request,
                 ready: false,
+                unlinked: false,
                 records: BTreeMap::new(),
             },
         );
@@ -319,7 +325,7 @@ impl BackendImpl for InMemory {
         if let Some((winner_id, _)) = inner
             .store_state_namespaces
             .iter()
-            .find(|(_, ready)| ready.ready && ready.request == token.target)
+            .find(|(_, ready)| ready.ready && !ready.unlinked && ready.request == token.target)
         {
             return Ok(RecordView {
                 namespace_id: winner_id.clone(),
@@ -416,14 +422,24 @@ impl BackendImpl for InMemory {
         Ok(RecordPage { records, next })
     }
 
+    /// Unlink every ready derived namespace and reclaim the previously
+    /// unlinked generation.
+    ///
+    /// Clearing is two-phase because a reader that already resolved a view
+    /// keeps reading through it: unlinking removes the namespace from
+    /// resolution, so the next miss rebuilds, while the records stay readable
+    /// until the following clear reclaims them. Authoritative namespaces are
+    /// never selected.
     async fn clear_derived_store_state(&self) -> Result<()> {
-        self.inner
-            .write()
-            .unwrap()
-            .store_state_namespaces
-            .retain(|_, namespace| {
-                !(namespace.ready && namespace.request.lifecycle == StoreStateLifecycle::Derived)
-            });
+        let mut inner = self.inner.write().unwrap();
+        inner.store_state_namespaces.retain(|_, namespace| {
+            !(namespace.unlinked && namespace.request.lifecycle == StoreStateLifecycle::Derived)
+        });
+        for namespace in inner.store_state_namespaces.values_mut() {
+            if namespace.ready && namespace.request.lifecycle == StoreStateLifecycle::Derived {
+                namespace.unlinked = true;
+            }
+        }
         Ok(())
     }
     /// Retrieves an entry by its unique content-addressable ID.

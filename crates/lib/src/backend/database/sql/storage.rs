@@ -272,7 +272,7 @@ pub async fn store_state_record_get(
     let Some((status, value)) = row else {
         return Err(BackendError::InvalidStoreStateView.into());
     };
-    if status != 1 {
+    if !matches!(status, 1 | 2) {
         return Err(BackendError::InvalidStoreStateView.into());
     }
     Ok(value)
@@ -306,7 +306,7 @@ pub async fn store_state_record_scan(
         .fetch_optional(&mut *tx)
         .await
         .sql_context("Failed to validate Store-state view")?;
-    if status != Some((1,)) {
+    if !matches!(status, Some((1 | 2,))) {
         return Err(BackendError::InvalidStoreStateView.into());
     }
     if limit == 0 {
