@@ -145,6 +145,8 @@ pub async fn stage_store_state_records(
     if staging != Some((StoreStateLifecycle::Staging.as_db_int(),)) {
         return Err(BackendError::InvalidStoreStateStagingToken.into());
     }
+    #[cfg(feature = "testing")]
+    super::fire_store_state_stage_pause(&token.namespace_id).await;
     for (key, value) in records {
         sqlx::query(
             "INSERT INTO store_state_records (namespace_id, record_key, record_value)

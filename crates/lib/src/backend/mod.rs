@@ -106,6 +106,17 @@ pub struct StagingToken {
     pub(crate) target: StoreStateRequest,
 }
 
+#[cfg(feature = "testing")]
+impl StagingToken {
+    /// Test-only accessor for the pause-gate registry key.
+    ///
+    /// Exists so integration tests can register a stage pause for a token
+    /// they hold; compiled out of every production build.
+    pub fn testing_namespace_id(&self) -> &str {
+        &self.namespace_id
+    }
+}
+
 /// Ordered record changes.
 ///
 /// `None` is reserved for a staged delete. No lifecycle publishes one yet:
