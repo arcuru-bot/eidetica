@@ -853,8 +853,7 @@ impl Transaction {
             crate::backend::CacheScope::Shared,
         );
         if self.db.ops().local_engine().is_some()
-            && let Some(view) = self.db.ops().resolve_store_state(&cache_request).await?
-            && let Some(bytes) = state::load_opaque(self.db.ops(), &view).await?
+            && let Some(bytes) = state::load_cached(self.db.ops(), &cache_request).await?
         {
             let decrypted = self.decrypt_if_needed(subtree_name, &bytes)?;
             let result: T = serde_json::from_slice(&decrypted)?;
@@ -899,7 +898,7 @@ impl Transaction {
         // Cache the computed merge result
         let bytes = self.encrypt_if_needed(subtree_name, &serde_json::to_vec(&result)?)?;
         if self.db.ops().local_engine().is_some() {
-            state::publish_opaque(self.db.ops(), cache_request, bytes).await?;
+            state::store_cached(self.db.ops(), cache_request, bytes).await?;
         } else {
             self.db
                 .ops()
@@ -955,8 +954,7 @@ impl Transaction {
                 crate::backend::CacheScope::Shared,
             );
             if self.db.ops().local_engine().is_some()
-                && let Some(view) = self.db.ops().resolve_store_state(&request).await?
-                && let Some(bytes) = state::load_opaque(self.db.ops(), &view).await?
+                && let Some(bytes) = state::load_cached(self.db.ops(), &request).await?
             {
                 let decrypted = self.decrypt_if_needed(subtree_name, &bytes)?;
                 let result: T = serde_json::from_slice(&decrypted)?;
@@ -978,7 +976,7 @@ impl Transaction {
             // Step 4: Cache only the final result (encrypted if encryptor is registered)
             let bytes = self.encrypt_if_needed(subtree_name, &serde_json::to_vec(&result)?)?;
             if self.db.ops().local_engine().is_some() {
-                state::publish_opaque(self.db.ops(), request, bytes).await?;
+                state::store_cached(self.db.ops(), request, bytes).await?;
             } else {
                 self.db
                     .ops()
