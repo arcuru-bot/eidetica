@@ -636,3 +636,110 @@ impl BackendImpl for InMemory {
         traversal::get_path_from_to(&inner, tree_id, subtree, from_id, to_ids)
     }
 }
+
+/// A publish carrying a token whose target does not match the namespace it
+/// names must never disturb a ready namespace.
+///
+/// `StagingToken` is `Clone` with crate-visible fields, so a caller can hold
+/// a token for one target while naming another namespace (or vice versa).
+/// Publishing such a malformed clone either adopts the already-ready winner
+/// for the claimed target or fails with the ready namespace re-inserted —
+/// the ready snapshot and its records always survive.
+#[cfg(test)]
+mod store_state_token_tests {
+    use std::collections::BTreeMap;
+
+    use super::InMemory;
+    use crate::backend::{
+        BackendImpl, CacheScope, ProjectionDescriptor, StagingToken, StoreStateLifecycle,
+        StoreStateRequest,
+    };
+    use crate::entry::ID;
+
+    fn request(store: &str) -> StoreStateRequest {
+        StoreStateRequest {
+            database: ID::from_bytes("db"),
+            store: store.to_string(),
+            lifecycle: StoreStateLifecycle::Derived,
+            scope: CacheScope::Shared,
+            projection: ProjectionDescriptor {
+                name: "test/opaque".to_string(),
+                version: 0,
+            },
+            source_key: b"snapshot".to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_target_publish_preserves_ready_namespace() {
+        let backend = InMemory::new();
+
+        // Ready namespace for target A.
+        let request_a = request("store-a");
+        let token_a = backend
+            .begin_store_state_staging(request_a.clone())
+            .await
+            .unwrap();
+        backend
+            .stage_store_state_records(
+                &token_a,
+                BTreeMap::from([(b"key".to_vec(), Some(b"value-a".to_vec()))]),
+            )
+            .await
+            .unwrap();
+        let view_a = backend.publish_store_state(token_a).await.unwrap();
+
+        // Staging namespace for target B.
+        let request_b = request("store-b");
+        let token_b = backend
+            .begin_store_state_staging(request_b.clone())
+            .await
+            .unwrap();
+        backend
+            .stage_store_state_records(
+                &token_b,
+                BTreeMap::from([(b"key".to_vec(), Some(b"value-b".to_vec()))]),
+            )
+            .await
+            .unwrap();
+
+        // Malformed clone: B's namespace id, A's target. The ready winner for
+        // A is adopted and A's snapshot is untouched.
+        let bad = StagingToken {
+            namespace_id: token_b.namespace_id.clone(),
+            target: request_a.clone(),
+        };
+        let adopted = backend.publish_store_state(bad).await.unwrap();
+        assert_eq!(adopted, view_a);
+        assert_eq!(
+            backend
+                .store_state_record_get(&view_a, b"key")
+                .await
+                .unwrap(),
+            Some(b"value-a".to_vec())
+        );
+        assert_eq!(backend.resolve_store_state(&request_b).await.unwrap(), None);
+
+        // Malformed clone: A's (ready) namespace id with a target that
+        // resolves nowhere. The publish fails and the ready namespace is
+        // re-inserted with its records intact.
+        let nowhere = request("store-nowhere");
+        let bad_ready = StagingToken {
+            namespace_id: view_a.namespace_id.clone(),
+            target: nowhere.clone(),
+        };
+        assert!(backend.publish_store_state(bad_ready).await.is_err());
+        assert_eq!(
+            backend.resolve_store_state(&request_a).await.unwrap(),
+            Some(view_a.clone())
+        );
+        assert_eq!(
+            backend
+                .store_state_record_get(&view_a, b"key")
+                .await
+                .unwrap(),
+            Some(b"value-a".to_vec())
+        );
+        assert_eq!(backend.resolve_store_state(&nowhere).await.unwrap(), None);
+    }
+}

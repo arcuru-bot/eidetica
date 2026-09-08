@@ -501,3 +501,133 @@ async fn barrier_started_publishers_agree_on_a_single_winner() {
         Some(b"value".to_vec())
     );
 }
+
+/// An invalid view stays invalid with `limit` 0.
+///
+/// The `limit == 0` fast path must not run before validation: a cleared view
+/// reports `InvalidStoreStateView` here on every engine, exactly like a
+/// nonzero-limit read does. (The valid empty-snapshot case above is the Ok
+/// counterpart.)
+#[tokio::test]
+async fn invalid_view_rejects_zero_limit_scan() {
+    let backend = test_backend().await;
+    let derived = request("db", "zero-limit-invalid", StoreStateLifecycle::Derived);
+    let view = publish(
+        backend.as_ref(),
+        derived.clone(),
+        [(b"key".to_vec(), b"value".to_vec())],
+    )
+    .await;
+
+    backend.clear_derived_store_state().await.unwrap();
+
+    let err = backend
+        .store_state_record_scan(&view, &RecordRange::default(), None, 0)
+        .await
+        .unwrap_err();
+    assert!(
+        err.is_invalid_store_state_view(),
+        "cleared view with limit 0 must error, got: {err}"
+    );
+}
+
+/// Same-token stage-vs-publish must serialize on PostgreSQL.
+///
+/// `StagingToken` is `Clone`, so one task can sit inside `stage` — token
+/// validated, advisory locks held, writes still pending — while another task
+/// publishes a clone of the same token. The stage/publish advisory lock must
+/// force the publish to wait for the stage's transaction: the publish then
+/// sees the staged tombstone and fails closed. Without the lock the publish
+/// would flip the namespace ready first and the stage's writes (including an
+/// unvalidated delete) would land in the published snapshot afterwards.
+///
+/// The interleaving is driven by a test-only pause gate (no sleeps): the
+/// stage signals after validation and blocks until released, so the competing
+/// publish deterministically runs mid-stage. This pg-only shape is
+/// intentional — SQLite serializes writers with `BEGIN IMMEDIATE` and
+/// `InMemory` holds one mutex per operation, so neither engine can interleave
+/// a stage with a publish mid-call.
+#[tokio::test]
+#[cfg(feature = "postgres")]
+async fn same_token_stage_vs_publish_is_serialized() {
+    use std::time::Duration;
+
+    if std::env::var("TEST_BACKEND").as_deref() != Ok("postgres") {
+        return;
+    }
+    let url = std::env::var("TEST_POSTGRES_URL")
+        .unwrap_or_else(|_| "postgres://localhost/eidetica_test".to_string());
+    let backend = std::sync::Arc::new(
+        eidetica::backend::database::Postgres::connect_isolated(&url)
+            .await
+            .expect("connect isolated postgres"),
+    );
+    assert!(backend.is_postgres());
+
+    let request = request("db", "race-same-token", StoreStateLifecycle::Derived);
+    let token = backend
+        .begin_store_state_staging(request.clone())
+        .await
+        .unwrap();
+
+    // Park the stage after token validation, before any writes.
+    let gate = eidetica::backend::database::SqlxBackend::testing_register_stage_pause(
+        token.testing_namespace_id(),
+    )
+    .await;
+    let stage_backend = std::sync::Arc::clone(&backend);
+    let stage_token = token.clone();
+    let stage = tokio::spawn(async move {
+        stage_backend
+            .stage_store_state_records(
+                &stage_token,
+                BTreeMap::from([
+                    (b"extra".to_vec(), Some(b"extra-value".to_vec())),
+                    (b"doomed".to_vec(), None),
+                ]),
+            )
+            .await
+    });
+    gate.wait_validated().await;
+
+    // The competing publish runs while the stage is parked mid-transaction.
+    // With the namespace lock it blocks until the stage commits, then
+    // validates the staged tombstone and fails instead of publishing it.
+    let publish_backend = std::sync::Arc::clone(&backend);
+    let publish_token = token.clone();
+    let publish_task =
+        tokio::spawn(async move { publish_backend.publish_store_state(publish_token).await });
+    gate.release();
+
+    tokio::time::timeout(Duration::from_secs(30), stage)
+        .await
+        .expect("stage task joined")
+        .expect("stage task completed")
+        .expect("stage of tombstone-bearing chunk succeeds");
+    let publish_result = tokio::time::timeout(Duration::from_secs(30), publish_task)
+        .await
+        .expect("publish task joined")
+        .expect("publish task completed");
+    assert!(
+        publish_result.is_err(),
+        "publish of a staging namespace holding an unvalidated delete must fail closed, got: {publish_result:?}"
+    );
+    assert_eq!(
+        backend.resolve_store_state(&request).await.unwrap(),
+        None,
+        "failed publish must leave no ready snapshot behind"
+    );
+
+    // Hygiene: the failed publish discarded the staging namespace, so the
+    // same target stages and publishes cleanly afterwards.
+    let retry = publish(
+        backend.as_ref(),
+        request.clone(),
+        [(b"ok".to_vec(), b"value".to_vec())],
+    )
+    .await;
+    assert_eq!(
+        backend.store_state_record_get(&retry, b"ok").await.unwrap(),
+        Some(b"value".to_vec())
+    );
+}

@@ -114,6 +114,110 @@ impl SqlxBackend {
     }
 }
 
+// Test-only Store-state stage pause hook.
+//
+// A regression test for same-token stage-vs-publish interleavings needs to
+// park a `stage_store_state_records` call after token validation (advisory
+// locks held) but before any record writes, run a competing publish, then
+// release the stage. Production call paths cannot pause mid-transaction, and
+// a sleep-based race would be flaky by construction, so this narrow hook
+// exists behind the `testing` feature only: it is compiled out of every
+// production build, adds no trait surface, and is a no-op (one map miss)
+// unless a test registered a gate for the exact staging namespace. Gates are
+// one-shot and keyed by namespace UUID, so parallel tests cannot observe or
+// disturb each other.
+#[cfg(feature = "testing")]
+#[derive(Debug)]
+pub struct StoreStateStagePause {
+    validated: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(feature = "testing")]
+impl StoreStateStagePause {
+    fn new() -> Self {
+        Self {
+            validated: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Wait until the staged call reaches the pause point (bounded).
+    ///
+    /// # Panics
+    ///
+    /// Panics after 15 seconds: a timeout means the test never drove a stage
+    /// through the gate, i.e. a harness bug, not a backend result.
+    pub async fn wait_validated(&self) {
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.validated.notified(),
+        )
+        .await
+        .is_err()
+        {
+            panic!("Store-state stage pause gate never reached: test harness bug");
+        }
+    }
+
+    /// Let the paused stage proceed to its writes.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[cfg(feature = "testing")]
+static STORE_STATE_STAGE_PAUSES: std::sync::OnceLock<
+    tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<StoreStateStagePause>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(feature = "testing")]
+fn store_state_stage_pauses() -> &'static tokio::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<StoreStateStagePause>>,
+> {
+    STORE_STATE_STAGE_PAUSES
+        .get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Register a one-shot pause gate for the given staging namespace.
+///
+/// The next `stage_store_state_records` call for this namespace signals the
+/// gate after validating its token and waits (bounded) for [`StoreStateStagePause::release`]
+/// before writing any records. Returns the gate the test drives.
+#[cfg(feature = "testing")]
+impl SqlxBackend {
+    pub async fn testing_register_stage_pause(
+        namespace_id: &str,
+    ) -> std::sync::Arc<StoreStateStagePause> {
+        let gate = std::sync::Arc::new(StoreStateStagePause::new());
+        store_state_stage_pauses()
+            .lock()
+            .await
+            .insert(namespace_id.to_string(), gate.clone());
+        gate
+    }
+}
+
+/// Fire the pause gate for a namespace, if a test registered one.
+///
+/// Called from `stage_store_state_records` after token validation, before
+/// record writes. One-shot: the gate is removed before signalling, so a late
+/// duplicate stage for the same namespace proceeds unpaused.
+#[cfg(feature = "testing")]
+pub(crate) async fn fire_store_state_stage_pause(namespace_id: &str) {
+    let gate = store_state_stage_pauses().lock().await.remove(namespace_id);
+    let Some(gate) = gate else { return };
+    gate.validated.notify_one();
+    if tokio::time::timeout(std::time::Duration::from_secs(15), gate.release.notified())
+        .await
+        .is_err()
+    {
+        panic!(
+            "Store-state stage pause gate for namespace {namespace_id} was never released: test harness bug"
+        );
+    }
+}
+
 // SQLite-specific implementations
 #[cfg(feature = "sqlite")]
 impl SqlxBackend {
@@ -654,5 +758,129 @@ impl Postgres {
     /// * `url` - PostgreSQL connection URL
     pub async fn connect_isolated(url: &str) -> Result<SqlxBackend> {
         SqlxBackend::connect_postgres_isolated(url).await
+    }
+}
+
+/// A publish carrying a token whose target does not match the namespace it
+/// names must never disturb a ready namespace.
+///
+/// Unlike `InMemory` (which resolves by target and adopts the ready winner),
+/// the SQL publish names the namespace: the `UPDATE` only flips
+/// lifecycle/status and keeps the begin-time identity, using `target` for
+/// locking and failure-path winner adoption. Either way the ready snapshot
+/// and its records always survive a malformed clone.
+#[cfg(all(test, feature = "sqlite"))]
+mod store_state_token_tests {
+    use std::collections::BTreeMap;
+
+    use super::Sqlite;
+    use crate::backend::{
+        BackendImpl, CacheScope, ProjectionDescriptor, StagingToken, StoreStateLifecycle,
+        StoreStateRequest,
+    };
+    use crate::entry::ID;
+
+    fn request(store: &str) -> StoreStateRequest {
+        StoreStateRequest {
+            database: ID::from_bytes("db"),
+            store: store.to_string(),
+            lifecycle: StoreStateLifecycle::Derived,
+            scope: CacheScope::Shared,
+            projection: ProjectionDescriptor {
+                name: "test/opaque".to_string(),
+                version: 0,
+            },
+            source_key: b"snapshot".to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_target_publish_preserves_ready_namespace() {
+        let backend = Sqlite::in_memory().await.unwrap();
+
+        // Ready namespace for target A.
+        let request_a = request("store-a");
+        let token_a = backend
+            .begin_store_state_staging(request_a.clone())
+            .await
+            .unwrap();
+        backend
+            .stage_store_state_records(
+                &token_a,
+                BTreeMap::from([(b"key".to_vec(), Some(b"value-a".to_vec()))]),
+            )
+            .await
+            .unwrap();
+        let view_a = backend.publish_store_state(token_a).await.unwrap();
+
+        // Staging namespace for target B.
+        let request_b = request("store-b");
+        let token_b = backend
+            .begin_store_state_staging(request_b.clone())
+            .await
+            .unwrap();
+        backend
+            .stage_store_state_records(
+                &token_b,
+                BTreeMap::from([(b"key".to_vec(), Some(b"value-b".to_vec()))]),
+            )
+            .await
+            .unwrap();
+
+        // Malformed clone: B's namespace id, A's target. The SQL publish names
+        // the namespace (the UPDATE only flips lifecycle/status and keeps the
+        // begin-time identity; `target` drives locking and winner adoption),
+        // so B becomes ready under its own identity while ready A is
+        // untouched: no ready snapshot is ever modified by a mismatched token.
+        let bad = StagingToken {
+            namespace_id: token_b.namespace_id.clone(),
+            target: request_a.clone(),
+        };
+        let published_b = backend.publish_store_state(bad).await.unwrap();
+        assert_eq!(published_b.namespace_id, token_b.namespace_id);
+        assert_eq!(
+            backend.resolve_store_state(&request_b).await.unwrap(),
+            Some(published_b.clone())
+        );
+        assert_eq!(
+            backend
+                .store_state_record_get(&published_b, b"key")
+                .await
+                .unwrap(),
+            Some(b"value-b".to_vec())
+        );
+        assert_eq!(
+            backend.resolve_store_state(&request_a).await.unwrap(),
+            Some(view_a.clone())
+        );
+        assert_eq!(
+            backend
+                .store_state_record_get(&view_a, b"key")
+                .await
+                .unwrap(),
+            Some(b"value-a".to_vec())
+        );
+
+        // Malformed clone: A's (ready) namespace id with a target that
+        // resolves nowhere. The publish fails and the ready row survives the
+        // guarded discard with its records intact.
+        let nowhere = request("store-nowhere");
+        let bad_ready = StagingToken {
+            namespace_id: view_a.namespace_id.clone(),
+            target: nowhere.clone(),
+        };
+        assert!(backend.publish_store_state(bad_ready).await.is_err());
+        assert_eq!(
+            backend.resolve_store_state(&request_a).await.unwrap(),
+            Some(view_a.clone())
+        );
+        assert_eq!(
+            backend
+                .store_state_record_get(&view_a, b"key")
+                .await
+                .unwrap(),
+            Some(b"value-a".to_vec())
+        );
+        assert_eq!(backend.resolve_store_state(&nowhere).await.unwrap(), None);
     }
 }
