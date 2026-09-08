@@ -350,8 +350,10 @@ pub trait BackendImpl: Send + Sync + Any {
     /// Returns the view of the ready namespace for the token's target. When a
     /// concurrent materializer published that same target first, its namespace
     /// is returned and this one is discarded — publishing the same derived
-    /// state twice is a race, not an error. Rejects a namespace holding a
-    /// `None`-valued record, since staged deletes cannot yet be published.
+    /// state twice is a race, not an error. Repeating a publish with the same
+    /// token is idempotent and must never remove the published state. Rejects
+    /// a namespace holding a `None`-valued record, since staged deletes cannot
+    /// yet be published.
     async fn publish_store_state(&self, _token: StagingToken) -> Result<RecordView> {
         Err(BackendError::StoreStateStorageUnsupported.into())
     }
@@ -370,7 +372,8 @@ pub trait BackendImpl: Send + Sync + Any {
     }
 
     /// Read one ordered page of records. A `limit` of zero yields an empty page
-    /// with no continuation.
+    /// with no continuation. A view that no longer identifies a ready
+    /// namespace errors with `InvalidStoreStateView`, never an empty page.
     async fn store_state_record_scan(
         &self,
         _view: &RecordView,

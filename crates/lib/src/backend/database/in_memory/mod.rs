@@ -265,6 +265,18 @@ impl BackendImpl for InMemory {
 
     async fn publish_store_state(&self, token: StagingToken) -> Result<RecordView> {
         let mut inner = self.inner.write().unwrap();
+        // A repeat publish of an already-published token is idempotent: the
+        // namespace is still ready for the same target, so hand back its view.
+        // Removing it first would turn a retry into data loss.
+        if inner
+            .store_state_namespaces
+            .get(&token.namespace_id)
+            .is_some_and(|namespace| namespace.ready && namespace.request == token.target)
+        {
+            return Ok(RecordView {
+                namespace_id: token.namespace_id,
+            });
+        }
         let staged = inner.store_state_namespaces.remove(&token.namespace_id);
         // A concurrent materializer may have made this exact target ready
         // first. Both derived the same state from the same source, so adopt the
@@ -279,7 +291,16 @@ impl BackendImpl for InMemory {
             });
         }
         let mut namespace = staged.ok_or(BackendError::InvalidStoreStateStagingToken)?;
-        if namespace.ready || namespace.request.lifecycle != StoreStateLifecycle::Staging {
+        // A ready namespace is never removed: reaching here with one means the
+        // token's target no longer matches, which is an error that must not
+        // destroy published state.
+        if namespace.ready {
+            inner
+                .store_state_namespaces
+                .insert(token.namespace_id.clone(), namespace);
+            return Err(BackendError::InvalidStoreStateStagingToken.into());
+        }
+        if namespace.request.lifecycle != StoreStateLifecycle::Staging {
             return Err(BackendError::InvalidStoreStateStagingToken.into());
         }
         if namespace.records.values().any(Option::is_none) {
@@ -317,7 +338,7 @@ impl BackendImpl for InMemory {
             .store_state_namespaces
             .get(&view.namespace_id)
             .filter(|namespace| namespace.ready)
-            .ok_or(BackendError::InvalidStoreStateStagingToken)?;
+            .ok_or(BackendError::InvalidStoreStateView)?;
         Ok(namespace.records.get(key).and_then(Clone::clone))
     }
 
@@ -328,15 +349,15 @@ impl BackendImpl for InMemory {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<RecordPage> {
-        if limit == 0 {
-            return Ok(RecordPage::default());
-        }
         let inner = self.inner.read().unwrap();
         let namespace = inner
             .store_state_namespaces
             .get(&view.namespace_id)
             .filter(|namespace| namespace.ready)
-            .ok_or(BackendError::InvalidStoreStateStagingToken)?;
+            .ok_or(BackendError::InvalidStoreStateView)?;
+        if limit == 0 {
+            return Ok(RecordPage::default());
+        }
         let mut records = namespace
             .records
             .iter()

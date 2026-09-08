@@ -26,6 +26,15 @@ pub enum BackendError {
     #[error("Invalid or expired Store-state staging token")]
     InvalidStoreStateStagingToken,
 
+    /// A Store-state view does not identify a ready namespace.
+    ///
+    /// The namespace was cleared after the view was minted, or the view never
+    /// identified a published namespace. This is never a missing key or an
+    /// empty snapshot: reads against a live view still report those as
+    /// `None` and empty pages.
+    #[error("Store-state view is not ready (cleared or never published)")]
+    InvalidStoreStateView,
+
     /// A ready namespace cannot be changed after publication.
     #[error("Published derived Store-state namespaces are immutable")]
     StoreStateNamespaceImmutable,
@@ -246,6 +255,21 @@ impl BackendError {
                 | BackendError::NoCommonAncestor { .. }
                 | BackendError::EmptyEntryList { .. }
         )
+    }
+
+    /// Whether this error means the backend has no Store-state record substrate.
+    ///
+    /// Only [`BackendError::StoreStateStorageUnsupported`] reports this. Every
+    /// other failure — invalid tokens, invalid views, storage I/O — is genuine
+    /// and must propagate, never fall back.
+    pub fn is_unsupported_store_state(&self) -> bool {
+        matches!(self, BackendError::StoreStateStorageUnsupported)
+    }
+
+    /// Whether this error means a Store-state view no longer identifies a
+    /// ready namespace (cleared after minting, or never published).
+    pub fn is_invalid_store_state_view(&self) -> bool {
+        matches!(self, BackendError::InvalidStoreStateView)
     }
 
     /// Get the entry ID if this error is about a specific entry.

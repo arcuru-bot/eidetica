@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use eidetica::{
     backend::{
@@ -7,6 +8,7 @@ use eidetica::{
     },
     entry::ID,
 };
+use tokio::sync::Barrier;
 
 use crate::helpers::test_backend;
 
@@ -329,6 +331,171 @@ async fn racing_publishers_of_one_target_agree_on_a_single_winner() {
     assert_eq!(
         backend
             .store_state_record_get(&winner, b"key")
+            .await
+            .unwrap(),
+        Some(b"value".to_vec())
+    );
+}
+
+/// Publishing the same (cloned) staging token twice must be idempotent: the
+/// second publish returns the same view and the published state stays intact.
+/// A repeat publish that deletes the ready namespace turns a retry into data
+/// loss, so this asserts the state survives, not just the return value.
+#[tokio::test]
+async fn repeat_publish_of_a_cloned_token_keeps_published_state() {
+    let backend = test_backend().await;
+    let request = request("repeat", "store", StoreStateLifecycle::Derived);
+    let token = backend
+        .begin_store_state_staging(request.clone())
+        .await
+        .unwrap();
+    backend
+        .stage_store_state_records(
+            &token,
+            BTreeMap::from([(b"key".to_vec(), Some(b"value".to_vec()))]),
+        )
+        .await
+        .unwrap();
+
+    let first = backend.publish_store_state(token.clone()).await.unwrap();
+    let second = backend.publish_store_state(token).await.unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+        backend.resolve_store_state(&request).await.unwrap(),
+        Some(first.clone())
+    );
+    assert_eq!(
+        backend
+            .store_state_record_get(&first, b"key")
+            .await
+            .unwrap(),
+        Some(b"value".to_vec())
+    );
+}
+
+/// A view whose namespace was cleared (or was never ready) is an explicit
+/// error — never a missing key and never an empty page. A missing key on a
+/// live view still reads as absent, and a published-but-empty snapshot still
+/// scans as an empty page, so callers can tell the three cases apart.
+#[tokio::test]
+async fn cleared_view_errors_instead_of_reading_missing_or_empty() {
+    let backend = test_backend().await;
+    let derived_request = request("cleared", "store", StoreStateLifecycle::Derived);
+    let view = publish(
+        backend.as_ref(),
+        derived_request.clone(),
+        [(b"key".to_vec(), b"value".to_vec())],
+    )
+    .await;
+    assert_eq!(
+        backend
+            .store_state_record_get(&view, b"absent")
+            .await
+            .unwrap(),
+        None
+    );
+
+    backend.clear_derived_store_state().await.unwrap();
+    assert!(
+        backend
+            .resolve_store_state(&derived_request)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let get_err = backend
+        .store_state_record_get(&view, b"key")
+        .await
+        .unwrap_err();
+    assert!(
+        get_err.is_invalid_store_state_view(),
+        "cleared view must error, got: {get_err}"
+    );
+    let scan_err = backend
+        .store_state_record_scan(&view, &RecordRange::default(), None, 16)
+        .await
+        .unwrap_err();
+    assert!(
+        scan_err.is_invalid_store_state_view(),
+        "cleared view must error, got: {scan_err}"
+    );
+}
+
+/// A namespace can be published with no records at all. That valid-but-empty
+/// snapshot scans as an empty page — the Ok case the cleared-view test above
+/// contrasts against.
+#[tokio::test]
+async fn valid_empty_snapshot_scans_as_an_empty_page() {
+    let backend = test_backend().await;
+    let view = publish(
+        backend.as_ref(),
+        request("empty", "store", StoreStateLifecycle::Derived),
+        std::iter::empty::<(Vec<u8>, Vec<u8>)>(),
+    )
+    .await;
+
+    let page = backend
+        .store_state_record_scan(&view, &RecordRange::default(), None, 16)
+        .await
+        .unwrap();
+    assert!(page.records.is_empty());
+    assert!(page.next.is_none());
+}
+
+/// Eight materializers race to publish one target from a barrier start so the
+/// publishes genuinely overlap. Every publisher must agree on a single winner
+/// whose records stay intact — no torn namespaces, no duplicate ready state.
+/// This is a regression guard on the serialization outcome, not a proof of the
+/// locking: it passes by construction on any correct serialization and fails
+/// on torn or duplicated state however the tasks interleave.
+#[tokio::test]
+async fn barrier_started_publishers_agree_on_a_single_winner() {
+    const PUBLISHERS: usize = 8;
+    let backend: Arc<dyn BackendImpl> = test_backend().await.into();
+    let request = request("barrier", "store", StoreStateLifecycle::Derived);
+
+    let mut tokens = Vec::with_capacity(PUBLISHERS);
+    for _ in 0..PUBLISHERS {
+        let token = backend
+            .begin_store_state_staging(request.clone())
+            .await
+            .unwrap();
+        backend
+            .stage_store_state_records(
+                &token,
+                BTreeMap::from([(b"key".to_vec(), Some(b"value".to_vec()))]),
+            )
+            .await
+            .unwrap();
+        tokens.push(token);
+    }
+
+    let barrier = Arc::new(Barrier::new(PUBLISHERS));
+    let mut tasks = tokio::task::JoinSet::new();
+    for token in tokens {
+        let backend = Arc::clone(&backend);
+        let barrier = Arc::clone(&barrier);
+        tasks.spawn(async move {
+            barrier.wait().await;
+            backend.publish_store_state(token).await
+        });
+    }
+
+    let mut views = Vec::with_capacity(PUBLISHERS);
+    while let Some(outcome) = tasks.join_next().await {
+        views.push(outcome.unwrap().unwrap());
+    }
+    for view in &views {
+        assert_eq!(view, &views[0]);
+    }
+    assert_eq!(
+        backend.resolve_store_state(&request).await.unwrap(),
+        Some(views[0].clone())
+    );
+    assert_eq!(
+        backend
+            .store_state_record_get(&views[0], b"key")
             .await
             .unwrap(),
         Some(b"value".to_vec())
