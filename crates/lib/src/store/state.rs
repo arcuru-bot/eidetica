@@ -57,3 +57,54 @@ pub(crate) async fn publish_opaque(
     }
     result
 }
+
+/// Resolve a cached opaque record, treating a missing record substrate as a
+/// miss. Only `StoreStateStorageUnsupported` maps to `None` — an old custom
+/// backend predating the record API. Every other error propagates.
+pub(crate) async fn resolve_cached(
+    backend: &dyn Backend,
+    request: &StoreStateRequest,
+) -> Result<Option<RecordView>> {
+    match backend.resolve_store_state(request).await {
+        Err(err) if err.is_unsupported_store_state() => Ok(None),
+        result => result,
+    }
+}
+
+/// Load a cached opaque record through resolve, with one bounded retry.
+///
+/// A view minted before a clear races the load: the first load reports
+/// `InvalidStoreStateView`, so resolve once more in case another materializer
+/// republished meanwhile. Anything still missing afterwards is a genuine miss
+/// and the caller recomputes from history — exactly two loads, no retry loop,
+/// and a vanished snapshot is never read as empty.
+pub(crate) async fn load_cached(
+    backend: &dyn Backend,
+    request: &StoreStateRequest,
+) -> Result<Option<Vec<u8>>> {
+    for _ in 0..2 {
+        let Some(view) = resolve_cached(backend, request).await? else {
+            return Ok(None);
+        };
+        match load_opaque(backend, &view).await {
+            Err(err) if err.is_invalid_store_state_view() => continue,
+            result => return result,
+        }
+    }
+    Ok(None)
+}
+
+/// Stage and publish an opaque record, skipping backends without the record
+/// substrate. An `Unsupported` at any step aborts the attempt and reports
+/// "not cached" — `publish_opaque` already aborts the token on error, so no
+/// staging namespace leaks. Genuine errors propagate.
+pub(crate) async fn store_cached(
+    backend: &dyn Backend,
+    request: StoreStateRequest,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    match publish_opaque(backend, request, bytes).await {
+        Err(err) if err.is_unsupported_store_state() => Ok(()),
+        result => result.map(|_| ()),
+    }
+}
