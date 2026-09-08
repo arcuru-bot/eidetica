@@ -243,6 +243,19 @@ impl Error {
         matches!(self, Error::Instance(_))
     }
 
+    /// Whether this error means the backend has no Store-state record
+    /// substrate — an old custom backend, not a failure. Only the
+    /// `StoreStateStorageUnsupported` capability report matches; genuine
+    /// storage errors never do.
+    pub fn is_unsupported_store_state(&self) -> bool {
+        matches!(self, Error::Backend(e) if e.is_unsupported_store_state())
+    }
+
+    /// Whether a Store-state view no longer identifies a ready namespace.
+    pub fn is_invalid_store_state_view(&self) -> bool {
+        matches!(self, Error::Backend(e) if e.is_invalid_store_state_view())
+    }
+
     /// Check if this error is validation-related.
     pub fn is_validation_error(&self) -> bool {
         match self {

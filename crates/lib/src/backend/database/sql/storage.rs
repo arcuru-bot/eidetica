@@ -20,6 +20,49 @@ fn store_state_scope(scope: &CacheScope) -> &str {
     }
 }
 
+/// Canonical identity of a Store-state target, for cross-transaction locking.
+fn store_state_target_key(target: &StoreStateRequest) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        target.database,
+        target.store,
+        target.lifecycle.as_db_int(),
+        store_state_scope(&target.scope),
+        target.projection.name,
+        target.projection.version,
+        hex::encode(&target.source_key),
+    )
+}
+
+/// Serialize a stage/publish critical section on PostgreSQL.
+///
+/// SQLite serializes writers through `BEGIN IMMEDIATE`, so this is a no-op
+/// there. PostgreSQL allows concurrent writers: without a shared lock, a
+/// publish can slip between another task's stage validation and its writes,
+/// or two publishers can interleave validation and publication, leaving a
+/// ready namespace that gains records afterwards or holds unvalidated
+/// deletes. Both paths lock the target first and the staging namespace
+/// second, so concurrent holders always acquire in one order. The locks are
+/// transaction-scoped and release on commit or rollback.
+async fn lock_store_state_namespace(
+    backend: &SqlxBackend,
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    target: &StoreStateRequest,
+    namespace_id: &str,
+) -> Result<()> {
+    if backend.is_sqlite() {
+        return Ok(());
+    }
+    for key in [store_state_target_key(target), namespace_id.to_string()] {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(key)
+            .execute(&mut **tx)
+            .await
+            .sql_context("Failed to lock Store-state namespace")?;
+    }
+    Ok(())
+}
+
 pub async fn resolve_store_state(
     backend: &SqlxBackend,
     request: &StoreStateRequest,
@@ -91,6 +134,7 @@ pub async fn stage_store_state_records(
             .await
             .sql_context("Failed to lock Store-state staging transaction")?;
     }
+    lock_store_state_namespace(backend, &mut tx, &token.target, &token.namespace_id).await?;
     let staging: Option<(i64,)> = sqlx::query_as(
         "SELECT lifecycle FROM store_state_namespaces WHERE namespace_id = $1 AND status = 0",
     )
@@ -153,6 +197,7 @@ async fn publish_staged_namespace(
             .await
             .sql_context("Failed to lock Store-state publish transaction")?;
     }
+    lock_store_state_namespace(backend, &mut tx, &token.target, &token.namespace_id).await?;
     let deletes: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM store_state_records WHERE namespace_id = $1 AND record_value IS NULL",
     )
@@ -205,17 +250,30 @@ pub async fn store_state_record_get(
     view: &RecordView,
     key: &[u8],
 ) -> Result<Option<Vec<u8>>> {
-    let row: Option<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT r.record_value FROM store_state_records r
-         JOIN store_state_namespaces n ON n.namespace_id = r.namespace_id
-         WHERE r.namespace_id = $1 AND r.record_key = $2 AND n.status = 1",
+    // One statement validates the view and reads the key, so a concurrent
+    // clear either lands fully before this snapshot (invalid view) or fully
+    // after it (live read) — it can never peel the namespace away mid-read
+    // into a false missing key. Ready namespaces hold no NULL values (publish
+    // rejects them), so a NULL read is an absent key, not an empty value.
+    let row: Option<(i64, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT namespaces.status, records.record_value
+         FROM store_state_namespaces AS namespaces
+         LEFT JOIN store_state_records AS records
+           ON records.namespace_id = namespaces.namespace_id AND records.record_key = $2
+         WHERE namespaces.namespace_id = $1",
     )
     .bind(&view.namespace_id)
     .bind(key)
     .fetch_optional(backend.pool())
     .await
     .sql_context("Failed to get Store-state record")?;
-    Ok(row.map(|(value,)| value))
+    let Some((status, value)) = row else {
+        return Err(BackendError::InvalidStoreStateView.into());
+    };
+    if status != 1 {
+        return Err(BackendError::InvalidStoreStateView.into());
+    }
+    Ok(value)
 }
 
 pub async fn store_state_record_scan(
@@ -225,6 +283,30 @@ pub async fn store_state_record_scan(
     after: Option<&[u8]>,
     limit: usize,
 ) -> Result<RecordPage> {
+    let mut tx = backend
+        .pool()
+        .begin()
+        .await
+        .sql_context("Failed to scan Store-state records")?;
+    // Validate the view and pin it: the shared lock blocks a concurrent clear
+    // of this namespace until the page is read, so validation and the read
+    // cannot straddle a clear into a false empty page. A SQLite read
+    // transaction already sees a stable snapshot, so plain validation suffices
+    // there. Validation runs before the `limit == 0` shortcut so an invalid
+    // view errors instead of reading as an empty page.
+    let validation = if backend.is_sqlite() {
+        "SELECT status FROM store_state_namespaces WHERE namespace_id = $1"
+    } else {
+        "SELECT status FROM store_state_namespaces WHERE namespace_id = $1 FOR SHARE"
+    };
+    let status: Option<(i64,)> = sqlx::query_as(validation)
+        .bind(&view.namespace_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .sql_context("Failed to validate Store-state view")?;
+    if status != Some((1,)) {
+        return Err(BackendError::InvalidStoreStateView.into());
+    }
     if limit == 0 {
         return Ok(RecordPage::default());
     }
@@ -243,9 +325,12 @@ pub async fn store_state_record_scan(
     .bind(range.end.as_deref())
     .bind(after)
     .bind(sql_limit)
-    .fetch_all(backend.pool())
+    .fetch_all(&mut *tx)
     .await
     .sql_context("Failed to scan Store-state records")?;
+    tx.commit()
+        .await
+        .sql_context("Failed to commit Store-state record scan")?;
     let mut records = rows;
     let has_more = records.len() > limit;
     records.truncate(limit);
