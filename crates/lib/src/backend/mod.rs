@@ -52,11 +52,11 @@ pub enum CacheScope {
     User(String),
 }
 
-/// Lifecycle of a ready Store-state namespace.
+/// Lifecycle of stored Store state.
 ///
-/// Derived namespaces are immutable, disposable projections of historical
-/// Entries. Authoritative namespaces are durable current state. Staging is an
-/// internal unpublished state and can never be returned by record reads.
+/// Derived state is a disposable cached materialization of historical
+/// Entries. Authoritative state is durable current state. Staging is a
+/// private unpublished build and is never visible to record reads.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StoreStateLifecycle {
     Derived,
@@ -74,20 +74,24 @@ impl StoreStateLifecycle {
     }
 }
 
-/// Store-owned identity of a state representation.
+/// Identifies a Store's cached record format.
+///
+/// Store implementations change the version when the encoding becomes
+/// incompatible. Backends compare this value opaquely when resolving cached
+/// state.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionDescriptor {
     pub name: String,
     pub version: u32,
 }
 
-/// Backend-owned identity for one ready namespace.
+/// Backend-owned handle to one published record set.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordView {
     pub(crate) namespace_id: String,
 }
 
-/// Metadata used to resolve or build a namespace.
+/// Metadata used to resolve or build cached state.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreStateRequest {
     pub database: ID,
@@ -99,7 +103,10 @@ pub struct StoreStateRequest {
     pub source_key: Vec<u8>,
 }
 
-/// Unpublished namespace capability.
+/// Claim on one private unpublished build.
+///
+/// Minted by [`BackendImpl::begin_store_state_staging`]; handed back to stage,
+/// publish, or abort that same build. Opaque to everyone but the backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagingToken {
     pub(crate) namespace_id: String,
@@ -119,9 +126,8 @@ impl StagingToken {
 
 /// Ordered record changes.
 ///
-/// `None` is reserved for a staged delete. No lifecycle publishes one yet:
-/// [`BackendImpl::publish_store_state`] rejects a namespace containing a
-/// `None`-valued record, so deletes can be staged but not made ready.
+/// `None` is a staged delete marker. Deletes can be staged but never published:
+/// [`BackendImpl::publish_store_state`] rejects a build holding one.
 pub type RecordMutations = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
 
 /// Half-open byte-key range `[start, end)`.
@@ -334,7 +340,8 @@ impl VerificationStatus {
 /// set by the calling code (typically Database/Transaction implementations).
 #[async_trait]
 pub trait BackendImpl: Send + Sync + Any {
-    /// Resolve a ready namespace. Staging namespaces are never returned.
+    /// Look up the published cached state for an exact request. Private
+    /// builds are never returned.
     async fn resolve_store_state(
         &self,
         _request: &StoreStateRequest,
@@ -342,12 +349,13 @@ pub trait BackendImpl: Send + Sync + Any {
         Err(BackendError::StoreStateStorageUnsupported.into())
     }
 
-    /// Create an invisible staging namespace for a later atomic publish.
+    /// Start a private build for a later atomic publish. The build is invisible
+    /// to readers until published.
     async fn begin_store_state_staging(&self, _request: StoreStateRequest) -> Result<StagingToken> {
         Err(BackendError::StoreStateStorageUnsupported.into())
     }
 
-    /// Apply a chunk to an unpublished staging namespace.
+    /// Add a chunk of records to a private build.
     async fn stage_store_state_records(
         &self,
         _token: &StagingToken,
@@ -356,24 +364,25 @@ pub trait BackendImpl: Send + Sync + Any {
         Err(BackendError::StoreStateStorageUnsupported.into())
     }
 
-    /// Atomically make a complete staging namespace ready.
+    /// Atomically publish a finished build as the cached state for its target.
     ///
-    /// Returns the view of the ready namespace for the token's target. When a
-    /// concurrent materializer published that same target first, its namespace
-    /// is returned and this one is discarded — publishing the same derived
-    /// state twice is a race, not an error. Repeating a publish with the same
-    /// token is idempotent and must never remove the published state. Rejects
-    /// a namespace holding a `None`-valued record, since staged deletes cannot
-    /// yet be published.
+    /// Returns the published record set. When a concurrent materializer published
+    /// that same target first, its record set is adopted and this build is
+    /// discarded — publishing the same state twice is a race, not an error.
+    /// Repeating a publish with the same token is idempotent and must never
+    /// remove the published state. Rejects a build holding a `None`-valued
+    /// record, since staged deletes cannot be published yet.
     async fn publish_store_state(&self, _token: StagingToken) -> Result<RecordView> {
         Err(BackendError::StoreStateStorageUnsupported.into())
     }
 
-    /// Discard an unpublished namespace. Aborting an already-published token is harmless.
+    /// Discard a private build. Aborting an already-published token is harmless.
     async fn abort_store_state(&self, _token: StagingToken) -> Result<()> {
         Err(BackendError::StoreStateStorageUnsupported.into())
     }
 
+    /// Read one exact record from published records. A missing key reads as
+    /// `None`, never an error.
     async fn store_state_record_get(
         &self,
         _view: &RecordView,
@@ -383,8 +392,8 @@ pub trait BackendImpl: Send + Sync + Any {
     }
 
     /// Read one ordered page of records. A `limit` of zero yields an empty page
-    /// with no continuation. A view that no longer identifies a ready
-    /// namespace errors with `InvalidStoreStateView`, never an empty page.
+    /// with no continuation. A view that no longer identifies published
+    /// records errors with `InvalidStoreStateView`, never an empty page.
     async fn store_state_record_scan(
         &self,
         _view: &RecordView,
@@ -395,7 +404,8 @@ pub trait BackendImpl: Send + Sync + Any {
         Err(BackendError::StoreStateStorageUnsupported.into())
     }
 
-    /// Remove only ready derived namespaces. Authority and staging are not selectable.
+    /// Clear cached derived state. Authoritative state and private
+    /// builds are untouched.
     async fn clear_derived_store_state(&self) -> Result<()> {
         Err(BackendError::StoreStateStorageUnsupported.into())
     }

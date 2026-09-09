@@ -18,25 +18,25 @@ use crate::entry::ID;
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum BackendError {
-    /// The backend does not implement the generic Store-state record substrate.
+    /// The backend does not cache Store state as records.
     #[error("Store-state records are not supported by this backend")]
     StoreStateStorageUnsupported,
 
-    /// A Store-state token does not identify a mutable staging namespace.
+    /// A staging token does not identify a private unpublished build.
     #[error("Invalid or expired Store-state staging token")]
     InvalidStoreStateStagingToken,
 
-    /// A Store-state view does not identify a ready namespace.
+    /// A Store-state view does not identify a published record set.
     ///
-    /// The namespace was cleared after the view was minted, or the view never
-    /// identified a published namespace. This is never a missing key or an
-    /// empty snapshot: reads against a live view still report those as
+    /// The record set was cleared after the view was minted, or the view never
+    /// identified a published record set. This is never a missing key or an
+    /// empty page: reads against a live view still report those as
     /// `None` and empty pages.
     #[error("Store-state view is not ready (cleared or never published)")]
     InvalidStoreStateView,
 
-    /// A ready namespace cannot be changed after publication.
-    #[error("Published derived Store-state namespaces are immutable")]
+    /// A published record set cannot be changed after publication.
+    #[error("Published derived Store state is immutable")]
     StoreStateNamespaceImmutable,
 
     /// Entry not found by ID.
@@ -257,7 +257,8 @@ impl BackendError {
         )
     }
 
-    /// Whether this error means the backend has no Store-state record substrate.
+    /// Whether this error means the backend does not cache Store state as
+    /// records.
     ///
     /// Only [`BackendError::StoreStateStorageUnsupported`] reports this. Every
     /// other failure — invalid tokens, invalid views, storage I/O — is genuine
@@ -267,7 +268,7 @@ impl BackendError {
     }
 
     /// Whether this error means a Store-state view no longer identifies a
-    /// ready namespace (cleared after minting, or never published).
+    /// published record set (cleared after minting, or never published).
     pub fn is_invalid_store_state_view(&self) -> bool {
         matches!(self, BackendError::InvalidStoreStateView)
     }
