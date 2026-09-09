@@ -53,6 +53,13 @@ Table cached-state tests instrument local record reads to prove zero reads while
 loading a handle, one point lookup for `get`, bounded ordered pages, and
 transaction-local put/delete overlays. They also assert that a cold record set
 contains one backend record per row while historical Entry deltas remain `Doc`.
+Store-state records tests cover a derived clear during an active reader and the
+rebuild that follows it, plus the reclaim of the unlinked generation.
+Store-state service tests cover publication, reconnect durability,
+publication immutability, session scope binding with a refused foreign scope,
+shared-cache fallback, byte-verbatim ciphertext, and idle private-build
+expiry. The service Table test asserts that a first point read publishes
+individual row records rather than falling back to a whole-`Doc` response.
 
 ## Writing Tests
 

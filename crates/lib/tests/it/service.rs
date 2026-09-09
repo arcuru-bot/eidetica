@@ -2,6 +2,7 @@
 
 #![cfg(all(unix, feature = "service"))]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -9,12 +10,15 @@ use eidetica::Entry;
 use eidetica::Instance;
 use eidetica::auth::crypto::{create_challenge_response, generate_keypair, sign_entry};
 use eidetica::backend::database::InMemory;
+use eidetica::backend::{ProjectionDescriptor, StoreStateRequest};
+use eidetica::crdt::Doc;
 use eidetica::service::ServiceServer;
 use eidetica::service::protocol::{
     Handshake, HandshakeAck, PROTOCOL_VERSION, ReadScope, ServerFrame, ServiceRequest,
     ServiceResponse, read_frame, write_frame,
 };
-use eidetica::store::{DocStore, PasswordStore};
+use eidetica::store::{DocStore, PasswordStore, Table};
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -39,6 +43,14 @@ async fn read_response<R: AsyncRead + Unpin>(reader: &mut R) -> ServiceResponse 
 /// goes out of scope; the server-side Instance is returned so tests can observe
 /// state both locally and over the wire.
 async fn start_test_server() -> (PathBuf, watch::Sender<()>, Instance, TempDir) {
+    start_test_server_with_token_ttl(Duration::from_secs(5 * 60)).await
+}
+
+/// Same as [`start_test_server`], with the session-token idle lifetime under
+/// the caller's control so expiry is observable without a long wait.
+async fn start_test_server_with_token_ttl(
+    ttl: Duration,
+) -> (PathBuf, watch::Sender<()>, Instance, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("test.sock");
     let (instance, _admin) = Instance::create_backend(
@@ -48,7 +60,8 @@ async fn start_test_server() -> (PathBuf, watch::Sender<()>, Instance, TempDir) 
     .await
     .unwrap();
     let (tx, rx) = watch::channel(());
-    let server = ServiceServer::new(instance.clone(), socket_path.clone());
+    let server =
+        ServiceServer::new(instance.clone(), socket_path.clone()).with_token_idle_ttl_for_test(ttl);
     tokio::spawn(async move {
         let _ = server.run(rx).await;
     });
@@ -1203,6 +1216,436 @@ async fn test_daemon_survives_half_written_request_frame() {
         .unwrap();
     let user = instance.login_user("alice", None).await.unwrap();
     assert_eq!(user.username(), "alice");
+}
+
+// === Store-state records over the wire ===
+//
+// The daemon owns the record substrate; a client resolves an opaque view and
+// reads through it. Every request is rebound to the authenticated session: a
+// client addresses its own user scope, and the daemon's own shared
+// materializations remain readable as a fallback.
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ServiceTodo {
+    title: String,
+    done: bool,
+}
+
+/// Log in over the socket and return the connected client instance.
+async fn login_client(socket_path: &std::path::Path, username: &str) -> Instance {
+    let instance = Instance::connect(format!("unix://{}", socket_path.display()))
+        .await
+        .unwrap();
+    instance.login_user(username, None).await.unwrap();
+    instance
+}
+
+/// One derived Store-state request for a connected client.
+fn derived_request(root_id: &eidetica::entry::ID, store: &str) -> StoreStateRequest {
+    StoreStateRequest {
+        database: root_id.clone(),
+        store: store.to_string(),
+        lifecycle: eidetica::backend::StoreStateLifecycle::Derived,
+        scope: eidetica::backend::CacheScope::Shared,
+        projection: ProjectionDescriptor {
+            name: "eidetica/opaque/test".to_string(),
+            version: 0,
+        },
+        source_key: b"tips".to_vec(),
+    }
+}
+
+/// Publish one opaque record through the service staging protocol.
+async fn publish_remote_state(
+    conn: &eidetica::service::client::RemoteConnection,
+    identity: &eidetica::auth::types::SigKey,
+    request: StoreStateRequest,
+    value: Vec<u8>,
+) -> String {
+    let root_id = request.database.clone();
+    let token = conn
+        .begin_store_state_staging(identity.clone(), request)
+        .await
+        .unwrap();
+    conn.stage_store_state_records(
+        root_id.clone(),
+        identity.clone(),
+        token.clone(),
+        0,
+        BTreeMap::from([(vec![0], Some(value))]),
+    )
+    .await
+    .unwrap();
+    conn.publish_store_state(root_id, identity.clone(), token)
+        .await
+        .unwrap()
+}
+
+/// A request nothing has published resolves to no view.
+#[tokio::test]
+async fn test_remote_store_state_miss_returns_none() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (instance, root_id, identity) = setup_db(&server, &socket_path, "alice").await;
+    let conn = remote_conn(&instance);
+
+    assert!(
+        conn.resolve_store_state(identity, derived_request(&root_id, "never-built"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// A published record set is readable through a resolved view, and survives a
+/// fresh connection because the daemon owns the records.
+#[tokio::test]
+async fn test_remote_store_state_round_trip_survives_reconnect() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (instance, root_id, identity) = setup_db(&server, &socket_path, "alice").await;
+    let conn = remote_conn(&instance);
+    let request = derived_request(&root_id, "entries");
+
+    let view =
+        publish_remote_state(&conn, &identity, request.clone(), b"materialized".to_vec()).await;
+    assert_eq!(
+        conn.store_state_record_get(root_id.clone(), identity.clone(), view, vec![0])
+            .await
+            .unwrap(),
+        Some(b"materialized".to_vec())
+    );
+
+    let reconnected = Instance::connect(format!("unix://{}", socket_path.display()))
+        .await
+        .unwrap();
+    let _user = reconnected.login_user("alice", None).await.unwrap();
+    let conn = remote_conn(&reconnected);
+    let view = conn
+        .resolve_store_state(identity.clone(), request)
+        .await
+        .unwrap()
+        .expect("published record set must resolve on a new connection");
+    assert_eq!(
+        conn.store_state_record_get(root_id, identity, view, vec![0])
+            .await
+            .unwrap(),
+        Some(b"materialized".to_vec())
+    );
+}
+
+/// Published record sets are immutable: republishing the same request keeps the
+/// first bytes rather than overwriting them.
+#[tokio::test]
+async fn test_remote_store_state_publication_is_immutable() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (instance, root_id, identity) = setup_db(&server, &socket_path, "alice").await;
+    let conn = remote_conn(&instance);
+    let request = derived_request(&root_id, "entries");
+
+    publish_remote_state(&conn, &identity, request.clone(), b"first".to_vec()).await;
+    let view = publish_remote_state(&conn, &identity, request, b"second".to_vec()).await;
+    assert_eq!(
+        conn.store_state_record_get(root_id, identity, view, vec![0])
+            .await
+            .unwrap(),
+        Some(b"first".to_vec())
+    );
+}
+
+/// A request naming another user's scope is refused rather than served, and a
+/// client-computed record set is not visible to a different session user.
+#[tokio::test]
+async fn test_remote_store_state_scope_is_bound_to_the_session_user() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (alice_instance, root_id, identity) = setup_db(&server, &socket_path, "alice").await;
+    let alice_conn = remote_conn(&alice_instance);
+    let request = derived_request(&root_id, "entries");
+    publish_remote_state(
+        &alice_conn,
+        &identity,
+        request.clone(),
+        b"alice-only".to_vec(),
+    )
+    .await;
+
+    let foreign = StoreStateRequest {
+        scope: eidetica::backend::CacheScope::User("someone-else".to_string()),
+        ..request.clone()
+    };
+    assert!(
+        alice_conn
+            .resolve_store_state(identity.clone(), foreign)
+            .await
+            .is_err(),
+        "a request naming another user's scope must be refused"
+    );
+
+    // The client asked with the shared scope; the daemon narrowed it to the
+    // session user, so nothing was published into the daemon's own shared cached state.
+    assert!(
+        server
+            .backend()
+            .local_engine()
+            .expect("test server is always Local")
+            .resolve_store_state(&request)
+            .await
+            .unwrap()
+            .is_none(),
+        "a client publication must not land in the daemon's shared cached state"
+    );
+    assert!(
+        alice_conn
+            .resolve_store_state(identity, request)
+            .await
+            .unwrap()
+            .is_some(),
+        "the publishing session must still resolve its own record set"
+    );
+}
+
+/// The daemon's own shared materializations stay readable by an authorized
+/// user: a user-scope miss falls back to shared cached state.
+#[tokio::test]
+async fn test_remote_store_state_shared_fallback_for_daemon_materialized_state() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (instance, root_id, identity) = setup_db(&server, &socket_path, "alice").await;
+    let request = derived_request(&root_id, "shared-fallback-store");
+
+    // Seed the shared scope directly on the daemon's backend, as the daemon's
+    // own materialization of an unencrypted store would.
+    let backend = server
+        .backend()
+        .local_engine()
+        .expect("test server is always Local");
+    let token = backend
+        .begin_store_state_staging(request.clone())
+        .await
+        .unwrap();
+    backend
+        .stage_store_state_records(
+            &token,
+            BTreeMap::from([(vec![0], Some(b"daemon-computed".to_vec()))]),
+        )
+        .await
+        .unwrap();
+    backend.publish_store_state(token).await.unwrap();
+
+    let conn = remote_conn(&instance);
+    let view = conn
+        .resolve_store_state(identity.clone(), request)
+        .await
+        .unwrap()
+        .expect("user-scope miss must fall back to the daemon's shared cached state");
+    assert_eq!(
+        conn.store_state_record_get(root_id, identity, view, vec![0])
+            .await
+            .unwrap(),
+        Some(b"daemon-computed".to_vec())
+    );
+}
+
+/// The daemon is byte-blind: ciphertext records round-trip verbatim.
+#[tokio::test]
+async fn test_remote_store_state_stores_ciphertext_verbatim() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    let (instance, root_id, identity) = setup_db(&server, &socket_path, "alice").await;
+    let conn = remote_conn(&instance);
+    let ciphertext = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42, 0x42, 0x42, 0x42];
+
+    let view = publish_remote_state(
+        &conn,
+        &identity,
+        derived_request(&root_id, "encrypted-store"),
+        ciphertext.clone(),
+    )
+    .await;
+    assert_eq!(
+        conn.store_state_record_get(root_id, identity, view, vec![0])
+            .await
+            .unwrap(),
+        Some(ciphertext)
+    );
+}
+
+/// An idle private-build capability is reclaimed: the build it was staging is
+/// aborted, so the token stops working and nothing was published.
+#[tokio::test]
+async fn test_remote_store_state_idle_staging_token_expires() {
+    let (socket_path, _tx, server, _dir) =
+        start_test_server_with_token_ttl(Duration::from_millis(50)).await;
+    let (instance, root_id, identity) = setup_db(&server, &socket_path, "alice").await;
+    let conn = remote_conn(&instance);
+    let request = derived_request(&root_id, "expiring");
+
+    let token = conn
+        .begin_store_state_staging(identity.clone(), request.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    assert!(
+        conn.publish_store_state(root_id, identity.clone(), token)
+            .await
+            .is_err(),
+        "an expired staging token must not publish"
+    );
+    assert!(
+        conn.resolve_store_state(identity, request)
+            .await
+            .unwrap()
+            .is_none(),
+        "an expired build must leave no ready record set behind"
+    );
+}
+
+/// A historical `Table` read over the service publishes an addressable row
+/// record set rather than falling back to a whole-`Doc` response.
+#[tokio::test]
+async fn test_historical_table_service_reads_use_row_record_set() {
+    let (socket_path, _tx, server, _dir) = start_test_server().await;
+    create_user_via_admin(&server, "alice").await;
+
+    let mut server_user = server.login_user("alice", None).await.unwrap();
+    let key = server_user.get_default_key().unwrap();
+    let database = server_user.create_database(Doc::new(), &key).await.unwrap();
+    let root_id = database.root_id().clone();
+    database
+        .with_transaction(|transaction| async move {
+            let table = transaction.get_store::<Table<ServiceTodo>>("rows").await?;
+            table
+                .set(
+                    "a",
+                    ServiceTodo {
+                        title: "first".into(),
+                        done: false,
+                    },
+                )
+                .await?;
+            table
+                .set(
+                    "b",
+                    ServiceTodo {
+                        title: "second".into(),
+                        done: true,
+                    },
+                )
+                .await
+        })
+        .await
+        .unwrap();
+
+    let engine = server.backend().local_engine().unwrap();
+    let memory = engine
+        .as_any()
+        .downcast_ref::<InMemory>()
+        .expect("test server is always InMemory");
+    assert_eq!(memory.store_state_record_count(&root_id, "rows"), 0);
+
+    let client = login_client(&socket_path, "alice").await;
+    let identity = eidetica::Database::find_sigkeys(&server, &root_id, &key)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .0;
+    let remote = eidetica::Database::open_remote(&client, remote_conn(&client), &root_id, identity)
+        .await
+        .unwrap();
+    let table = remote
+        .get_store_viewer::<Table<ServiceTodo>>("rows")
+        .await
+        .unwrap();
+    assert_eq!(
+        memory.store_state_record_count(&root_id, "rows"),
+        0,
+        "loading a remote Table must not materialize any row"
+    );
+    assert_eq!(table.get("a").await.unwrap().title, "first");
+    assert_eq!(
+        memory.store_state_record_count(&root_id, "rows"),
+        2,
+        "the service read must publish the row record set, not a whole Doc"
+    );
+    let first = table.scan_page(None, 1).await.unwrap();
+    let second = table.scan_page(first.next.as_ref(), 1).await.unwrap();
+    assert_eq!(first.rows[0].0, "a");
+    assert_eq!(second.rows[0].0, "b");
+    assert!(second.next.is_none());
+}
+
+/// A connected `Table` keeps reading after its published-view capability
+/// expires: the stale cached view resolves transparently to a fresh view onto
+/// the same published record set.
+///
+/// Regression net for the view/staging-token wire split: the daemon must
+/// report a missing or expired published view as `InvalidStoreStateView` (not
+/// `InvalidStoreStateStagingToken`) so the transaction drops its cached view
+/// and re-resolves instead of surfacing the expiry to the caller.
+#[tokio::test]
+async fn test_connected_table_recovers_after_published_view_expiry() {
+    let (socket_path, _tx, server, _dir) =
+        start_test_server_with_token_ttl(Duration::from_millis(50)).await;
+    create_user_via_admin(&server, "alice").await;
+
+    let mut server_user = server.login_user("alice", None).await.unwrap();
+    let key = server_user.get_default_key().unwrap();
+    let database = server_user.create_database(Doc::new(), &key).await.unwrap();
+    let root_id = database.root_id().clone();
+    database
+        .with_transaction(|transaction| async move {
+            let table = transaction.get_store::<Table<ServiceTodo>>("rows").await?;
+            table
+                .set(
+                    "a",
+                    ServiceTodo {
+                        title: "first".into(),
+                        done: false,
+                    },
+                )
+                .await?;
+            table
+                .set(
+                    "b",
+                    ServiceTodo {
+                        title: "second".into(),
+                        done: true,
+                    },
+                )
+                .await
+        })
+        .await
+        .unwrap();
+
+    let client = login_client(&socket_path, "alice").await;
+    let identity = eidetica::Database::find_sigkeys(&server, &root_id, &key)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .0;
+    let remote = eidetica::Database::open_remote(&client, remote_conn(&client), &root_id, identity)
+        .await
+        .unwrap();
+    let table = remote
+        .get_store_viewer::<Table<ServiceTodo>>("rows")
+        .await
+        .unwrap();
+    assert_eq!(table.get("a").await.unwrap().title, "first");
+
+    // Let the daemon's idle janitor reclaim the published-view capability
+    // while the client's cached view still points at it.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(
+        table.get("a").await.unwrap().title,
+        "first",
+        "a stale cached view must re-resolve instead of failing"
+    );
+    let page = table.scan_page(None, 2).await.unwrap();
+    assert_eq!(page.rows.len(), 2);
+    assert_eq!(page.rows[0].0, "a");
+    assert_eq!(page.rows[1].0, "b");
 }
 
 // =============================================================================

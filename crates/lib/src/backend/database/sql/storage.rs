@@ -316,7 +316,7 @@ pub async fn store_state_record_scan(
     let rows: Vec<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
         "SELECT r.record_key, r.record_value FROM store_state_records r
          JOIN store_state_namespaces n ON n.namespace_id = r.namespace_id
-         WHERE r.namespace_id = $1 AND n.status = 1
+         WHERE r.namespace_id = $1 AND n.status IN (1, 2)
            AND ($2 IS NULL OR r.record_key >= $2)
            AND ($3 IS NULL OR r.record_key < $3)
            AND ($4 IS NULL OR r.record_key > $4)
@@ -344,13 +344,38 @@ pub async fn store_state_record_scan(
     Ok(RecordPage { records, next })
 }
 
+/// Unlink every ready derived namespace and reclaim the previously unlinked
+/// generation.
+///
+/// Clearing is two-phase because a reader that already resolved a view keeps
+/// reading through it: unlinking removes the namespace from resolution, so the
+/// next miss rebuilds, while the records stay readable until the following
+/// clear reclaims them. Authoritative namespaces are never selected.
 pub async fn clear_derived_store_state(backend: &SqlxBackend) -> Result<()> {
-    sqlx::query("DELETE FROM store_state_namespaces WHERE lifecycle = $1 AND status = 1")
-        .bind(StoreStateLifecycle::Derived.as_db_int())
-        .execute(backend.pool())
+    let mut tx = backend
+        .pool()
+        .begin()
         .await
-        .sql_context("Failed to clear derived Store-state namespaces")?;
-    Ok(())
+        .sql_context("Failed to begin derived Store-state clear")?;
+    if backend.is_sqlite() {
+        sqlx::query("COMMIT; BEGIN IMMEDIATE")
+            .execute(&mut *tx)
+            .await
+            .sql_context("Failed to lock derived Store-state clear")?;
+    }
+    sqlx::query("DELETE FROM store_state_namespaces WHERE lifecycle = $1 AND status = 2")
+        .bind(StoreStateLifecycle::Derived.as_db_int())
+        .execute(&mut *tx)
+        .await
+        .sql_context("Failed to reclaim unlinked derived Store-state namespaces")?;
+    sqlx::query("UPDATE store_state_namespaces SET status = 2 WHERE lifecycle = $1 AND status = 1")
+        .bind(StoreStateLifecycle::Derived.as_db_int())
+        .execute(&mut *tx)
+        .await
+        .sql_context("Failed to unlink derived Store-state namespaces")?;
+    tx.commit()
+        .await
+        .sql_context("Failed to commit derived Store-state clear")
 }
 
 /// Get an entry by ID.

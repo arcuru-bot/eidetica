@@ -127,18 +127,18 @@ pub struct AuthenticatedDbRequest {
 
 Every storage operation rides a single `DatabaseOp` enum carried in `AuthenticatedDbRequest`. The server runs its own `Database` on its local `Instance`, so verification-on-read, the Verified frontier, and CRDT-state materialization happen server-side by construction. Each variant is tree-scoped through the containing request's `root_id`.
 
-| Variant                                  | Purpose                                                                                                                                                                          |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BeginTransaction { stores, scope }`     | Acquire parent tips, settings tips, and merged settings needed to build+sign a transaction locally for `stores`, parents drawn from `scope`'s projection. Read.                  |
-| `SubmitSignedEntry { entry }`            | Submit a finished, client-signed entry. Server stores it `Unverified` and runs its own verification pass. **Verification-gated, not session-gated** (see below).                 |
-| `GetVerifiedTips`                        | Database's Verified-frontier tips. Read.                                                                                                                                         |
-| `GetStoreState { store }`                | Server-materialized merged state of an **unencrypted** store, against the server's Verified frontier. Returns a `WireCrdtValue`. Read.                                           |
-| `GetStoreEntries { store, tips, scope }` | Ordered (by subtree height), verified, opaque store entries reachable from `tips` in `scope` — the universal primitive, including encrypted stores. Read.                        |
-| `GetStoreTipsUpToEntries { store, .. }`  | Store tips reachable from given main-tree entry IDs. Read.                                                                                                                       |
-| `ComputeMergeState { store, .. }`        | Lowest common ancestor + path to tip entries in a store DAG, fused into one RPC. Read.                                                                                           |
-| `GetEntry { id }`                        | Fetch a single entry by id (gating tree resolved server-side post-fetch). Read.                                                                                                  |
-| Store-state resolve / staging / record get/scan | Resolve, build, and lazily read immutable historical projections through opaque server-issued views. Read for reads, Write for staging.                                     |
-| `SetInstanceMetadata { metadata }`       | Rewrite daemon-level pointers to its own system DBs. Special-cased server-side to gate `Admin` on `_databases` (a daemon-global system tree) instead of the request's `root_id`. |
+| Variant                                         | Purpose                                                                                                                                                                          |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BeginTransaction { stores, scope }`            | Acquire parent tips, settings tips, and merged settings needed to build+sign a transaction locally for `stores`, parents drawn from `scope`'s snapshot. Read.                    |
+| `SubmitSignedEntry { entry }`                   | Submit a finished, client-signed entry. Server stores it `Unverified` and runs its own verification pass. **Verification-gated, not session-gated** (see below).                 |
+| `GetVerifiedTips`                               | Database's Verified-frontier tips. Read.                                                                                                                                         |
+| `GetStoreState { store }`                       | Server-materialized merged state of an **unencrypted** store, against the server's Verified frontier. Returns a `WireCrdtValue`. Read.                                           |
+| `GetStoreEntries { store, tips, scope }`        | Ordered (by subtree height), verified, opaque store entries reachable from `tips` in `scope` — the universal primitive, including encrypted stores. Read.                        |
+| `GetStoreTipsUpToEntries { store, .. }`         | Store tips reachable from given main-tree entry IDs. Read.                                                                                                                       |
+| `ComputeMergeState { store, .. }`               | Lowest common ancestor + path to tip entries in a store DAG, fused into one RPC. Read.                                                                                           |
+| `GetEntry { id }`                               | Fetch a single entry by id (gating tree resolved server-side post-fetch). Read.                                                                                                  |
+| Store-state resolve / staging / record get/scan | Resolve, build, and lazily read cached state through opaque server-issued views onto published record sets. Read for reads, Write for staging.                                   |
+| `SetInstanceMetadata { metadata }`              | Rewrite daemon-level pointers to its own system DBs. Special-cased server-side to gate `Admin` on `_databases` (a daemon-global system tree) instead of the request's `root_id`. |
 
 Operations deliberately **not** exposed over the wire — `update_verification_status`, `get_instance_secrets`, `all_roots`, and the verification/enumeration queries — live on the concrete local `BackendImpl` engine (reached via `Backend::local_engine`), so a `RemoteBackend` simply does not provide them.
 
@@ -156,7 +156,7 @@ Published views and private builds use opaque random tokens stored only in the c
 | `Ids(Vec<ID>)`                                              | One or many IDs                                                    |
 | `Ok`                                                        | Success with no data                                               |
 | `Token(String)`                                             | Opaque server-issued staging capability                            |
-| `Record` / `RecordPage` / `RecordView`                      | Lazy point, bounded page, and immutable projection responses       |
+| `Record` / `RecordPage` / `RecordView`                      | Lazy point, bounded page, and published-record-set responses       |
 | `TransactionContext(TransactionContext)`                    | Parent tips + settings, response to `DatabaseOp::BeginTransaction` |
 | `CrdtValue(WireCrdtValue)`                                  | Materialized merged state, response to `DatabaseOp::GetStoreState` |
 | `MergeState(MergeState)`                                    | LCA + path, response to `DatabaseOp::ComputeMergeState`            |
@@ -258,14 +258,14 @@ Teardown is refcounted with hysteresis rather than immediate. Dropping the last 
 
 ## Store state
 
-Historical current state is materialized into derived namespaces in the shared Store-state record substrate (see [Store state](store_state.md)). The daemon owns those records; clients resolve views and read points or bounded pages through them, so a `Table` read fetches the rows it asks for rather than a whole materialized `Doc`.
+Historical current state is materialized into derived record sets in the shared Store-state record substrate (see [Store state](store_state.md)). The daemon owns those records; clients resolve views and read points or bounded pages through them, so a `Table` read fetches the rows it asks for rather than a whole materialized `Doc`.
 
-Namespaces are scoped by [`CacheScope`](crate::backend::CacheScope):
+Cached state is scoped by [`CacheScope`](crate::backend::CacheScope):
 
 - `CacheScope::Shared` — daemon-computed state (visible to every authorized user; the bytes were produced by the trusted server-side merge).
 - `CacheScope::User(uuid)` — client-computed state (scoped to the submitting user's uuid; only that user can poison their own future reads).
 
-Every client-supplied `StoreStateRequest` is rebound to the session before it reaches the backend: its database must be the one the request was gated against, a shared-scope request is narrowed to the session user, and a request naming another user's scope is refused. Resolution then falls back from the user scope to the shared one, so a daemon materialization is reused instead of rebuilt per user, while a client can never publish into the shared or another user's namespace.
+Every client-supplied `StoreStateRequest` is rebound to the session before it reaches the backend: its database must be the one the request was gated against, a shared-scope request is narrowed to the session user, and a request naming another user's scope is refused. Resolution then falls back from the user scope to the shared one, so a daemon materialization is reused instead of rebuilt per user, while a client can never publish into shared cached state or another user's cached state.
 
 ## Database-Level Wire API
 
@@ -282,7 +282,7 @@ The server runs its own `Database` on a local `Instance`, so verification-on-rea
 | `store_snapshot_at(tree, store, up_to)`           | Store tips reachable from given main-tree entries                             |
 | `store_at(tree, store, snapshot)`                 | Every store entry reachable from `snapshot`                                   |
 | `compute_merge_state(tree, store, ids)`           | LCA + path within a store, resolved together against one view                 |
-| `resolve_store_state` / record get / record scan  | Store-state projections (see [Store state](#store-state))                     |
+| `resolve_store_state` / record get / record scan  | Cached-state reads (see [Store state](#store-state))                          |
 | `put(entry)`                                      | Persist an entry                                                              |
 | `write_entry(verification, entry, source)`        | Persist a signed entry, applying verification and dispatching local callbacks |
 | `get_instance_metadata` / `set_instance_metadata` | Daemon-global system-DB pointers                                              |
@@ -318,12 +318,12 @@ The encrypted-store-over-service test (`test_database_encrypted_store_roundtrip`
 
 ### Read scope
 
-`ReadScope` controls the DAG projection exposed over the wire:
+`ReadScope` controls the DAG snapshot exposed over the wire:
 
 - **`Verified`** (default) — only the maximal all-`Verified` ancestor-closed prefix of the DAG (the "Verified frontier"). Tips that are still `Unverified` are replaced by their nearest `Verified` ancestors; `Failed` entries are always dropped.
 - **`AllowUnverified`** — open against the raw DAG (only `Failed` dropped). The caller must explicitly opt in via `Database::allow_unverified()`.
 
-`BeginTransaction` carries the caller's `ReadScope`: write parents are drawn from the _same_ projection the caller reads, so a write built under `AllowUnverified` uses unverified tips as parents and a write built under the `Verified` default uses only verified ancestors. This ensures the write's parent projection is self-consistent with the caller's read posture.
+`BeginTransaction` carries the caller's `ReadScope`: write parents are drawn from the _same_ snapshot the caller reads, so a write built under `AllowUnverified` uses unverified tips as parents and a write built under the `Verified` default uses only verified ancestors. This ensures the write's parent snapshot is self-consistent with the caller's read posture.
 
 ### Gate scope for `AuthenticatedDb`
 
