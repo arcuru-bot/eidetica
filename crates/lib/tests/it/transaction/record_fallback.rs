@@ -19,8 +19,8 @@ use eidetica::{
     auth::crypto::generate_keypair,
     backend::database::InMemory,
     backend::{
-        BackendError, BackendImpl, CacheScope, InstanceMetadata, InstanceSecrets, RecordMutations,
-        RecordPage, RecordRange, RecordView, StagingToken, StoreStateRequest, VerificationStatus,
+        BackendError, BackendImpl, InstanceMetadata, InstanceSecrets, RecordMutations, RecordPage,
+        RecordRange, RecordView, StagingToken, StoreStateRequest, VerificationStatus,
     },
     crdt::Doc,
     entry::{Entry, ID},
@@ -115,29 +115,6 @@ impl<B: BackendImpl> BackendImpl for Recordless<B> {
 
     async fn store_at(&self, tree: &ID, store: &str, snapshot: &Snapshot) -> Result<Vec<Entry>> {
         self.0.store_at(tree, store, snapshot).await
-    }
-
-    async fn get_cached_crdt_state(
-        &self,
-        scope: &CacheScope,
-        entry_id: &ID,
-        store: &str,
-    ) -> Result<Option<Vec<u8>>> {
-        self.0.get_cached_crdt_state(scope, entry_id, store).await
-    }
-
-    async fn cache_crdt_state(
-        &self,
-        scope: CacheScope,
-        entry_id: &ID,
-        store: &str,
-        state: Vec<u8>,
-    ) -> Result<()> {
-        self.0.cache_crdt_state(scope, entry_id, store, state).await
-    }
-
-    async fn clear_crdt_cache(&self) -> Result<()> {
-        self.0.clear_crdt_cache().await
     }
 
     async fn get_sorted_store_parents(

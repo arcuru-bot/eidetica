@@ -573,9 +573,7 @@ impl Transaction {
                 return Ok(None);
             }
         }
-        if self.db.ops().local_engine().is_none()
-            || self.encryptors.lock().unwrap().contains_key(store)
-        {
+        if self.encryptors.lock().unwrap().contains_key(store) {
             return self.record_get_from_history(store, &key).await;
         }
         let view = match self.record_view(store, projection).await {
@@ -638,9 +636,7 @@ impl Transaction {
         if limit == 0 {
             return Ok(crate::backend::RecordPage::default());
         }
-        if self.db.ops().local_engine().is_none()
-            || self.encryptors.lock().unwrap().contains_key(store)
-        {
+        if self.encryptors.lock().unwrap().contains_key(store) {
             return self
                 .record_scan_from_history(store, projection, after, limit)
                 .await;
@@ -820,9 +816,6 @@ impl Transaction {
     ) -> Result<RecordView> {
         if let Some(view) = self.record_views.lock().unwrap().get(store).cloned() {
             return Ok(view);
-        }
-        if self.db.ops().local_engine().is_none() {
-            return Err(crate::backend::BackendError::StoreStateStorageUnsupported.into());
         }
         self.init_subtree_parents(store).await?;
         let parents = self
@@ -1169,17 +1162,6 @@ impl Transaction {
         // Multiple entries: check multi-tip cache first
         let cache_id = create_merge_cache_id(entry_ids);
 
-        if self.db.ops().local_engine().is_none()
-            && let Some(cached_state) = self
-                .db
-                .ops()
-                .get_cached_crdt_state(self.db.root_id(), &cache_id, subtree_name)
-                .await?
-        {
-            let decrypted = self.decrypt_if_needed(subtree_name, &cached_state)?;
-            return Ok(serde_json::from_slice(&decrypted)?);
-        }
-
         let cache_request = state::opaque_request(
             self.db.root_id(),
             subtree_name,
@@ -1187,9 +1169,7 @@ impl Transaction {
             cache_id.to_string().into_bytes(),
             crate::backend::CacheScope::Shared,
         );
-        if self.db.ops().local_engine().is_some()
-            && let Some(bytes) = state::load_cached(self.db.ops(), &cache_request).await?
-        {
+        if let Some(bytes) = state::load_cached(self.db.ops(), &cache_request).await? {
             let decrypted = self.decrypt_if_needed(subtree_name, &bytes)?;
             let result: T = serde_json::from_slice(&decrypted)?;
             return Ok(result);
@@ -1232,14 +1212,7 @@ impl Transaction {
 
         // Cache the computed merge result
         let bytes = self.encrypt_if_needed(subtree_name, &serde_json::to_vec(&result)?)?;
-        if self.db.ops().local_engine().is_some() {
-            state::store_cached(self.db.ops(), cache_request, bytes).await?;
-        } else {
-            self.db
-                .ops()
-                .cache_crdt_state(self.db.root_id(), &cache_id, subtree_name, bytes)
-                .await?;
-        }
+        state::store_cached(self.db.ops(), cache_request, bytes).await?;
 
         Ok(result)
     }
@@ -1271,16 +1244,6 @@ impl Transaction {
         T: CRDT + Send + 'a,
     {
         Box::pin(async move {
-            if self.db.ops().local_engine().is_none()
-                && let Some(cached_state) = self
-                    .db
-                    .ops()
-                    .get_cached_crdt_state(self.db.root_id(), entry_id, subtree_name)
-                    .await?
-            {
-                let decrypted = self.decrypt_if_needed(subtree_name, &cached_state)?;
-                return Ok(serde_json::from_slice(&decrypted)?);
-            }
             let request = state::opaque_request(
                 self.db.root_id(),
                 subtree_name,
@@ -1288,9 +1251,7 @@ impl Transaction {
                 entry_id.to_string().into_bytes(),
                 crate::backend::CacheScope::Shared,
             );
-            if self.db.ops().local_engine().is_some()
-                && let Some(bytes) = state::load_cached(self.db.ops(), &request).await?
-            {
+            if let Some(bytes) = state::load_cached(self.db.ops(), &request).await? {
                 let decrypted = self.decrypt_if_needed(subtree_name, &bytes)?;
                 let result: T = serde_json::from_slice(&decrypted)?;
                 return Ok(result);
@@ -1310,14 +1271,7 @@ impl Transaction {
 
             // Step 4: Cache only the final result (encrypted if encryptor is registered)
             let bytes = self.encrypt_if_needed(subtree_name, &serde_json::to_vec(&result)?)?;
-            if self.db.ops().local_engine().is_some() {
-                state::store_cached(self.db.ops(), request, bytes).await?;
-            } else {
-                self.db
-                    .ops()
-                    .cache_crdt_state(self.db.root_id(), entry_id, subtree_name, bytes)
-                    .await?;
-            }
+            state::store_cached(self.db.ops(), request, bytes).await?;
 
             Ok(result)
         })
