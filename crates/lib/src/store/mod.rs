@@ -8,19 +8,15 @@ pub mod state;
 pub use crate::backend::ProjectionDescriptor;
 pub use state::OPAQUE_STATE_KEY;
 
-/// Store-owned representation of materialized current state.
+/// Store-owned representation of cached current state.
 ///
-/// Reserved hook for how a store's materialized state is represented. The
-/// only implemented model is [`StoreStateModel::Opaque`]: one serialized
-/// whole-state record per snapshot. Materialization always takes the opaque
-/// path; a custom descriptor is carried, not honored.
-///
-/// Out of scope here: lazy per-row materialization, a public custom
-/// row-projection API, historyless (record-only) authority, and garbage
-/// collection of derived namespaces.
+/// The only implemented model is [`StoreStateModel::Opaque`]: one serialized
+/// copy of the whole cached state. Reads always take the opaque
+/// path.
 pub enum StoreStateModel<D: CRDT + 'static> {
     /// Safe default: one opaque serialized whole-state record.
     Opaque {
+        /// Record-format identity; see [`ProjectionDescriptor`].
         descriptor: ProjectionDescriptor,
         data: PhantomData<D>,
     },
@@ -94,12 +90,10 @@ pub trait Store: Sized + Registered + Send + Sync {
     /// This is the type stored within each individual Entry.
     type Data: CRDT + 'static;
 
-    /// Representation of this store's materialized current state.
+    /// Representation of this store's cached current state.
     ///
-    /// Reserved hook: overriding it has no effect today, since materialization
-    /// always uses the opaque whole-state path with the `eidetica/opaque`
-    /// descriptor. Keep the default unless a future row-projection model
-    /// documents otherwise.
+    /// Reserved hook: overriding it has no effect today — reads always load
+    /// the whole cached state. Keep the default.
     fn state_model() -> StoreStateModel<Self::Data> {
         StoreStateModel::opaque("eidetica/opaque", 0)
     }
