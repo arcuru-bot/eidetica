@@ -20,6 +20,9 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[cfg(all(unix, feature = "sqlite"))]
+const SQLITE_OWNER_HELPER_ENV: &str = "EIDETICA_SQLITE_OWNER_HELPER";
+
 use tracing_subscriber::EnvFilter;
 
 struct CountingAllocator;

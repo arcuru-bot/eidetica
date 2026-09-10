@@ -8,6 +8,8 @@ mod helpers;
 mod out_of_order_tips;
 mod save_load;
 mod store_state_records;
+#[cfg(all(unix, feature = "sqlite"))]
+mod sqlite_ownership;
 mod subtree_operations;
 mod tree_operations;
 mod verification;

@@ -14,7 +14,7 @@ default = ["full"]
 full = ["y-crdt", "sqlite", "postgres", "service"]
 service = []
 y-crdt = ["dep:yrs"]
-sqlite = ["dep:sqlx"]
+sqlite = ["dep:fs2", "dep:sqlx"]
 postgres = ["dep:sqlx"]
 # Exposes internal testing utilities: FixedClock, Instance::*_with_clock, the
 # `testing` module (Cluster/Peer), and other internal hooks.
@@ -56,6 +56,7 @@ aes-gcm = { workspace = true }
 zeroize = { workspace = true }
 handle_trait = { workspace = true }
 sqlx = { workspace = true, optional = true }
+fs2 = { workspace = true, optional = true }
 # Transitive dep version floors (see workspace Cargo.toml for rationale)
 time = { workspace = true }
 postcard = { workspace = true }

@@ -18,6 +18,14 @@ use crate::entry::ID;
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum BackendError {
+    /// Another process already owns this embedded SQLite database.
+    #[error(
+        "SQLite database `{path}` is already open by another process; connect through that process's Eidetica service instead"
+    )]
+    SqliteAlreadyOwned {
+        /// Canonical path of the SQLite database that could not be claimed.
+        path: PathBuf,
+    },
     /// The backend does not cache Store state as records.
     #[error("Store-state records are not supported by this backend")]
     StoreStateStorageUnsupported,

@@ -19,6 +19,7 @@ use eidetica::service::protocol::{
     ServiceResponse, read_frame, write_frame,
 };
 use eidetica::store::{DocStore, PasswordStore, Table};
+use eidetica::{Entry, Instance, NewUser};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadHalf, WriteHalf};

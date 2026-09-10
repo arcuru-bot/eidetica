@@ -28,12 +28,28 @@ mod traversal;
 pub mod schema;
 
 use std::any::Any;
+#[cfg(feature = "sqlite")]
+use std::collections::HashMap;
+#[cfg(feature = "sqlite")]
+use std::fs::{File, OpenOptions};
+#[cfg(feature = "sqlite")]
+use std::io;
+#[cfg(feature = "sqlite")]
+use std::path::{Path, PathBuf};
+#[cfg(feature = "sqlite")]
+use std::str::FromStr;
+#[cfg(feature = "sqlite")]
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+#[cfg(feature = "sqlite")]
+use fs2::FileExt;
 use sqlx::AnyPool;
 use sqlx::Executor;
 use sqlx::any::AnyPoolOptions;
+#[cfg(feature = "sqlite")]
+use sqlx::sqlite::SqliteConnectOptions;
 
 use crate::Result;
 use crate::backend::errors::BackendError;
@@ -78,10 +94,12 @@ pub enum DbKind {
 ///
 /// This backend supports both SQLite and PostgreSQL through sqlx's `AnyPool`.
 ///
-/// # Thread Safety
+/// # Concurrency
 ///
 /// `SqlxBackend` is `Send + Sync` as required by `BackendImpl`. The underlying
-/// sqlx pool handles connection pooling and thread safety.
+/// sqlx pool handles connection pooling and thread safety. A process holds its
+/// file-backed SQLite ownership until process exit; additional backends in that
+/// process may use the same database, while other processes are refused.
 ///
 /// # Test Isolation
 ///
@@ -90,6 +108,106 @@ pub enum DbKind {
 pub struct SqlxBackend {
     pool: AnyPool,
     kind: DbKind,
+}
+
+#[cfg(feature = "sqlite")]
+static SQLITE_OWNERS: OnceLock<Mutex<HashMap<PathBuf, File>>> = OnceLock::new();
+
+#[cfg(feature = "sqlite")]
+fn claim_sqlite(url: &str) -> Result<()> {
+    let options = SqliteConnectOptions::from_str(url).map_err(|error| BackendError::SqlxError {
+        reason: format!("Failed to parse SQLite connection URL: {error}"),
+        source: Some(error),
+    })?;
+    let database_path = canonical_database_path(options.get_filename()).map_err(|error| {
+        BackendError::SqlxError {
+            reason: format!(
+                "Failed to identify SQLite database `{}`: {error}",
+                options.get_filename().display()
+            ),
+            source: None,
+        }
+    })?;
+    let owners = SQLITE_OWNERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut owners = owners.lock().map_err(|_| BackendError::SqlxError {
+        reason: "SQLite ownership registry is unavailable".to_string(),
+        source: None,
+    })?;
+
+    // More than one backend may use the database within its owning process.
+    if owners.contains_key(&database_path) {
+        return Ok(());
+    }
+
+    let lock_path = sqlite_lock_path(&database_path);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| BackendError::SqlxError {
+            reason: format!(
+                "Failed to open SQLite ownership file `{}`: {error}",
+                lock_path.display()
+            ),
+            source: None,
+        })?;
+
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            owners.insert(database_path, file);
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(BackendError::SqliteAlreadyOwned {
+                path: database_path,
+            }
+            .into())
+        }
+        Err(error) => Err(BackendError::SqlxError {
+            reason: format!(
+                "Failed to claim SQLite ownership file `{}`: {error}",
+                lock_path.display()
+            ),
+            source: None,
+        }
+        .into()),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn canonical_database_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+
+    if absolute.exists() {
+        return absolute.canonicalize();
+    }
+
+    let file_name = absolute.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "database path has no file name",
+        )
+    })?;
+    let parent = absolute.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "database path has no parent")
+    })?;
+    Ok(parent.canonicalize()?.join(file_name))
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_lock_path(database_path: &Path) -> PathBuf {
+    let mut name = database_path
+        .file_name()
+        .expect("canonical database path has a file name")
+        .to_os_string();
+    name.push(".eidetica-owner");
+    database_path.with_file_name(name)
 }
 
 impl SqlxBackend {
@@ -260,6 +378,9 @@ impl SqlxBackend {
         // filename, embedded in URI-filename forms like
         // `sqlite:file::memory:?cache=shared`).
         let is_in_memory = url.contains("mode=memory") || url.contains(":memory:");
+        if !is_in_memory {
+            claim_sqlite(url)?;
+        }
 
         // For SQLite in-memory databases with shared cache, we must prevent
         // all connections from being closed. When the last connection closes,
