@@ -14,29 +14,28 @@ use eidetica::{
     sync::{peer_types::Address, transports::http::HttpTransport},
     user::types::SyncSettings,
 };
-use tokio::sync::watch;
+use tokio::{sync::watch, task::JoinHandle};
 
-async fn start_service(instance: Instance, socket: &Path) -> watch::Sender<()> {
+async fn start_service(
+    instance: Instance,
+    socket: &Path,
+) -> (watch::Sender<()>, JoinHandle<Result<()>>) {
     let (tx, rx) = watch::channel(());
-    let server = ServiceServer::new(instance, socket);
-    tokio::spawn(async move {
-        server.run(rx).await.unwrap();
-    });
-    for _ in 0..100 {
-        if socket.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(socket.exists(), "service socket did not become ready");
-    tx
+    let server = ServiceServer::bind(instance, socket).await.unwrap();
+    let handle = tokio::spawn(async move { server.run(rx).await });
+    (tx, handle)
 }
 
-async fn stop_service(tx: watch::Sender<()>, socket: &Path) {
+async fn stop_service(
+    tx: watch::Sender<()>,
+    handle: JoinHandle<Result<()>>,
+    socket: &Path,
+) -> Result<()> {
     drop(tx);
     for _ in 0..100 {
         if !socket.exists() {
-            return;
+            handle.await.expect("service task panicked")?;
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -59,7 +58,7 @@ async fn service_client_database_syncs_and_restart_preserves_callback_delivery()
         .await?;
     daemon_sync.accept_connections().await?;
     let daemon_addr = Address::http(daemon_sync.get_server_address_for("http").await?);
-    let service_shutdown = start_service(daemon.clone(), &socket).await;
+    let (service_shutdown, service_handle) = start_service(daemon.clone(), &socket).await;
 
     let (peer, mut peer_user) =
         Instance::create_backend(Box::new(InMemory::new()), NewUser::passwordless("bob")).await?;
@@ -112,8 +111,10 @@ async fn service_client_database_syncs_and_restart_preserves_callback_delivery()
             .await
     })
     .await?;
+    drop(service);
+    drop(client);
+    drop(db);
     daemon.flush_sync().await?;
-    peer_sync.sync_tree_with_peer(&daemon.id(), &tree).await?;
     assert_eq!(
         peer_db
             .get_store_viewer::<DocStore>("data")
@@ -124,10 +125,7 @@ async fn service_client_database_syncs_and_restart_preserves_callback_delivery()
     );
 
     daemon.flush()?;
-    stop_service(service_shutdown, &socket).await;
-    drop(service);
-    drop(client);
-    drop(db);
+    stop_service(service_shutdown, service_handle, &socket).await?;
     drop(daemon_sync);
     drop(daemon);
 
@@ -145,7 +143,7 @@ async fn service_client_database_syncs_and_restart_preserves_callback_delivery()
     peer_sync
         .add_peer_address(&restarted.id(), restarted_addr)
         .await?;
-    let service_shutdown = start_service(restarted.clone(), &socket).await;
+    let (service_shutdown, service_handle) = start_service(restarted.clone(), &socket).await;
 
     let service = Instance::connect(format!("unix://{}", socket.display())).await?;
     let client = service.login_user("alice", None).await?;
@@ -171,9 +169,6 @@ async fn service_client_database_syncs_and_restart_preserves_callback_delivery()
         })
         .await?;
     peer.flush_sync().await?;
-    restarted_sync
-        .sync_tree_with_peer(&peer.id(), &tree)
-        .await?;
 
     let source = tokio::time::timeout(Duration::from_secs(2), fired_rx.recv())
         .await
@@ -189,7 +184,7 @@ async fn service_client_database_syncs_and_restart_preserves_callback_delivery()
         "two"
     );
 
-    stop_service(service_shutdown, &socket).await;
+    stop_service(service_shutdown, service_handle, &socket).await?;
     restarted_sync.stop_server().await?;
     peer_sync.stop_server().await?;
     Ok(())

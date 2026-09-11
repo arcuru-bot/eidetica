@@ -661,8 +661,10 @@ impl SyncTransport for IrohTransport {
             return Err(SyncError::ServerNotRunning.into());
         }
 
-        // Stop server using combined method
         self.server_state.stop_server();
+        if let Some(endpoint) = self.endpoint.lock().await.take() {
+            endpoint.close().await;
+        }
 
         Ok(())
     }
