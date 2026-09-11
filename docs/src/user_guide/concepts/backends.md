@@ -38,9 +38,9 @@ For escape-hatch construction (custom sqlx pool config, custom clock, etc.) the 
 
 SQLite is the default and recommended backend. It provides embedded persistent storage with excellent performance. Enabled with the `sqlite` feature.
 
-A process that opens a file-backed SQLite backend directly owns that database until the process exits. More backends in the same process may open it, but a competing direct open from another process fails immediately with `BackendError::SqliteAlreadyOwned`. Clients that need to share the same instance should connect through one Eidetica service daemon instead.
+A `SqlxBackend` exclusively owns its persistent storage namespace until the backend is dropped. For SQLite, that namespace is the canonical database file. For PostgreSQL, it is the database and active schema. A competing direct open fails immediately with `BackendError::StorageAlreadyOwned`, including another backend in the same process. Clients that need to share the same instance should connect through one Eidetica service daemon instead.
 
-The ownership check uses an advisory lock in a sibling `.eidetica-owner` file. The operating system releases the lock after normal exit or a crash. A stale lock file can remain after a crash, but it is harmless and will be reused by the next owner.
+SQLite ownership uses an advisory lock in a sibling `.eidetica-owner` file. PostgreSQL ownership uses a dedicated session-level advisory lock. The operating system or database server releases either lock when its owner exits or crashes. A stale SQLite lock file can remain after a crash, but it is harmless and will be reused by the next owner.
 
 <!-- Code block ignored: Requires async runtime context -->
 

@@ -6,6 +6,8 @@ mod cross_backend_ordering;
 mod height_calculations;
 mod helpers;
 mod out_of_order_tips;
+#[cfg(feature = "postgres")]
+mod postgres_ownership;
 mod save_load;
 mod store_state_records;
 #[cfg(all(unix, feature = "sqlite"))]

@@ -982,3 +982,55 @@ mod store_state_token_tests {
         assert_eq!(backend.resolve_store_state(&nowhere).await.unwrap(), None);
     }
 }
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_postgres_initialization_releases_ownership() {
+        if std::env::var("TEST_BACKEND").as_deref() != Ok("postgres") {
+            return;
+        }
+
+        let url = std::env::var("TEST_POSTGRES_URL")
+            .unwrap_or_else(|_| "postgres://localhost/eidetica_test".to_string());
+        sqlx::any::install_default_drivers();
+        let schema = format!("test_{}", uuid::Uuid::new_v4().simple());
+        let setup = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&setup)
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "CREATE VIEW {schema}.entries AS SELECT 1 AS value"
+        ))
+        .execute(&setup)
+        .await
+        .unwrap();
+
+        assert!(
+            SqlxBackend::connect_postgres_with_schema(&url, Some(schema.clone()))
+                .await
+                .is_err(),
+            "the conflicting view must make schema initialization fail"
+        );
+        sqlx::query(&format!("DROP VIEW {schema}.entries"))
+            .execute(&setup)
+            .await
+            .unwrap();
+
+        SqlxBackend::connect_postgres_with_schema(&url, Some(schema.clone()))
+            .await
+            .expect("failed initialization must release PostgreSQL ownership");
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&setup)
+            .await
+            .unwrap();
+        setup.close().await;
+    }
+}

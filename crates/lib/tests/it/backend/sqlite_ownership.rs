@@ -31,9 +31,9 @@ async fn direct_sqlite_owner_is_exclusive_across_processes() {
         matches!(
             error,
             Error::Backend(ref error)
-                if matches!(**error, BackendError::SqliteAlreadyOwned { ref path } if path == &database_path.canonicalize().unwrap())
+                if matches!(**error, BackendError::StorageAlreadyOwned { ref namespace } if namespace == &database_path.canonicalize().unwrap().display().to_string())
         ),
-        "expected SqliteAlreadyOwned, got {error:?}"
+        "expected StorageAlreadyOwned, got {error:?}"
     );
     assert!(
         error.to_string().contains("connect through"),
@@ -49,14 +49,45 @@ async fn direct_sqlite_owner_is_exclusive_across_processes() {
 }
 
 #[tokio::test]
-async fn one_process_can_open_the_same_sqlite_database_twice() {
+async fn direct_sqlite_owner_is_exclusive_within_one_process() {
     let dir = tempfile::tempdir().unwrap();
     let database_path = dir.path().join("same-process.db");
 
     let first = SqlxBackend::open_sqlite(&database_path).await.unwrap();
-    let second = SqlxBackend::open_sqlite(&database_path).await.unwrap();
+    let error = match SqlxBackend::open_sqlite(&database_path).await {
+        Ok(_) => panic!("a second direct backend must be refused"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            Error::Backend(ref error)
+                if matches!(**error, BackendError::StorageAlreadyOwned { .. })
+        ),
+        "expected StorageAlreadyOwned, got {error:?}"
+    );
 
-    drop((first, second));
+    drop(first);
+
+    SqlxBackend::open_sqlite(&database_path)
+        .await
+        .expect("dropping the backend must release ownership");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_sqlite_initialization_releases_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("failed.db");
+    std::fs::create_dir(&database_path).unwrap();
+
+    if SqlxBackend::open_sqlite(&database_path).await.is_ok() {
+        panic!("a directory must fail SQLite initialization");
+    }
+    std::fs::remove_dir(&database_path).unwrap();
+
+    SqlxBackend::open_sqlite(&database_path)
+        .await
+        .expect("failed initialization must release ownership");
 }
 
 #[tokio::test]
