@@ -242,9 +242,11 @@ in {
         # processes and an in-memory backend wouldn't persist between them.)
         eidetica daemon --backend sqlite --data-dir "$DATA" init \
           --username admin --passwordless
-        eidetica daemon --backend sqlite --data-dir "$DATA" --socket "$SOCKET" --sync &
+        DAEMON_LOG="$TMPDIR/daemon.log"
+        eidetica daemon --backend sqlite --data-dir "$DATA" --socket "$SOCKET" \
+          >"$DAEMON_LOG" 2>&1 &
         DAEMON_PID=$!
-        trap 'kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true' EXIT
+        trap 'if [ -n "$DAEMON_PID" ]; then kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true; fi' EXIT
 
         # Wait for the socket to appear
         for i in $(seq 1 50); do
@@ -253,6 +255,7 @@ in {
           fi
           if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
             echo "Daemon exited prematurely"
+            cat "$DAEMON_LOG"
             exit 1
           fi
           sleep 0.1
@@ -260,8 +263,12 @@ in {
 
         if [ ! -S "$SOCKET" ]; then
           echo "Timed out waiting for daemon socket"
+          cat "$DAEMON_LOG"
           exit 1
         fi
+
+        # Sync is part of daemon startup, without an opt-in flag.
+        grep -q "Daemon sync listener started" "$DAEMON_LOG"
 
         echo "Daemon started (pid=$DAEMON_PID, socket=$SOCKET)"
 
@@ -280,6 +287,12 @@ in {
           --workspace-remap "$TMPDIR/src" \
           --show-progress=none \
           -E 'test(=user::user_lifecycle_tests::test_complete_lifecycle_passwordless)'
+
+        kill -TERM "$DAEMON_PID"
+        wait "$DAEMON_PID"
+        DAEMON_PID=""
+        grep -q "All sync servers stopped" "$DAEMON_LOG"
+        grep -q "Daemon shut down" "$DAEMON_LOG"
 
         echo "Service integration test passed"
         mkdir -p $out

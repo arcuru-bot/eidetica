@@ -109,12 +109,8 @@ pub struct DaemonArgs {
     #[command(subcommand)]
     pub command: Option<DaemonCommand>,
 
-    /// Enable the persisted sync engine and Iroh listener.
-    #[arg(long, env = "EIDETICA_SYNC")]
-    pub sync: bool,
-
     /// Bootstrap or reconcile a database from a native Eidetica ticket.
-    /// May be repeated. Implies --sync.
+    /// May be repeated.
     #[arg(
         long = "sync-ticket",
         env = "EIDETICA_SYNC_TICKETS",

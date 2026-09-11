@@ -69,9 +69,9 @@
 //!
 //! - **`enable_sync()` on remote Instance**: A silent no-op (returns `Ok(())`)
 //!   rather than building a client-side sync module that would race the
-//!   daemon's own sync. The daemon can start its persisted sync lifecycle via
-//!   `eidetica daemon --sync`, but clients cannot administer transports or
-//!   peers over the current wire surface.
+//!   daemon's own sync. The daemon runs its persisted sync lifecycle, but
+//!   clients cannot administer transports or peers over the current wire
+//!   surface.
 
 pub mod client;
 pub mod error;

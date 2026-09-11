@@ -32,14 +32,9 @@ async fn stop_service(
     socket: &Path,
 ) -> Result<()> {
     drop(tx);
-    for _ in 0..100 {
-        if !socket.exists() {
-            handle.await.expect("service task panicked")?;
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("service socket did not shut down");
+    handle.await.expect("service task panicked")?;
+    assert!(!socket.exists(), "service socket survived server shutdown");
+    Ok(())
 }
 
 #[tokio::test]
