@@ -248,9 +248,9 @@ in {
         DAEMON_PID=$!
         trap 'if [ -n "$DAEMON_PID" ]; then kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true; fi' EXIT
 
-        # Wait for the socket to appear
+        # Wait for both the service socket and unconditional sync startup.
         for i in $(seq 1 50); do
-          if [ -S "$SOCKET" ]; then
+          if [ -S "$SOCKET" ] && grep -q "Daemon sync listener started" "$DAEMON_LOG"; then
             break
           fi
           if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
@@ -261,14 +261,11 @@ in {
           sleep 0.1
         done
 
-        if [ ! -S "$SOCKET" ]; then
-          echo "Timed out waiting for daemon socket"
+        if [ ! -S "$SOCKET" ] || ! grep -q "Daemon sync listener started" "$DAEMON_LOG"; then
+          echo "Timed out waiting for daemon startup"
           cat "$DAEMON_LOG"
           exit 1
         fi
-
-        # Sync is part of daemon startup, without an opt-in flag.
-        grep -q "Daemon sync listener started" "$DAEMON_LOG"
 
         echo "Daemon started (pid=$DAEMON_PID, socket=$SOCKET)"
 
