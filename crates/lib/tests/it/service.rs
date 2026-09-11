@@ -1699,16 +1699,18 @@ async fn test_on_write_fires_for_local_commit_on_connected_instance() {
     // Single fire per submit under the fire-on-Verified model — no
     // need to filter on verification state, every notification we
     // receive here is settled.
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(usize, eidetica::instance::WriteSource)>();
     let _cb = db
         .on_write(move |event, db| {
             let prev = event.previous_tips().clone();
             let post = event.post_tips().clone();
             let db = db.clone();
+            let source = event.source();
             let tx = event_tx.clone();
             async move {
                 let count = db.ids_added(&prev, &post).await?.len();
-                let _ = tx.send(count);
+                let _ = tx.send((count, source));
                 Ok(())
             }
         })
@@ -1725,7 +1727,12 @@ async fn test_on_write_fires_for_local_commit_on_connected_instance() {
 
     let events = collect_events(&mut event_rx, 1, 2).await;
     assert_eq!(events.len(), 1, "exactly one Verified notification");
-    assert_eq!(events[0], 1, "exactly one entry in the event");
+    assert_eq!(events[0].0, 1, "exactly one entry in the event");
+    assert_eq!(
+        events[0].1,
+        eidetica::instance::WriteSource::Local,
+        "a service-client commit is local to the daemon peer"
+    );
 }
 
 #[tokio::test]

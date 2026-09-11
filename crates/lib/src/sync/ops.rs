@@ -20,7 +20,8 @@ use crate::{
     auth::crypto::{PrivateKey, PublicKey},
     crdt::Doc,
     entry::ID,
-    store::DocStore,
+    store::Table,
+    user::types::UserInfo,
 };
 
 use super::utils::collect_ancestors_to_send;
@@ -515,44 +516,51 @@ impl Sync {
     /// it scans the _users database to register all existing users. For existing
     /// sync trees (loaded), it updates combined settings for already-tracked users.
     pub(super) async fn initialize_user_settings(&self) -> Result<()> {
-        use crate::store::Table;
-        use crate::user::types::UserInfo;
+        self.reconcile_user_settings().await
+    }
 
-        // Check if sync tree is freshly created (no users tracked yet)
-        let user_tracking = self
-            .sync_tree
-            .get_store_viewer::<DocStore>(super::user_sync_manager::USER_TRACKING_SUBTREE)
+    /// Reconcile the persisted user directory and every tracked preferences tree.
+    ///
+    /// The daemon calls this at startup and whenever a service client changes
+    /// either source tree. It is intentionally idempotent: `sync_user` compares
+    /// the persisted preferences cursor before updating combined settings.
+    pub(crate) async fn reconcile_user_settings(&self) -> Result<()> {
+        let _guard = self.reconciliation.lock().await;
+
+        let instance = self.instance.upgrade().ok_or(SyncError::InstanceDropped)?;
+        let users_db = instance.users_db().await?;
+        let users_table = users_db
+            .get_store_viewer::<Table<UserInfo>>("users")
             .await?;
-        let all_tracked = user_tracking.get_all().await?;
 
-        if all_tracked.keys().count() == 0 {
-            // New sync tree - register all users from _users database
-            let instance = self.instance.upgrade().ok_or(SyncError::InstanceDropped)?;
-            let users_db = instance.users_db().await?;
-            let users_table = users_db
-                .get_store_viewer::<Table<UserInfo>>("users")
+        // Always scan `_users`, not only when the sync tree is empty. A daemon
+        // may already track some users when another account is created through
+        // the service socket.
+        for (user_uuid, user_info) in users_table.search(|_| true).await? {
+            self.sync_user(&user_uuid, &user_info.user_database_id)
                 .await?;
-            let all_users = users_table.search(|_| true).await?;
-
-            for (user_uuid, user_info) in all_users {
-                self.sync_user(&user_uuid, &user_info.user_database_id)
-                    .await?;
-            }
-        } else {
-            // Existing sync tree - update settings for tracked users if changed
-            let tx = self.sync_tree.new_transaction().await?;
-            let user_mgr = UserSyncManager::new(&tx);
-
-            for user_uuid in all_tracked.keys() {
-                if let Some((prefs_db_id, _tips)) =
-                    user_mgr.get_tracked_user_state(user_uuid).await?
-                {
-                    self.sync_user(user_uuid, &prefs_db_id).await?;
-                }
-            }
         }
 
         Ok(())
+    }
+
+    /// Whether a local write can change the persisted user sync intent.
+    pub(crate) async fn is_reconciliation_source(&self, database_id: &ID) -> Result<bool> {
+        let instance = self.instance.upgrade().ok_or(SyncError::InstanceDropped)?;
+        if instance.users_db_id() == database_id {
+            return Ok(true);
+        }
+        let users_db = instance.users_db().await?;
+        let users_table = users_db
+            .get_store_viewer::<Table<UserInfo>>("users")
+            .await?;
+
+        Ok(users_table
+            .search(|user| &user.user_database_id == database_id)
+            .await?
+            .into_iter()
+            .next()
+            .is_some())
     }
 
     /// Send a sync request to a peer and get a response (async version).

@@ -812,7 +812,7 @@ async fn dispatch_inner(
             // Which tree the entry belongs to, and whether its signer may
             // write that tree, is decided by the server's own verification
             // pass in the handler (store `Unverified`, then
-            // `Database::open(...).verify()`) against the tree's *real*
+            // `Database::open(...).verify_with_source(...)`) against the tree's *real*
             // pinned auth lineage — not by who holds the socket. An attacker
             // without a key the tree's auth grants cannot produce a
             // `Verified` entry, and unverified junk is excluded from every
@@ -1164,6 +1164,7 @@ async fn dispatch_database_op(
         }
 
         DatabaseOp::SubmitSignedEntry { entry } => {
+            let previous_tips = instance.snapshot(&root_id).await?;
             // The client signed this entry; the server does NOT trust its
             // claimed validity. Store it `Unverified`, then run our OWN
             // verification pass against the entry's pinned settings. A
@@ -1173,7 +1174,7 @@ async fn dispatch_database_op(
             //
             // Only settled-state writes trigger an event: the
             // `put_entry(.., Unverified, ..)` is a no-fire path by
-            // design (see `Instance::put_entry`), and `Database::verify`
+            // design (see `Instance::put_entry`), and the verification pass
             // fires its own batched `Verified` event for any entries
             // the pass settles. The handler just chains the two — no
             // extra fire bookkeeping here. Note this gates the trigger
@@ -1184,10 +1185,13 @@ async fn dispatch_database_op(
                     &root_id,
                     VerificationStatus::Unverified,
                     *entry,
-                    WriteSource::Remote,
+                    WriteSource::Local,
                 )
                 .await?;
-            Database::open(instance, &root_id).await?.verify().await?;
+            Database::open(instance, &root_id)
+                .await?
+                .verify_with_source(WriteSource::Local, Some(previous_tips))
+                .await?;
             Ok(ServiceResponse::Ok)
         }
 

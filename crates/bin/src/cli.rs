@@ -109,6 +109,19 @@ pub struct DaemonArgs {
     #[command(subcommand)]
     pub command: Option<DaemonCommand>,
 
+    /// Enable the persisted sync engine and Iroh listener.
+    #[arg(long, env = "EIDETICA_SYNC")]
+    pub sync: bool,
+
+    /// Bootstrap or reconcile a database from a native Eidetica ticket.
+    /// May be repeated. Implies --sync.
+    #[arg(
+        long = "sync-ticket",
+        env = "EIDETICA_SYNC_TICKETS",
+        value_delimiter = ','
+    )]
+    pub sync_tickets: Vec<String>,
+
     /// Unix socket path (default: $XDG_RUNTIME_DIR/eidetica/service.sock).
     /// Only used when running the daemon — ignored by `daemon init`.
     #[arg(short, long, env = "EIDETICA_SOCKET", global = true)]

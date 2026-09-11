@@ -267,6 +267,9 @@ pub struct Sync {
     sync_tree: Database,
     /// Queue for entries pending synchronization
     queue: Arc<SyncQueue>,
+    /// Serialize user-preference reconciliation so concurrent service writes
+    /// cannot race updates to the persisted combined settings tree.
+    reconciliation: Arc<tokio::sync::Mutex<()>>,
     /// Per-peer liveness state, written by the background engine.
     peer_state: Arc<PeerStates>,
 }
@@ -282,6 +285,7 @@ impl Clone for Sync {
             instance: self.instance.clone(),
             sync_tree: self.sync_tree.clone(),
             queue: Arc::clone(&self.queue),
+            reconciliation: Arc::clone(&self.reconciliation),
             peer_state: Arc::clone(&self.peer_state),
         }
     }
@@ -310,6 +314,7 @@ impl Sync {
             instance: instance.downgrade(),
             sync_tree,
             queue: Arc::new(SyncQueue::new()),
+            reconciliation: Arc::new(tokio::sync::Mutex::new(())),
             peer_state: Arc::new(PeerStates::default()),
         };
 
@@ -339,6 +344,7 @@ impl Sync {
             instance: instance.downgrade(),
             sync_tree,
             queue: Arc::new(SyncQueue::new()),
+            reconciliation: Arc::new(tokio::sync::Mutex::new(())),
             peer_state: Arc::new(PeerStates::default()),
         };
 
