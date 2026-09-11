@@ -49,6 +49,77 @@ async fn direct_sqlite_owner_is_exclusive_across_processes() {
 }
 
 #[tokio::test]
+async fn sqlite_uri_aliases_share_one_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("uri.db");
+    let uri = format!("sqlite:{}?mode=rwc", database_path.display());
+    let file_uri = format!("sqlite:file:{}?mode=rwc", database_path.display());
+    let first = SqlxBackend::connect_sqlite(&uri).await.unwrap();
+
+    let error = match SqlxBackend::connect_sqlite(&file_uri).await {
+        Ok(_) => panic!("a file URI must contend with the equivalent SQLite path"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            Error::Backend(ref error)
+                if matches!(**error, BackendError::StorageAlreadyOwned { .. })
+        ),
+        "expected StorageAlreadyOwned, got {error:?}"
+    );
+
+    drop(first);
+}
+
+#[tokio::test]
+async fn sqlite_hard_links_share_one_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("original.db");
+    let alias_path = dir.path().join("alias.db");
+    let first = SqlxBackend::open_sqlite(&database_path).await.unwrap();
+    std::fs::hard_link(&database_path, &alias_path).unwrap();
+
+    let error = match SqlxBackend::open_sqlite(&alias_path).await {
+        Ok(_) => panic!("hard links to one SQLite file must contend"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            Error::Backend(ref error)
+                if matches!(**error, BackendError::StorageAlreadyOwned { .. })
+        ),
+        "expected StorageAlreadyOwned, got {error:?}"
+    );
+
+    drop(first);
+}
+
+#[tokio::test]
+async fn persistent_sqlite_filename_containing_memory_is_owned() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("persistent:memory:.db");
+    let url = format!("sqlite:{}?mode=rwc", database_path.display());
+    let first = SqlxBackend::connect_sqlite(&url).await.unwrap();
+
+    let error = match SqlxBackend::connect_sqlite(&url).await {
+        Ok(_) => panic!("a persistent filename containing :memory: must still be owned"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            Error::Backend(ref error)
+                if matches!(**error, BackendError::StorageAlreadyOwned { .. })
+        ),
+        "expected StorageAlreadyOwned, got {error:?}"
+    );
+
+    drop(first);
+}
+
+#[tokio::test]
 async fn direct_sqlite_owner_is_exclusive_within_one_process() {
     let dir = tempfile::tempdir().unwrap();
     let database_path = dir.path().join("same-process.db");

@@ -40,7 +40,7 @@ SQLite is the default and recommended backend. It provides embedded persistent s
 
 A `SqlxBackend` exclusively owns its persistent storage namespace until the backend is dropped. For SQLite, that namespace is the canonical database file. For PostgreSQL, it is the database and active schema. A competing direct open fails immediately with `BackendError::StorageAlreadyOwned`, including another backend in the same process. Clients that need to share the same instance should connect through one Eidetica service daemon instead.
 
-SQLite ownership uses an advisory lock in a sibling `.eidetica-owner` file. PostgreSQL ownership uses a dedicated session-level advisory lock. The operating system or database server releases either lock when its owner exits or crashes. A stale SQLite lock file can remain after a crash, but it is harmless and will be reused by the next owner.
+SQLite ownership uses an advisory lock on the database file, so path aliases and hard links resolve to the same owner. PostgreSQL stores an ownership token in the active schema: every pooled session holds a shared namespace lock and validates that token, while takeover requires the exclusive namespace lock. A surviving old session therefore blocks takeover, and a stale pool cannot reconnect after ownership changes. The operating system or database server releases the locks when their sessions exit or crash.
 
 <!-- Code block ignored: Requires async runtime context -->
 
