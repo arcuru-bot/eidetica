@@ -162,7 +162,6 @@ the wire. (See [Core Concepts](core_concepts.md) for the verification model.)
 | Option / Env Var                          | Description                                                                              | Default                                         |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | `--socket` / `EIDETICA_SOCKET`            | Unix socket path                                                                         | See [Default Socket Path](#default-socket-path) |
-| `--sync` / `EIDETICA_SYNC`                | Run continuous sync with the persisted Iroh identity                                     | disabled                                        |
 | `--sync-ticket` / `EIDETICA_SYNC_TICKETS` | Bootstrap/reconcile a database from a native ticket (repeatable; env is comma-separated) | --                                              |
 | `--backend`                               | Storage backend (`sqlite`, `postgres`, `inmemory`)                                       | `sqlite`                                        |
 | `--data-dir`                              | Data directory for storage files                                                         | Current directory                               |
@@ -170,7 +169,7 @@ the wire. (See [Core Concepts](core_concepts.md) for the verification model.)
 
 ## Limitations
 
-- **Sync management is server-side.** Run `eidetica daemon --sync` to load the persisted sync state, start its Iroh listener, and keep syncing without connected service clients. Use `--sync-ticket <TICKET>` for owner-side bootstrap/peer setup; it implies `--sync` and the resulting relationships persist across restart. A connected client can't drive that lifecycle from over the wire; `enable_sync()` on a remote Instance remains a no-op. User tracking changes made through the socket are reconciled by the daemon's Instance callbacks.
+- **Sync management is server-side.** The daemon always loads persisted sync state, starts its Iroh listener, and keeps syncing without connected service clients. Use `--sync-ticket <TICKET>` for owner-side bootstrap and peer setup; the resulting relationships persist across restart. A connected client can't drive that lifecycle over the wire; `enable_sync()` on a remote Instance remains a no-op. User tracking changes made through the socket are reconciled by the daemon's Instance callbacks.
 - **Unix-only.** The service module requires Unix domain sockets and is not available on Windows.
 - **Feature flag required.** The `service` feature must be enabled (included in the default `full` feature set).
 

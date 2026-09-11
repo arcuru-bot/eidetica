@@ -53,35 +53,32 @@ pub async fn run(args: &DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
     tracing::info!("Instance initialized (device ID: {})", instance.id());
 
-    let sync_enabled = args.sync || !args.sync_tickets.is_empty();
-    if sync_enabled {
-        instance.enable_sync().await?;
-        let sync = instance.sync().ok_or("Sync not enabled on instance")?;
-        let startup: eidetica::Result<String> = async {
-            sync.register_transport("iroh", IrohTransport::builder())
-                .await?;
-            sync.accept_connections().await?;
-            for ticket in &args.sync_tickets {
-                sync.sync_with_ticket(&ticket.parse::<DatabaseTicket>()?)
-                    .await?;
-            }
-            sync.get_server_address_for("iroh").await
-        }
-        .await;
-        let address = match startup {
-            Ok(address) => address,
-            Err(error) => {
-                let _ = sync.stop_server().await;
-                return Err(Box::new(error));
-            }
-        };
-        tracing::info!(%address, "Daemon sync listener started");
-    }
-
     // Determine socket path
     let socket_path = args.socket.clone().unwrap_or_else(default_socket_path);
-
     let server = ServiceServer::bind(instance.clone(), &socket_path).await?;
+
+    instance.enable_sync().await?;
+    let sync = instance.sync().ok_or("Sync not enabled on instance")?;
+    let startup: eidetica::Result<String> = async {
+        sync.register_transport("iroh", IrohTransport::builder())
+            .await?;
+        sync.accept_connections().await?;
+        for ticket in &args.sync_tickets {
+            sync.sync_with_ticket(&ticket.parse::<DatabaseTicket>()?)
+                .await?;
+        }
+        sync.get_server_address_for("iroh").await
+    }
+    .await;
+    let address = match startup {
+        Ok(address) => address,
+        Err(error) => {
+            let _ = sync.stop_server().await;
+            return Err(Box::new(error));
+        }
+    };
+    tracing::info!(%address, "Daemon sync listener started");
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 
     println!("Eidetica daemon listening on {}", socket_path.display());
@@ -101,22 +98,28 @@ pub async fn run(args: &DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut sigterm = signal(SignalKind::terminate()).expect("failed to set up SIGTERM handler");
     let mut sigint = signal(SignalKind::interrupt()).expect("failed to set up SIGINT handler");
 
-    tokio::select! {
+    let mut unexpected_stop = false;
+    let service_result = tokio::select! {
         result = &mut server => {
-            result?;
-            return Err("service server stopped unexpectedly".into());
+            unexpected_stop = true;
+            result
         }
-        _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
-        _ = sigint.recv() => tracing::info!("Received SIGINT"),
-    }
+        _ = sigterm.recv() => {
+            tracing::info!("Received SIGTERM");
+            drop(shutdown_tx);
+            server.await
+        }
+        _ = sigint.recv() => {
+            tracing::info!("Received SIGINT");
+            drop(shutdown_tx);
+            server.await
+        }
+    };
 
-    // Stop service clients first so no new local writes can arrive after the
-    // final sync flush. Keep the sync listener available through that flush,
-    // then close it before dropping the Instance.
-    drop(shutdown_tx);
-    server.await?;
-
-    let sync = instance.sync().ok_or("Sync not enabled on instance")?;
+    // ServiceServer owns socket and client teardown. Once it has stopped, no
+    // new local writes can race the final flush. Keep the sync listener open
+    // through that flush, then close its endpoint even if either operation
+    // reports an error.
     let flush_timeout = std::time::Duration::from_secs(10);
     let sync_flush = match tokio::time::timeout(flush_timeout, instance.flush_sync()).await {
         Ok(result) => result,
@@ -126,8 +129,12 @@ pub async fn run(args: &DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
         .into()),
     };
     let sync_stop = sync.stop_server().await;
+    service_result?;
     sync_flush?;
     sync_stop?;
+    if unexpected_stop {
+        return Err("service server stopped unexpectedly".into());
+    }
 
     println!("Daemon shut down");
     Ok(())
@@ -217,6 +224,7 @@ mod tests {
     fn daemon_args(data_dir: &std::path::Path, socket: &std::path::Path) -> DaemonArgs {
         DaemonArgs {
             command: None,
+            sync_tickets: Vec::new(),
             socket: Some(socket.to_path_buf()),
             backend_config: BackendConfig {
                 backend: Backend::Inmemory,
