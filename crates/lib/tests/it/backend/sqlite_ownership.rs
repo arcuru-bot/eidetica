@@ -73,6 +73,35 @@ async fn sqlite_uri_aliases_share_one_owner() {
 }
 
 #[tokio::test]
+async fn sqlite_url_preserves_an_encoded_question_mark_in_the_filename() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("encoded?.db");
+    let encoded_path = database_path.to_string_lossy().replace('?', "%3F");
+    let url = format!("sqlite:{encoded_path}?mode=rwc");
+
+    let first = SqlxBackend::connect_sqlite(&url)
+        .await
+        .expect("an encoded question mark is part of the SQLite filename");
+    assert!(database_path.exists());
+
+    let error = match SqlxBackend::open_sqlite(&database_path).await {
+        Ok(_) => panic!("the encoded URL and filesystem path must share ownership"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            Error::Backend(ref error)
+                if matches!(**error, BackendError::StorageAlreadyOwned { .. })
+        ),
+        "expected StorageAlreadyOwned, got {error:?}"
+    );
+
+    drop(first);
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn sqlite_hard_links_share_one_owner() {
     let dir = tempfile::tempdir().unwrap();
     let database_path = dir.path().join("original.db");

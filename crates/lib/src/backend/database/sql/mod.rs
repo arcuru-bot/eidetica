@@ -32,6 +32,8 @@ use std::any::Any;
 use std::fs::{File, OpenOptions};
 #[cfg(feature = "sqlite")]
 use std::io;
+#[cfg(all(feature = "sqlite", unix))]
+use std::os::unix::fs::MetadataExt;
 #[cfg(feature = "sqlite")]
 use std::path::{Path, PathBuf};
 #[cfg(feature = "sqlite")]
@@ -40,6 +42,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use async_trait::async_trait;
+#[cfg(feature = "sqlite")]
+use fs2::FileExt;
 #[cfg(feature = "postgres")]
 use sqlx::AnyConnection;
 #[cfg(feature = "postgres")]
@@ -113,7 +117,7 @@ pub struct SqlxBackend {
 
 enum StorageOwner {
     #[cfg(feature = "sqlite")]
-    Sqlite { _lock: SqliteOwnerLock },
+    Sqlite { _lock: File },
     #[cfg(feature = "postgres")]
     Postgres {
         _connection: tokio::sync::Mutex<AnyConnection>,
@@ -124,23 +128,6 @@ enum StorageOwner {
 struct SqliteStorage {
     owner: StorageOwner,
     connection_url: String,
-}
-
-#[cfg(all(feature = "sqlite", unix, not(target_os = "solaris")))]
-struct SqliteOwnerLock {
-    _file: File,
-}
-
-#[cfg(all(feature = "sqlite", unix, target_os = "solaris"))]
-compile_error!("SQLite exclusive ownership requires native BSD flock support");
-
-#[cfg(all(feature = "sqlite", not(any(unix, windows))))]
-compile_error!("SQLite exclusive ownership is supported only on Unix and Windows");
-
-#[cfg(all(feature = "sqlite", windows))]
-struct SqliteOwnerLock {
-    file: File,
-    offset: u64,
 }
 
 #[cfg(feature = "sqlite")]
@@ -179,8 +166,33 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
             ),
             source: None,
         })?;
-    match SqliteOwnerLock::try_lock(database) {
-        Ok(lock) => Ok(Some(SqliteStorage {
+    let lock_path = sqlite_owner_lock_path(&database_path, &database).map_err(|error| {
+        BackendError::SqlxError {
+            reason: format!(
+                "Failed to identify SQLite ownership sidecar for `{}`: {error}",
+                database_path.display()
+            ),
+            source: None,
+        }
+    })?;
+    drop(database);
+
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| BackendError::SqlxError {
+            reason: format!(
+                "Failed to open SQLite ownership sidecar `{}`: {error}",
+                lock_path.display()
+            ),
+            source: None,
+        })?;
+
+    match lock.try_lock_exclusive() {
+        Ok(()) => Ok(Some(SqliteStorage {
             owner: StorageOwner::Sqlite { _lock: lock },
             connection_url: normalized_url,
         })),
@@ -201,79 +213,25 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
     }
 }
 
-#[cfg(all(feature = "sqlite", unix, not(target_os = "solaris")))]
-impl SqliteOwnerLock {
-    fn try_lock(file: File) -> io::Result<Self> {
-        use std::os::fd::AsRawFd;
-
-        // SQLite uses POSIX fcntl byte-range locks on Unix. BSD flock is a separate lock
-        // namespace on supported Unix targets, so this whole-file lock cannot replace or
-        // release SQLite's own transaction locks.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
-            Ok(Self { _file: file })
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
+/// Returns the separate file used to hold Eidetica's process-lifetime ownership lock.
+///
+/// SQLite owns byte ranges in its database file. Locking that file with `fs2` overlaps those
+/// ranges on Windows, so the Eidetica ownership lock must live elsewhere. Unix device/inode
+/// identity makes hard-link aliases select one sidecar. Other platforms retain canonical-path
+/// alias detection without assuming that file identity metadata has Unix semantics.
+#[cfg(feature = "sqlite")]
+fn sqlite_owner_lock_path(_database_path: &Path, database: &File) -> io::Result<PathBuf> {
+    let metadata = database.metadata()?;
+    let directory = std::env::temp_dir().join("eidetica-sqlite-owner-locks");
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory.join(format!("{}-{}.lock", metadata.dev(), metadata.ino())))
 }
 
-#[cfg(all(feature = "sqlite", windows))]
-impl SqliteOwnerLock {
-    fn try_lock(file: File) -> io::Result<Self> {
-        use std::mem::zeroed;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-        };
-        use windows_sys::Win32::System::IO::OVERLAPPED;
-
-        // SQLite's Windows locks occupy bytes below 2^30. A lock beyond the current EOF
-        // remains tied to the database file identity without extending the file.
-        let offset = u64::from(u32::MAX) + 1;
-        let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-        overlapped.Anonymous.Anonymous.Offset = offset as u32;
-        overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-        let result = unsafe {
-            LockFileEx(
-                file.as_raw_handle(),
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result != 0 {
-            Ok(Self { file, offset })
-        } else {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error()
-                == Some(windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION as i32)
-            {
-                Err(io::ErrorKind::WouldBlock.into())
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
-#[cfg(all(feature = "sqlite", windows))]
-impl Drop for SqliteOwnerLock {
-    fn drop(&mut self) {
-        use std::mem::zeroed;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
-        use windows_sys::Win32::System::IO::OVERLAPPED;
-
-        let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-        overlapped.Anonymous.Anonymous.Offset = self.offset as u32;
-        overlapped.Anonymous.Anonymous.OffsetHigh = (self.offset >> 32) as u32;
-        unsafe {
-            UnlockFileEx(self.file.as_raw_handle(), 0, 1, 0, &mut overlapped);
-        }
-    }
+#[cfg(all(feature = "sqlite", not(unix)))]
+fn sqlite_owner_lock_path(database_path: &Path, _database: &File) -> io::Result<PathBuf> {
+    let mut lock_path = database_path.as_os_str().to_owned();
+    lock_path.push(".eidetica-owner.lock");
+    Ok(PathBuf::from(lock_path))
 }
 
 #[cfg(feature = "sqlite")]
