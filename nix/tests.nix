@@ -242,7 +242,7 @@ in {
         # processes and an in-memory backend wouldn't persist between them.)
         eidetica daemon --backend sqlite --data-dir "$DATA" init \
           --username admin --passwordless
-        eidetica daemon --backend sqlite --data-dir "$DATA" --socket "$SOCKET" &
+        eidetica daemon --backend sqlite --data-dir "$DATA" --socket "$SOCKET" --sync &
         DAEMON_PID=$!
         trap 'kill "$DAEMON_PID" 2>/dev/null || true; wait "$DAEMON_PID" 2>/dev/null || true' EXIT
 

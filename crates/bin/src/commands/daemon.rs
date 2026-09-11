@@ -57,14 +57,24 @@ pub async fn run(args: &DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
     if sync_enabled {
         instance.enable_sync().await?;
         let sync = instance.sync().ok_or("Sync not enabled on instance")?;
-        sync.register_transport("iroh", IrohTransport::builder())
-            .await?;
-        sync.accept_connections().await?;
-        for ticket in &args.sync_tickets {
-            sync.sync_with_ticket(&ticket.parse::<DatabaseTicket>()?)
+        let startup: eidetica::Result<String> = async {
+            sync.register_transport("iroh", IrohTransport::builder())
                 .await?;
+            sync.accept_connections().await?;
+            for ticket in &args.sync_tickets {
+                sync.sync_with_ticket(&ticket.parse::<DatabaseTicket>()?)
+                    .await?;
+            }
+            sync.get_server_address_for("iroh").await
         }
-        let address = sync.get_server_address_for("iroh").await?;
+        .await;
+        let address = match startup {
+            Ok(address) => address,
+            Err(error) => {
+                let _ = sync.stop_server().await;
+                return Err(Box::new(error));
+            }
+        };
         tracing::info!(%address, "Daemon sync listener started");
     }
 
@@ -100,6 +110,9 @@ pub async fn run(args: &DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
         _ = sigint.recv() => tracing::info!("Received SIGINT"),
     }
 
+    // Stop service clients first so no new local writes can arrive after the
+    // final sync flush. Keep the sync listener available through that flush,
+    // then close it before dropping the Instance.
     drop(shutdown_tx);
     server.await?;
 
