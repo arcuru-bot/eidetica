@@ -1944,6 +1944,14 @@ impl Database {
     /// not-yet-built path. Local-only — verification is a per-node decision
     /// and is never delegated to a peer.
     pub async fn verify(&self) -> Result<VerifyReport> {
+        self.verify_with_source(WriteSource::Remote, None).await
+    }
+
+    pub(crate) async fn verify_with_source(
+        &self,
+        source: WriteSource,
+        previous_tips: Option<Snapshot>,
+    ) -> Result<VerifyReport> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         let instance = self.instance()?;
@@ -2117,9 +2125,9 @@ impl Database {
                 instance
                     .spawn_write_callbacks(
                         self.root_id(),
+                        previous_tips.as_ref().unwrap_or(&fire_tips),
                         &fire_tips,
-                        &fire_tips,
-                        WriteSource::Remote,
+                        source,
                     )
                     .await,
             )

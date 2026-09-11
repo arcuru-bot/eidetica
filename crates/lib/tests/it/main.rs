@@ -87,6 +87,8 @@ mod helpers;
 mod instance;
 #[cfg(all(unix, feature = "service"))]
 mod service;
+#[cfg(all(unix, feature = "service"))]
+mod service_daemon_sync;
 mod store;
 mod sync;
 mod transaction;

@@ -17,6 +17,8 @@ use eidetica::NewUser;
 use eidetica::instance::InstanceError;
 use eidetica::service::ServiceServer;
 use eidetica::service::default_socket_path;
+use eidetica::sync::DatabaseTicket;
+use eidetica::sync::transports::iroh::IrohTransport;
 
 use crate::backend::create_backend;
 use crate::cli::{BackendConfig, DaemonArgs, DaemonInitArgs};
@@ -51,10 +53,25 @@ pub async fn run(args: &DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
     tracing::info!("Instance initialized (device ID: {})", instance.id());
 
+    let sync_enabled = args.sync || !args.sync_tickets.is_empty();
+    if sync_enabled {
+        instance.enable_sync().await?;
+        let sync = instance.sync().ok_or("Sync not enabled on instance")?;
+        sync.register_transport("iroh", IrohTransport::builder())
+            .await?;
+        sync.accept_connections().await?;
+        for ticket in &args.sync_tickets {
+            sync.sync_with_ticket(&ticket.parse::<DatabaseTicket>()?)
+                .await?;
+        }
+        let address = sync.get_server_address_for("iroh").await?;
+        tracing::info!(%address, "Daemon sync listener started");
+    }
+
     // Determine socket path
     let socket_path = args.socket.clone().unwrap_or_else(default_socket_path);
 
-    let server = ServiceServer::bind(instance, &socket_path).await?;
+    let server = ServiceServer::bind(instance.clone(), &socket_path).await?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 
     println!("Eidetica daemon listening on {}", socket_path.display());
@@ -85,6 +102,19 @@ pub async fn run(args: &DaemonArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     drop(shutdown_tx);
     server.await?;
+
+    let sync = instance.sync().ok_or("Sync not enabled on instance")?;
+    let flush_timeout = std::time::Duration::from_secs(10);
+    let sync_flush = match tokio::time::timeout(flush_timeout, instance.flush_sync()).await {
+        Ok(result) => result,
+        Err(_) => Err(eidetica::sync::SyncError::Network(
+            "Timed out flushing daemon sync during shutdown".into(),
+        )
+        .into()),
+    };
+    let sync_stop = sync.stop_server().await;
+    sync_flush?;
+    sync_stop?;
 
     println!("Daemon shut down");
     Ok(())

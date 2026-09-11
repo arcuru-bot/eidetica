@@ -159,16 +159,18 @@ the wire. (See [Core Concepts](core_concepts.md) for the verification model.)
 
 ## Configuration Reference
 
-| Option / Env Var               | Description                                        | Default                                         |
-| ------------------------------ | -------------------------------------------------- | ----------------------------------------------- |
-| `--socket` / `EIDETICA_SOCKET` | Unix socket path                                   | See [Default Socket Path](#default-socket-path) |
-| `--backend`                    | Storage backend (`sqlite`, `postgres`, `inmemory`) | `sqlite`                                        |
-| `--data-dir`                   | Data directory for storage files                   | Current directory                               |
-| `--postgres-url`               | PostgreSQL connection URL                          | --                                              |
+| Option / Env Var                          | Description                                                                              | Default                                         |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `--socket` / `EIDETICA_SOCKET`            | Unix socket path                                                                         | See [Default Socket Path](#default-socket-path) |
+| `--sync` / `EIDETICA_SYNC`                | Run continuous sync with the persisted Iroh identity                                     | disabled                                        |
+| `--sync-ticket` / `EIDETICA_SYNC_TICKETS` | Bootstrap/reconcile a database from a native ticket (repeatable; env is comma-separated) | --                                              |
+| `--backend`                               | Storage backend (`sqlite`, `postgres`, `inmemory`)                                       | `sqlite`                                        |
+| `--data-dir`                              | Data directory for storage files                                                         | Current directory                               |
+| `--postgres-url`                          | PostgreSQL connection URL                                                                | --                                              |
 
 ## Limitations
 
-- **Sync management is server-side.** Sync runs in the daemon's process and a connected client can't drive its lifecycle from over the wire. `enable_sync()` on a remote Instance returns `Ok(())` as a no-op so calling code that wraps it doesn't error out; to actually enable sync, configure it on the daemon's Instance before clients connect, or use the daemon CLI with sync options. A future admin-gated `EnableSync` RPC would let a client ask the daemon to enable its sync subsystem remotely.
+- **Sync management is server-side.** Run `eidetica daemon --sync` to load the persisted sync state, start its Iroh listener, and keep syncing without connected service clients. Use `--sync-ticket <TICKET>` for owner-side bootstrap/peer setup; it implies `--sync` and the resulting relationships persist across restart. A connected client can't drive that lifecycle from over the wire; `enable_sync()` on a remote Instance remains a no-op. User tracking changes made through the socket are reconciled by the daemon's Instance callbacks.
 - **Unix-only.** The service module requires Unix domain sockets and is not available on Windows.
 - **Feature flag required.** The `service` feature must be enabled (included in the default `full` feature set).
 

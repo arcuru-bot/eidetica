@@ -1504,13 +1504,17 @@ impl Instance {
             let event = event.clone();
             let database = database.clone();
             async move {
-                if event.source() != WriteSource::Local {
-                    return Ok(());
+                if event.source() == WriteSource::Local
+                    && sync.is_reconciliation_source(database.root_id()).await?
+                {
+                    sync.reconcile_user_settings().await?;
                 }
-                // Local writes always carry exactly one entry today, but
-                // the loop in `Sync::on_local_write` is intentionally
-                // ready for future multi-entry local events.
-                sync.on_local_write(&event, &database).await
+
+                if event.source() == WriteSource::Local {
+                    sync.on_local_write(&event, &database).await
+                } else {
+                    Ok(())
+                }
             }
         });
 
