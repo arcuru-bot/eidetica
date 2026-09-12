@@ -1346,7 +1346,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "windows-sys 0.59.0",
  "yrs",
  "z32",
  "zeroize",

@@ -29,7 +29,7 @@ pub mod schema;
 
 use std::any::Any;
 #[cfg(feature = "sqlite")]
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 #[cfg(feature = "sqlite")]
 use std::io;
 #[cfg(feature = "sqlite")]
@@ -133,7 +133,7 @@ impl Drop for SqlxBackend {
 
 enum StorageOwner {
     #[cfg(feature = "sqlite")]
-    Sqlite { _lock: SqliteOwnerLock },
+    Sqlite { _lock: File },
     #[cfg(feature = "postgres")]
     Postgres {
         _connection: tokio::sync::Mutex<AnyConnection>,
@@ -143,48 +143,6 @@ enum StorageOwner {
 #[cfg(feature = "sqlite")]
 struct SqliteStorage {
     owner: StorageOwner,
-    connection_url: String,
-    database_path: PathBuf,
-    file_identity: SqliteFileIdentity,
-}
-
-#[cfg(all(feature = "sqlite", feature = "testing"))]
-type SqliteClaimHook = Box<dyn FnOnce(&Path) + Send>;
-
-#[cfg(all(feature = "sqlite", feature = "testing"))]
-static SQLITE_CLAIM_HOOK: std::sync::OnceLock<
-    std::sync::Mutex<Option<(PathBuf, SqliteClaimHook)>>,
-> = std::sync::OnceLock::new();
-
-#[cfg(all(feature = "sqlite", unix, not(target_os = "solaris")))]
-struct SqliteOwnerLock {
-    file: File,
-}
-
-#[cfg(all(feature = "sqlite", unix, target_os = "solaris"))]
-compile_error!("SQLite exclusive ownership requires native BSD flock support");
-
-#[cfg(all(feature = "sqlite", not(any(unix, windows))))]
-compile_error!("SQLite exclusive ownership is supported only on Unix and Windows");
-
-#[cfg(all(feature = "sqlite", windows))]
-struct SqliteOwnerLock {
-    file: File,
-    offset: u64,
-}
-
-#[cfg(all(feature = "sqlite", unix))]
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct SqliteFileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(all(feature = "sqlite", windows))]
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct SqliteFileIdentity {
-    volume_serial_number: u32,
-    file_index: u64,
 }
 
 #[cfg(feature = "sqlite")]
@@ -209,57 +167,29 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
             source: None,
         }
     })?;
-    let (_, create, read_only) = sqlite_file_mode(&normalized_url);
-    let mut open_options = OpenOptions::new();
-    open_options
+    let lock_path = sqlite_owner_lock_path(&database_path);
+    let lock = OpenOptions::new()
         .read(true)
-        .write(!read_only)
-        .create(create)
-        .truncate(false);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
-
-        // Keep the pathname attached to the claimed file. SQLite can still open it for
-        // reads and writes, but replacement requires delete sharing and is refused.
-        open_options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
-    }
-    let database = open_options
-        .open(&database_path)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
         .map_err(|error| BackendError::SqlxError {
             reason: format!(
-                "Failed to open SQLite database `{}` for ownership: {error}",
-                database_path.display()
+                "Failed to open SQLite ownership sidecar `{}`: {error}",
+                lock_path.display()
             ),
             source: None,
         })?;
-    match SqliteOwnerLock::try_lock(database) {
-        Ok(lock) => {
-            let file_identity =
-                sqlite_file_identity(lock.file()).map_err(|error| BackendError::SqlxError {
-                    reason: format!(
-                        "Failed to identify claimed SQLite database `{}`: {error}",
-                        database_path.display()
-                    ),
-                    source: None,
-                })?;
-            let connection_url =
-                sqlite_connection_url(&database_path, lock.file(), &normalized_url)?;
-            Ok(Some(SqliteStorage {
-                owner: StorageOwner::Sqlite { _lock: lock },
-                connection_url,
-                database_path,
-                file_identity,
-            }))
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(SqliteStorage {
+            owner: StorageOwner::Sqlite { _lock: lock },
+        })),
+        Err(TryLockError::WouldBlock) => Err(BackendError::StorageAlreadyOwned {
+            namespace: database_path.display().to_string(),
         }
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-            Err(BackendError::StorageAlreadyOwned {
-                namespace: database_path.display().to_string(),
-            }
-            .into())
-        }
-        Err(error) => Err(BackendError::SqlxError {
+        .into()),
+        Err(TryLockError::Error(error)) => Err(BackendError::SqlxError {
             reason: format!(
                 "Failed to claim SQLite database ownership `{}`: {error}",
                 database_path.display()
@@ -270,135 +200,11 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
     }
 }
 
-#[cfg(all(feature = "sqlite", unix, not(target_os = "solaris")))]
-impl SqliteOwnerLock {
-    fn try_lock(file: File) -> io::Result<Self> {
-        use std::os::fd::AsRawFd;
-
-        // SQLite uses POSIX fcntl byte-range locks on Unix. BSD flock is a separate lock
-        // namespace on supported Unix targets, so this whole-file lock cannot replace or
-        // release SQLite's own transaction locks.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
-            Ok(Self { file })
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-}
-
-#[cfg(all(feature = "sqlite", unix, not(target_os = "solaris")))]
-impl SqliteOwnerLock {
-    fn file(&self) -> &File {
-        &self.file
-    }
-}
-
-#[cfg(all(feature = "sqlite", windows))]
-impl SqliteOwnerLock {
-    fn try_lock(file: File) -> io::Result<Self> {
-        use std::mem::zeroed;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-        };
-        use windows_sys::Win32::System::IO::OVERLAPPED;
-
-        // SQLite's Windows locks occupy bytes below 2^30. A lock beyond the current EOF
-        // remains tied to the database file identity without extending the file.
-        let offset = u64::from(u32::MAX) + 1;
-        let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-        overlapped.Anonymous.Anonymous.Offset = offset as u32;
-        overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-        let result = unsafe {
-            LockFileEx(
-                file.as_raw_handle(),
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
-        if result != 0 {
-            Ok(Self { file, offset })
-        } else {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error()
-                == Some(windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION as i32)
-            {
-                Err(io::ErrorKind::WouldBlock.into())
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
-#[cfg(all(feature = "sqlite", windows))]
-impl SqliteOwnerLock {
-    fn file(&self) -> &File {
-        &self.file
-    }
-}
-
-#[cfg(all(feature = "sqlite", windows))]
-impl Drop for SqliteOwnerLock {
-    fn drop(&mut self) {
-        use std::mem::zeroed;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
-        use windows_sys::Win32::System::IO::OVERLAPPED;
-
-        let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-        overlapped.Anonymous.Anonymous.Offset = self.offset as u32;
-        overlapped.Anonymous.Anonymous.OffsetHigh = (self.offset >> 32) as u32;
-        unsafe {
-            UnlockFileEx(self.file.as_raw_handle(), 0, 1, 0, &mut overlapped);
-        }
-    }
-}
-
-#[cfg(all(feature = "sqlite", unix))]
-fn sqlite_file_identity(file: &File) -> io::Result<SqliteFileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = file.metadata()?;
-    Ok(SqliteFileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(all(feature = "sqlite", windows))]
-fn sqlite_file_identity(file: &File) -> io::Result<SqliteFileIdentity> {
-    use std::mem::zeroed;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-    };
-
-    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
-    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(SqliteFileIdentity {
-        volume_serial_number: information.dwVolumeSerialNumber,
-        file_index: (u64::from(information.nFileIndexHigh) << 32)
-            | u64::from(information.nFileIndexLow),
-    })
-}
-
 #[cfg(feature = "sqlite")]
-fn ensure_sqlite_path_identity(path: &Path, claimed: SqliteFileIdentity) -> io::Result<()> {
-    let current = sqlite_file_identity(&File::open(path)?)?;
-    if current == claimed {
-        Ok(())
-    } else {
-        Err(io::Error::other(
-            "SQLite database path no longer matches claimed file",
-        ))
-    }
+fn sqlite_owner_lock_path(database_path: &Path) -> PathBuf {
+    let mut path = database_path.as_os_str().to_owned();
+    path.push(".eidetica-owner");
+    PathBuf::from(path)
 }
 
 #[cfg(feature = "sqlite")]
@@ -465,78 +271,6 @@ fn canonical_database_path(path: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_connection_url(path: &Path, file: &File, original_url: &str) -> Result<String> {
-    #[cfg(unix)]
-    let connection_path = {
-        use std::os::fd::AsRawFd;
-
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        let fd_root = "/proc/self/fd";
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let fd_root = "/dev/fd";
-        PathBuf::from(fd_root).join(file.as_raw_fd().to_string())
-    };
-    #[cfg(windows)]
-    let connection_path = path;
-    let file_url =
-        url::Url::from_file_path(connection_path).map_err(|()| BackendError::SqlxError {
-            reason: format!(
-                "Failed to encode SQLite database path `{}` as a file URL",
-                path.display()
-            ),
-            source: None,
-        })?;
-    let query = original_url
-        .split_once('?')
-        .map_or(String::new(), |(_, query)| format!("?{query}"));
-    Ok(format!(
-        "sqlite:{}{query}",
-        &file_url.as_str()["file:".len()..]
-    ))
-}
-
-#[cfg(feature = "sqlite")]
-async fn ensure_sqlite_connection_identity(
-    connection: &mut sqlx::AnyConnection,
-    claimed: SqliteFileIdentity,
-) -> std::result::Result<(), sqlx::Error> {
-    let (connection_path,): (String,) =
-        sqlx::query_as("SELECT file FROM pragma_database_list WHERE name = 'main'")
-            .fetch_one(&mut *connection)
-            .await?;
-    let connection_file = File::open(&connection_path).map_err(|error| {
-        sqlx::Error::Protocol(format!(
-            "failed to open SQLite connection file `{connection_path}`: {error}"
-        ))
-    })?;
-    let current = sqlite_file_identity(&connection_file).map_err(|error| {
-        sqlx::Error::Protocol(format!(
-            "failed to identify SQLite connection file `{connection_path}`: {error}"
-        ))
-    })?;
-    if current == claimed {
-        Ok(())
-    } else {
-        Err(sqlx::Error::Protocol(format!(
-            "SQLite connection file `{connection_path}` does not match the claimed database"
-        )))
-    }
-}
-
-#[cfg(all(feature = "sqlite", feature = "testing"))]
-fn fire_sqlite_claim_hook(database_path: &Path) {
-    let hook = SQLITE_CLAIM_HOOK
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .expect("SQLite claim hook mutex must not be poisoned")
-        .take_if(|(path, _)| path == database_path)
-        .map(|(_, hook)| hook);
-    if let Some(hook) = hook {
-        hook(database_path);
-    }
-}
-
-#[cfg(feature = "sqlite")]
 fn sqlite_path_url(path: &Path) -> Result<String> {
     let absolute = if path.is_absolute() {
         path.to_owned()
@@ -567,17 +301,6 @@ impl SqlxBackend {
         self.pool.as_ref().expect("SQL pool must exist until drop")
     }
 
-    #[cfg(all(feature = "sqlite", feature = "testing"))]
-    #[doc(hidden)]
-    pub async fn test_sqlite_checked_out_connection(
-        &self,
-    ) -> Result<sqlx::pool::PoolConnection<sqlx::Any>> {
-        self.pool()
-            .acquire()
-            .await
-            .sql_context("Failed to acquire SQLite test connection")
-    }
-
     #[cfg(all(feature = "postgres", feature = "testing"))]
     #[doc(hidden)]
     pub async fn test_postgres_checked_out_connection(
@@ -602,23 +325,6 @@ impl SqlxBackend {
     /// Check if this backend is using PostgreSQL.
     pub fn is_postgres(&self) -> bool {
         self.kind == DbKind::Postgres
-    }
-
-    #[cfg(all(feature = "sqlite", feature = "testing"))]
-    #[doc(hidden)]
-    pub fn testing_after_sqlite_claim(
-        database_path: PathBuf,
-        hook: impl FnOnce(&Path) + Send + 'static,
-    ) {
-        let mut claim_hook = SQLITE_CLAIM_HOOK
-            .get_or_init(|| std::sync::Mutex::new(None))
-            .lock()
-            .expect("SQLite claim hook mutex must not be poisoned");
-        assert!(
-            claim_hook.is_none(),
-            "a SQLite claim hook is already registered"
-        );
-        *claim_hook = Some((database_path, Box::new(hook)));
     }
 
     #[cfg(all(feature = "postgres", feature = "testing"))]
@@ -815,25 +521,7 @@ impl SqlxBackend {
 
         let storage = prepare_sqlite(url)?;
         let is_in_memory = storage.is_none();
-        #[cfg(feature = "testing")]
-        if let Some(storage) = &storage {
-            fire_sqlite_claim_hook(&storage.database_path);
-        }
         let normalized_url = normalize_sqlite_url(url);
-        let connection_url = storage.as_ref().map_or(normalized_url.as_str(), |storage| {
-            storage.connection_url.as_str()
-        });
-        if let Some(storage) = &storage {
-            ensure_sqlite_path_identity(&storage.database_path, storage.file_identity).map_err(
-                |error| BackendError::SqlxError {
-                    reason: format!(
-                        "Failed to connect to claimed SQLite database `{}`: {error}",
-                        storage.database_path.display()
-                    ),
-                    source: None,
-                },
-            )?;
-        }
 
         // For SQLite in-memory databases with shared cache, we must prevent
         // all connections from being closed. When the last connection closes,
@@ -856,29 +544,14 @@ impl SqlxBackend {
                         Ok(())
                     })
                 })
-                .connect(connection_url)
+                .connect(&normalized_url)
                 .await
                 .sql_context("Failed to connect to SQLite")?
         } else {
-            let storage = storage
-                .as_ref()
-                .expect("file-based SQLite storage must retain ownership");
-            let database_path = storage.database_path.clone();
-            let file_identity = storage.file_identity;
             AnyPoolOptions::new()
                 .max_connections(5)
-                .after_connect(move |conn, _meta| {
-                    let database_path = database_path.clone();
+                .after_connect(|conn, _meta| {
                     Box::pin(async move {
-                        ensure_sqlite_path_identity(&database_path, file_identity).map_err(
-                            |error| {
-                                sqlx::Error::Protocol(format!(
-                                    "SQLite database path `{}` no longer matches claimed file: {error}",
-                                    database_path.display()
-                                ))
-                            },
-                        )?;
-                        ensure_sqlite_connection_identity(conn, file_identity).await?;
                         // File-based SQLite per-connection settings:
                         // - synchronous=NORMAL: Balanced durability (safe with WAL)
                         // - busy_timeout=5000: Wait up to 5s for locks before failing
@@ -890,7 +563,7 @@ impl SqlxBackend {
                         Ok(())
                     })
                 })
-                .connect(connection_url)
+                .connect(&normalized_url)
                 .await
                 .sql_context("Failed to connect to SQLite")?
         };
