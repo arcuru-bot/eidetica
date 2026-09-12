@@ -118,7 +118,7 @@ async fn stale_pool_reconnect_is_fenced_after_takeover() {
     }
     let (url, schema) = test_schema().await;
     let first = connect_schema(&url, &schema).await;
-    let old_pool = first.pool().clone();
+    let old_pool = first.test_postgres_pool();
     let old_token = first.test_postgres_token().to_owned();
     let admin = admin_pool().await;
     let mut pids = first.test_postgres_pool_pids().await.unwrap();

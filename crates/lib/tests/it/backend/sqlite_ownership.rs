@@ -144,6 +144,25 @@ async fn sqlite_repeated_mode_uses_the_last_value_when_claiming_ownership() {
 }
 
 #[tokio::test]
+async fn sqlite_repeated_memory_mode_stays_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("must-not-exist.db");
+    let url = format!(
+        "sqlite:{}?mode=memory&mode=rw&cache=shared",
+        database_path.display()
+    );
+
+    let backend = SqlxBackend::connect_sqlite(&url)
+        .await
+        .expect("an earlier mode=memory flag must remain effective");
+    assert!(
+        !database_path.exists(),
+        "an accumulated memory mode must not open a filesystem database"
+    );
+    drop(backend);
+}
+
+#[tokio::test]
 async fn sqlite_hard_links_share_one_owner() {
     let dir = tempfile::tempdir().unwrap();
     let database_path = dir.path().join("original.db");
@@ -214,6 +233,30 @@ async fn direct_sqlite_owner_is_exclusive_within_one_process() {
     SqlxBackend::open_sqlite(&database_path)
         .await
         .expect("dropping the backend must release ownership");
+}
+
+#[tokio::test]
+async fn sqlite_backend_drop_closes_its_pool_clones() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("stale-pool.db");
+
+    let first = SqlxBackend::open_sqlite(&database_path).await.unwrap();
+    let stale_pool = first.test_sqlite_pool();
+    drop(first);
+
+    assert!(
+        stale_pool.is_closed(),
+        "backend drop must close every pool clone"
+    );
+    assert!(
+        stale_pool.acquire().await.is_err(),
+        "a cloned pool must not acquire after its backend owner drops"
+    );
+
+    let replacement = SqlxBackend::open_sqlite(&database_path)
+        .await
+        .expect("a replacement backend must claim storage after the stale pool is fenced");
+    drop(replacement);
 }
 
 #[tokio::test(flavor = "multi_thread")]

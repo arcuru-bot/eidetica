@@ -36,7 +36,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "sqlite")]
 use std::str::FromStr;
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -104,11 +104,23 @@ pub enum DbKind {
 /// For PostgreSQL, each backend instance can use its own schema for test isolation.
 /// Use `connect_postgres_isolated()` to create an isolated backend for testing.
 pub struct SqlxBackend {
-    pool: AnyPool,
+    pool: Option<AnyPool>,
     kind: DbKind,
     _owner: Option<StorageOwner>,
     #[cfg(all(feature = "postgres", feature = "testing"))]
     postgres_token: Option<String>,
+}
+
+impl Drop for SqlxBackend {
+    fn drop(&mut self) {
+        if self.kind == DbKind::Sqlite {
+            // Mark every clone closed before releasing the ownership lock. Creating this
+            // future performs the close transition; waiting is unnecessary for the fence.
+            if let Some(pool) = self.pool.take() {
+                drop(pool.close());
+            }
+        }
+    }
 }
 
 enum StorageOwner {
@@ -190,11 +202,22 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
         }
     })?;
     let (_, create, read_only) = sqlite_file_mode(&normalized_url);
-    let database = OpenOptions::new()
+    let mut open_options = OpenOptions::new();
+    open_options
         .read(true)
         .write(!read_only)
         .create(create)
-        .truncate(false)
+        .truncate(false);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        // Keep the pathname attached to the claimed file. SQLite can still open it for
+        // reads and writes, but replacement requires delete sharing and is refused.
+        open_options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let database = open_options
         .open(&database_path)
         .map_err(|error| BackendError::SqlxError {
             reason: format!(
@@ -203,7 +226,6 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
             ),
             source: None,
         })?;
-    let connection_url = sqlite_connection_url(&database_path, &normalized_url)?;
     match SqliteOwnerLock::try_lock(database) {
         Ok(lock) => {
             let file_identity =
@@ -214,6 +236,8 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
                     ),
                     source: None,
                 })?;
+            let connection_url =
+                sqlite_connection_url(&database_path, lock.file(), &normalized_url)?;
             Ok(Some(SqliteStorage {
                 owner: StorageOwner::Sqlite { _lock: lock },
                 connection_url,
@@ -386,22 +410,26 @@ fn sqlite_is_in_memory(url: &str) -> bool {
         .trim_start_matches("sqlite://")
         .trim_start_matches("sqlite:");
     let (database, _) = url.split_once('?').unwrap_or((url, ""));
-    database == ":memory:"
-        || database == "file::memory:"
-        || sqlite_file_mode(url).0.as_deref() == Some("memory")
+    database == ":memory:" || database == "file::memory:" || sqlite_file_mode(url).0
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_file_mode(url: &str) -> (Option<String>, bool, bool) {
+fn sqlite_file_mode(url: &str) -> (bool, bool, bool) {
     let query = url.split_once('?').map_or("", |(_, query)| query);
-    let mode = url::form_urlencoded::parse(query.as_bytes())
-        .filter_map(|(key, value)| (key == "mode").then(|| value.into_owned()))
-        .last();
-    (
-        mode.clone(),
-        mode.as_deref() == Some("rwc"),
-        mode.as_deref() == Some("ro"),
-    )
+    let mut in_memory = false;
+    let mut create = false;
+    let mut read_only = false;
+    for value in url::form_urlencoded::parse(query.as_bytes())
+        .filter_map(|(key, value)| (key == "mode").then_some(value))
+    {
+        match value.as_ref() {
+            "memory" => in_memory = true,
+            "rwc" => create = true,
+            "ro" => read_only = true,
+            _ => {}
+        }
+    }
+    (in_memory, create, read_only)
 }
 
 #[cfg(feature = "sqlite")]
@@ -429,14 +457,27 @@ fn canonical_database_path(path: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_connection_url(path: &Path, original_url: &str) -> Result<String> {
-    let file_url = url::Url::from_file_path(path).map_err(|()| BackendError::SqlxError {
-        reason: format!(
-            "Failed to encode SQLite database path `{}` as a file URL",
-            path.display()
-        ),
-        source: None,
-    })?;
+fn sqlite_connection_url(path: &Path, file: &File, original_url: &str) -> Result<String> {
+    #[cfg(unix)]
+    let connection_path = {
+        use std::os::fd::AsRawFd;
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let fd_root = "/proc/self/fd";
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let fd_root = "/dev/fd";
+        PathBuf::from(fd_root).join(file.as_raw_fd().to_string())
+    };
+    #[cfg(windows)]
+    let connection_path = path;
+    let file_url =
+        url::Url::from_file_path(connection_path).map_err(|()| BackendError::SqlxError {
+            reason: format!(
+                "Failed to encode SQLite database path `{}` as a file URL",
+                path.display()
+            ),
+            source: None,
+        })?;
     let query = original_url
         .split_once('?')
         .map_or(String::new(), |(_, query)| format!("?{query}"));
@@ -444,6 +485,34 @@ fn sqlite_connection_url(path: &Path, original_url: &str) -> Result<String> {
         "sqlite:{}{query}",
         &file_url.as_str()["file:".len()..]
     ))
+}
+
+#[cfg(feature = "sqlite")]
+async fn ensure_sqlite_connection_identity(
+    connection: &mut sqlx::AnyConnection,
+    claimed: SqliteFileIdentity,
+) -> std::result::Result<(), sqlx::Error> {
+    let (connection_path,): (String,) =
+        sqlx::query_as("SELECT file FROM pragma_database_list WHERE name = 'main'")
+            .fetch_one(&mut *connection)
+            .await?;
+    let connection_file = File::open(&connection_path).map_err(|error| {
+        sqlx::Error::Protocol(format!(
+            "failed to open SQLite connection file `{connection_path}`: {error}"
+        ))
+    })?;
+    let current = sqlite_file_identity(&connection_file).map_err(|error| {
+        sqlx::Error::Protocol(format!(
+            "failed to identify SQLite connection file `{connection_path}`: {error}"
+        ))
+    })?;
+    if current == claimed {
+        Ok(())
+    } else {
+        Err(sqlx::Error::Protocol(format!(
+            "SQLite connection file `{connection_path}` does not match the claimed database"
+        )))
+    }
 }
 
 #[cfg(all(feature = "sqlite", feature = "testing"))]
@@ -487,7 +556,19 @@ fn sqlite_path_url(path: &Path) -> Result<String> {
 impl SqlxBackend {
     /// Get a reference to the underlying pool.
     pub fn pool(&self) -> &AnyPool {
-        &self.pool
+        self.pool.as_ref().expect("SQL pool must exist until drop")
+    }
+
+    #[cfg(all(feature = "postgres", feature = "testing"))]
+    #[doc(hidden)]
+    pub fn test_postgres_pool(&self) -> AnyPool {
+        self.pool().clone()
+    }
+
+    #[cfg(all(feature = "sqlite", feature = "testing"))]
+    #[doc(hidden)]
+    pub fn test_sqlite_pool(&self) -> AnyPool {
+        self.pool().clone()
     }
 
     /// Get the database kind.
@@ -548,7 +629,7 @@ impl SqlxBackend {
         let mut connections = Vec::with_capacity(2);
         for _ in 0..2 {
             connections.push(
-                self.pool
+                self.pool()
                     .acquire()
                     .await
                     .sql_context("Failed to acquire PostgreSQL test connection")?,
@@ -720,9 +801,10 @@ impl SqlxBackend {
         if let Some(storage) = &storage {
             fire_sqlite_claim_hook(&storage.database_path);
         }
-        let connection_url = storage
-            .as_ref()
-            .map_or(url, |storage| storage.connection_url.as_str());
+        let normalized_url = normalize_sqlite_url(url);
+        let connection_url = storage.as_ref().map_or(normalized_url.as_str(), |storage| {
+            storage.connection_url.as_str()
+        });
         if let Some(storage) = &storage {
             ensure_sqlite_path_identity(&storage.database_path, storage.file_identity).map_err(
                 |error| BackendError::SqlxError {
@@ -744,7 +826,7 @@ impl SqlxBackend {
         // these configured, not just one.
         let pool = if is_in_memory {
             AnyPoolOptions::new()
-                .max_connections(5)
+                .max_connections(1)
                 .min_connections(1)
                 .idle_timeout(None)
                 .max_lifetime(None)
@@ -778,6 +860,7 @@ impl SqlxBackend {
                                 ))
                             },
                         )?;
+                        ensure_sqlite_connection_identity(conn, file_identity).await?;
                         // File-based SQLite per-connection settings:
                         // - synchronous=NORMAL: Balanced durability (safe with WAL)
                         // - busy_timeout=5000: Wait up to 5s for locks before failing
@@ -803,7 +886,7 @@ impl SqlxBackend {
         }
 
         let backend = Self {
-            pool,
+            pool: Some(pool),
             kind: DbKind::Sqlite,
             _owner: storage.map(|storage| storage.owner),
             #[cfg(all(feature = "postgres", feature = "testing"))]
@@ -1004,7 +1087,7 @@ impl SqlxBackend {
             .sql_context("Failed to connect to PostgreSQL")?;
 
         let backend = Self {
-            pool,
+            pool: Some(pool),
             kind: DbKind::Postgres,
             _owner: Some(StorageOwner::Postgres {
                 _connection: tokio::sync::Mutex::new(owner),

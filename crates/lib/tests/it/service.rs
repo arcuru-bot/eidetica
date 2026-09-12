@@ -257,6 +257,26 @@ async fn two_service_clients_share_one_sqlite_daemon() {
 
     assert_eq!(client1.id(), server.id());
     assert_eq!(client2.id(), server.id());
+
+    let mut admin1 = client1.login_user("admin", None).await.unwrap();
+    let key = admin1.get_default_key().unwrap();
+    let database = admin1.create_database(Doc::new(), &key).await.unwrap();
+    let root_id = database.root_id().clone();
+    database
+        .with_transaction(|tx| async move {
+            let store = tx.get_store::<DocStore>("shared").await?;
+            store.set("writer", "client1").await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let admin2 = client2.login_user("admin", None).await.unwrap();
+    let database = admin2.open_database(&root_id).await.unwrap();
+    let transaction = database.new_transaction().await.unwrap();
+    let store = transaction.get_store::<DocStore>("shared").await.unwrap();
+    assert_eq!(store.get("writer").await.unwrap(), "client1");
+
     drop(tx);
     handle.await.unwrap().unwrap();
 }
