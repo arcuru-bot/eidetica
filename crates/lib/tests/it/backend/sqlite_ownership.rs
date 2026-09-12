@@ -101,7 +101,6 @@ async fn sqlite_url_preserves_an_encoded_question_mark_in_the_filename() {
 }
 
 #[tokio::test]
-#[cfg(unix)]
 async fn sqlite_hard_links_share_one_owner() {
     let dir = tempfile::tempdir().unwrap();
     let database_path = dir.path().join("original.db");
@@ -178,16 +177,72 @@ async fn direct_sqlite_owner_is_exclusive_within_one_process() {
 async fn failed_sqlite_initialization_releases_ownership() {
     let dir = tempfile::tempdir().unwrap();
     let database_path = dir.path().join("failed.db");
-    std::fs::create_dir(&database_path).unwrap();
+    let url = format!("sqlite:{}?mode=rwc", database_path.display());
 
-    if SqlxBackend::open_sqlite(&database_path).await.is_ok() {
-        panic!("a directory must fail SQLite initialization");
-    }
-    std::fs::remove_dir(&database_path).unwrap();
+    sqlx::any::install_default_drivers();
+    let pool = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::query("CREATE VIEW entries AS SELECT 1 AS value")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let error = match SqlxBackend::open_sqlite(&database_path).await {
+        Ok(_) => panic!("the conflicting view must fail schema initialization after ownership"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("Index creation failed"),
+        "expected a schema initialization failure, got {error:?}"
+    );
+
+    let pool = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::query("DROP VIEW entries")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
 
     SqlxBackend::open_sqlite(&database_path)
         .await
         .expect("failed initialization must release ownership");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn simultaneous_sqlite_claims_have_one_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("simultaneous.db");
+    std::fs::File::create(&database_path).unwrap();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+    let claim = |barrier: std::sync::Arc<tokio::sync::Barrier>| {
+        let database_path = database_path.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            SqlxBackend::open_sqlite(database_path).await
+        })
+    };
+    let first = claim(barrier.clone());
+    let second = claim(barrier.clone());
+    barrier.wait().await;
+
+    let results = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(Error::Backend(error)) if matches!(**error, BackendError::StorageAlreadyOwned { .. })))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

@@ -14,7 +14,7 @@ default = ["full"]
 full = ["y-crdt", "sqlite", "postgres", "service"]
 service = []
 y-crdt = ["dep:yrs"]
-sqlite = ["dep:fs2", "dep:sqlx"]
+sqlite = ["dep:libc", "dep:sqlx", "dep:windows-sys"]
 postgres = ["dep:sqlx"]
 # Exposes internal testing utilities: FixedClock, Instance::*_with_clock, the
 # `testing` module (Cluster/Peer), and other internal hooks.
@@ -56,7 +56,6 @@ aes-gcm = { workspace = true }
 zeroize = { workspace = true }
 handle_trait = { workspace = true }
 sqlx = { workspace = true, optional = true }
-fs2 = { workspace = true, optional = true }
 # Transitive dep version floors (see workspace Cargo.toml for rationale)
 time = { workspace = true }
 postcard = { workspace = true }
@@ -64,6 +63,16 @@ postcard-derive = { workspace = true }
 z32 = { workspace = true }
 instability = { workspace = true }
 url = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
 
 # Ignore transitive deps that are only here to set version floors
 [package.metadata.cargo-udeps.ignore]

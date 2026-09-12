@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use eidetica::Entry;
 use eidetica::Instance;
+use eidetica::NewUser;
 use eidetica::auth::crypto::{create_challenge_response, generate_keypair, sign_entry};
 use eidetica::backend::database::InMemory;
 use eidetica::backend::{ProjectionDescriptor, StoreStateRequest};
@@ -19,7 +20,6 @@ use eidetica::service::protocol::{
     ServiceResponse, read_frame, write_frame,
 };
 use eidetica::store::{DocStore, PasswordStore, Table};
-use eidetica::{Entry, Instance, NewUser};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -228,6 +228,37 @@ async fn test_concurrent_clients() {
     let _user1 = instance1.login_user("bob", None).await.unwrap();
     let user2 = instance2.login_user("bob", None).await.unwrap();
     assert_eq!(user2.username(), "bob");
+}
+
+#[tokio::test]
+async fn two_service_clients_share_one_sqlite_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("daemon.db");
+    let socket_path = dir.path().join("daemon.sock");
+    let (server, _) = Instance::connect_or_create(
+        format!("sqlite:{}?mode=rwc", database_path.display()),
+        NewUser::passwordless("admin"),
+    )
+    .await
+    .unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (tx, rx) = watch::channel(());
+    let service = ServiceServer::bind(server.clone(), socket_path.clone())
+        .await
+        .unwrap();
+    let handle = tokio::spawn(service.run(rx));
+
+    let client1 = Instance::connect(format!("unix://{}", socket_path.display()))
+        .await
+        .unwrap();
+    let client2 = Instance::connect(format!("unix://{}", socket_path.display()))
+        .await
+        .unwrap();
+
+    assert_eq!(client1.id(), server.id());
+    assert_eq!(client2.id(), server.id());
+    drop(tx);
+    handle.await.unwrap().unwrap();
 }
 
 #[tokio::test]
