@@ -141,12 +141,7 @@ enum StorageOwner {
 }
 
 #[cfg(feature = "sqlite")]
-struct SqliteStorage {
-    owner: StorageOwner,
-}
-
-#[cfg(feature = "sqlite")]
-fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
+fn prepare_sqlite(url: &str) -> Result<Option<StorageOwner>> {
     let normalized_url = normalize_sqlite_url(url);
     let options = SqliteConnectOptions::from_str(&normalized_url).map_err(|error| {
         BackendError::SqlxError {
@@ -182,9 +177,7 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
             source: None,
         })?;
     match lock.try_lock() {
-        Ok(()) => Ok(Some(SqliteStorage {
-            owner: StorageOwner::Sqlite { _lock: lock },
-        })),
+        Ok(()) => Ok(Some(StorageOwner::Sqlite { _lock: lock })),
         Err(TryLockError::WouldBlock) => Err(BackendError::StorageAlreadyOwned {
             namespace: database_path.display().to_string(),
         }
@@ -224,26 +217,14 @@ fn sqlite_is_in_memory(url: &str) -> bool {
         .trim_start_matches("sqlite://")
         .trim_start_matches("sqlite:");
     let (database, _) = url.split_once('?').unwrap_or((url, ""));
-    database == ":memory:" || database == "file::memory:" || sqlite_file_mode(url).0
+    database == ":memory:" || database == "file::memory:" || sqlite_file_mode(url)
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_file_mode(url: &str) -> (bool, bool, bool) {
+fn sqlite_file_mode(url: &str) -> bool {
     let query = url.split_once('?').map_or("", |(_, query)| query);
-    let mut in_memory = false;
-    let mut create = false;
-    let mut read_only = false;
-    for value in url::form_urlencoded::parse(query.as_bytes())
-        .filter_map(|(key, value)| (key == "mode").then_some(value))
-    {
-        match value.as_ref() {
-            "memory" => in_memory = true,
-            "rwc" => create = true,
-            "ro" => read_only = true,
-            _ => {}
-        }
-    }
-    (in_memory, create, read_only)
+    url::form_urlencoded::parse(query.as_bytes())
+        .any(|(key, value)| key == "mode" && value == "memory")
 }
 
 #[cfg(feature = "sqlite")]
@@ -254,8 +235,10 @@ fn canonical_database_path(path: &Path) -> io::Result<PathBuf> {
         std::env::current_dir()?.join(path)
     };
 
-    if absolute.exists() {
-        return absolute.canonicalize();
+    match absolute.symlink_metadata() {
+        Ok(_) => return absolute.canonicalize(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
 
     let file_name = absolute.file_name().ok_or_else(|| {
@@ -579,7 +562,7 @@ impl SqlxBackend {
         let backend = Self {
             pool: Some(pool),
             kind: DbKind::Sqlite,
-            _owner: storage.map(|storage| storage.owner),
+            _owner: storage,
             #[cfg(all(feature = "postgres", feature = "testing"))]
             postgres_token: None,
         };

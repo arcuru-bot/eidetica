@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use eidetica::Error;
-use eidetica::backend::{BackendError, database::SqlxBackend};
+use eidetica::backend::{BackendError, BackendImpl, database::SqlxBackend};
 use sqlx::{AnyPool, Executor};
 
 fn postgres_url() -> String {
@@ -109,6 +109,49 @@ async fn surviving_pool_session_blocks_takeover_after_keeper_loss() {
     })
     .await
     .expect("takeover must succeed after all old sessions exit");
+}
+
+#[tokio::test]
+async fn stale_backend_reconnect_is_fenced_after_takeover() {
+    if !postgres_tests_enabled() {
+        return;
+    }
+    let (url, schema) = test_schema().await;
+    let first = connect_schema(&url, &schema).await;
+    let old_token = first.test_postgres_token().to_owned();
+    let admin = admin_pool().await;
+    let mut pids = first.test_postgres_pool_pids().await.unwrap();
+    pids.push(first.test_postgres_owner_pid().await.unwrap());
+    for pid in pids {
+        terminate(&admin, pid).await;
+    }
+
+    let second = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(owner) = SqlxBackend::test_connect_postgres_schema(&url, schema.clone()).await
+            {
+                break owner;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("takeover must succeed after every old session exits");
+    assert_ne!(old_token, second.test_postgres_token());
+
+    // SQLx retries connections rejected by after_connect until the pool's acquire
+    // timeout, so the supported backend operation must remain pending here.
+    let stale_reconnect = tokio::spawn(async move { first.all_roots().await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !stale_reconnect.is_finished(),
+        "the stale backend must not reconnect after the ownership token changes"
+    );
+    stale_reconnect.abort();
+    second
+        .all_roots()
+        .await
+        .expect("the replacement owner must remain usable");
 }
 
 #[tokio::test]

@@ -104,6 +104,27 @@ async fn sqlite_symlink_aliases_share_one_owner() {
     drop(first);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn sqlite_rejects_a_dangling_final_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("canonical.db");
+    let symlink_path = dir.path().join("alias.db");
+    std::os::unix::fs::symlink(&database_path, &symlink_path).unwrap();
+
+    if SqlxBackend::open_sqlite(&symlink_path).await.is_ok() {
+        panic!("a dangling final symlink must not claim a different sidecar");
+    }
+    assert!(
+        !database_path.exists(),
+        "rejecting the alias must not create its target"
+    );
+
+    SqlxBackend::open_sqlite(&database_path)
+        .await
+        .expect("the ordinary missing target filename must still be creatable");
+}
+
 #[tokio::test]
 async fn sqlite_url_preserves_an_encoded_question_mark_in_the_filename() {
     let dir = tempfile::tempdir().unwrap();
