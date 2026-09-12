@@ -100,6 +100,68 @@ async fn sqlite_url_preserves_an_encoded_question_mark_in_the_filename() {
     drop(first);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn sqlite_connects_to_the_claimed_canonical_file_after_alias_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("database.db");
+    let replacement_path = dir.path().join("replacement.db");
+    let alias_path = dir.path().join("database-alias.db");
+
+    sqlx::any::install_default_drivers();
+    for (path, value) in [
+        (&database_path, "claimed"),
+        (&replacement_path, "replacement"),
+    ] {
+        let url = format!("sqlite:{}?mode=rwc", path.display());
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE identity_marker (value TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO identity_marker (value) VALUES (?)")
+            .bind(value)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+    std::os::unix::fs::symlink(&database_path, &alias_path).unwrap();
+
+    let alias_for_hook = alias_path.clone();
+    SqlxBackend::testing_after_sqlite_claim(database_path.canonicalize().unwrap(), move |_| {
+        std::fs::remove_file(&alias_for_hook).unwrap();
+        std::os::unix::fs::symlink(&replacement_path, &alias_for_hook).unwrap();
+    });
+    let backend = SqlxBackend::connect_sqlite(&format!("sqlite:{}?mode=rw", alias_path.display()))
+        .await
+        .expect("the canonical file claimed before alias replacement must be opened");
+    let value: String = sqlx::query_scalar("SELECT value FROM identity_marker")
+        .fetch_one(backend.pool())
+        .await
+        .unwrap();
+    assert_eq!(value, "claimed");
+}
+
+#[tokio::test]
+async fn sqlite_repeated_mode_uses_the_last_value_when_claiming_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    let database_path = dir.path().join("repeated-mode.db");
+    let url = format!("sqlite:{}?mode=rw&mode=rwc", database_path.display());
+
+    SqlxBackend::connect_sqlite(&url)
+        .await
+        .expect("the final mode=rwc must let ownership pre-open create the database");
+    assert!(
+        database_path.exists(),
+        "the first mode=rw must not prevent the final mode=rwc from creating the database"
+    );
+}
+
 #[tokio::test]
 async fn sqlite_hard_links_share_one_owner() {
     let dir = tempfile::tempdir().unwrap();

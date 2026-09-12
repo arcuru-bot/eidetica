@@ -124,7 +124,17 @@ enum StorageOwner {
 struct SqliteStorage {
     owner: StorageOwner,
     connection_url: String,
+    #[cfg(feature = "testing")]
+    database_path: PathBuf,
 }
+
+#[cfg(all(feature = "sqlite", feature = "testing"))]
+type SqliteClaimHook = Box<dyn FnOnce(&Path) + Send>;
+
+#[cfg(all(feature = "sqlite", feature = "testing"))]
+static SQLITE_CLAIM_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<(PathBuf, SqliteClaimHook)>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(all(feature = "sqlite", unix, not(target_os = "solaris")))]
 struct SqliteOwnerLock {
@@ -165,7 +175,7 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
             source: None,
         }
     })?;
-    let (create, read_only) = sqlite_file_mode(&normalized_url);
+    let (_, create, read_only) = sqlite_file_mode(&normalized_url);
     let database = OpenOptions::new()
         .read(true)
         .write(!read_only)
@@ -179,10 +189,13 @@ fn prepare_sqlite(url: &str) -> Result<Option<SqliteStorage>> {
             ),
             source: None,
         })?;
+    let connection_url = sqlite_connection_url(&database_path, &normalized_url)?;
     match SqliteOwnerLock::try_lock(database) {
         Ok(lock) => Ok(Some(SqliteStorage {
             owner: StorageOwner::Sqlite { _lock: lock },
-            connection_url: normalized_url,
+            connection_url,
+            #[cfg(feature = "testing")]
+            database_path,
         })),
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             Err(BackendError::StorageAlreadyOwned {
@@ -292,19 +305,20 @@ fn sqlite_is_in_memory(url: &str) -> bool {
     let url = url
         .trim_start_matches("sqlite://")
         .trim_start_matches("sqlite:");
-    let (database, query) = url.split_once('?').unwrap_or((url, ""));
+    let (database, _) = url.split_once('?').unwrap_or((url, ""));
     database == ":memory:"
         || database == "file::memory:"
-        || url::form_urlencoded::parse(query.as_bytes())
-            .any(|(key, value)| key == "mode" && value == "memory")
+        || sqlite_file_mode(url).0.as_deref() == Some("memory")
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_file_mode(url: &str) -> (bool, bool) {
+fn sqlite_file_mode(url: &str) -> (Option<String>, bool, bool) {
     let query = url.split_once('?').map_or("", |(_, query)| query);
     let mode = url::form_urlencoded::parse(query.as_bytes())
-        .find_map(|(key, value)| (key == "mode").then(|| value.into_owned()));
+        .filter_map(|(key, value)| (key == "mode").then(|| value.into_owned()))
+        .last();
     (
+        mode.clone(),
         mode.as_deref() == Some("rwc"),
         mode.as_deref() == Some("ro"),
     )
@@ -332,6 +346,37 @@ fn canonical_database_path(path: &Path) -> io::Result<PathBuf> {
         io::Error::new(io::ErrorKind::InvalidInput, "database path has no parent")
     })?;
     Ok(parent.canonicalize()?.join(file_name))
+}
+
+#[cfg(feature = "sqlite")]
+fn sqlite_connection_url(path: &Path, original_url: &str) -> Result<String> {
+    let file_url = url::Url::from_file_path(path).map_err(|()| BackendError::SqlxError {
+        reason: format!(
+            "Failed to encode SQLite database path `{}` as a file URL",
+            path.display()
+        ),
+        source: None,
+    })?;
+    let query = original_url
+        .split_once('?')
+        .map_or(String::new(), |(_, query)| format!("?{query}"));
+    Ok(format!(
+        "sqlite:{}{query}",
+        &file_url.as_str()["file:".len()..]
+    ))
+}
+
+#[cfg(all(feature = "sqlite", feature = "testing"))]
+fn fire_sqlite_claim_hook(database_path: &Path) {
+    let hook = SQLITE_CLAIM_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("SQLite claim hook mutex must not be poisoned")
+        .take_if(|(path, _)| path == database_path)
+        .map(|(_, hook)| hook);
+    if let Some(hook) = hook {
+        hook(database_path);
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -378,6 +423,23 @@ impl SqlxBackend {
     /// Check if this backend is using PostgreSQL.
     pub fn is_postgres(&self) -> bool {
         self.kind == DbKind::Postgres
+    }
+
+    #[cfg(all(feature = "sqlite", feature = "testing"))]
+    #[doc(hidden)]
+    pub fn testing_after_sqlite_claim(
+        database_path: PathBuf,
+        hook: impl FnOnce(&Path) + Send + 'static,
+    ) {
+        let mut claim_hook = SQLITE_CLAIM_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("SQLite claim hook mutex must not be poisoned");
+        assert!(
+            claim_hook.is_none(),
+            "a SQLite claim hook is already registered"
+        );
+        *claim_hook = Some((database_path, Box::new(hook)));
     }
 
     #[cfg(all(feature = "postgres", feature = "testing"))]
@@ -574,6 +636,10 @@ impl SqlxBackend {
 
         let storage = prepare_sqlite(url)?;
         let is_in_memory = storage.is_none();
+        #[cfg(feature = "testing")]
+        if let Some(storage) = &storage {
+            fire_sqlite_claim_hook(&storage.database_path);
+        }
         let connection_url = storage
             .as_ref()
             .map_or(url, |storage| storage.connection_url.as_str());
