@@ -236,27 +236,24 @@ async fn direct_sqlite_owner_is_exclusive_within_one_process() {
 }
 
 #[tokio::test]
-async fn sqlite_backend_drop_closes_its_pool_clones() {
+async fn sqlite_testing_checkout_survives_backend_drop() {
     let dir = tempfile::tempdir().unwrap();
     let database_path = dir.path().join("stale-pool.db");
 
     let first = SqlxBackend::open_sqlite(&database_path).await.unwrap();
-    let stale_pool = first.test_sqlite_pool();
+    let connection = first.test_sqlite_checked_out_connection().await.unwrap();
     drop(first);
 
-    assert!(
-        stale_pool.is_closed(),
-        "backend drop must close every pool clone"
-    );
-    assert!(
-        stale_pool.acquire().await.is_err(),
-        "a cloned pool must not acquire after its backend owner drops"
-    );
-
-    let replacement = SqlxBackend::open_sqlite(&database_path)
+    // SQLx keeps an already checked-out connection usable after Pool::close().
+    // The production fence is the crate-private pool accessor; this test-only
+    // hook exercises SQLx's documented lifecycle without making that shape public.
+    let mut connection = connection.detach();
+    let (value,): (i64,) = sqlx::query_as("SELECT 1")
+        .fetch_one(&mut connection)
         .await
-        .expect("a replacement backend must claim storage after the stale pool is fenced");
-    drop(replacement);
+        .unwrap();
+    assert_eq!(value, 1);
+    drop(connection);
 }
 
 #[tokio::test(flavor = "multi_thread")]

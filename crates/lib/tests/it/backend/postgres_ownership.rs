@@ -112,23 +112,33 @@ async fn surviving_pool_session_blocks_takeover_after_keeper_loss() {
 }
 
 #[tokio::test]
-async fn stale_pool_reconnect_is_fenced_after_takeover() {
+async fn postgres_testing_checkout_blocks_takeover_until_released() {
     if !postgres_tests_enabled() {
         return;
     }
     let (url, schema) = test_schema().await;
     let first = connect_schema(&url, &schema).await;
-    let old_pool = first.test_postgres_pool();
-    let old_token = first.test_postgres_token().to_owned();
-    let admin = admin_pool().await;
-    let mut pids = first.test_postgres_pool_pids().await.unwrap();
-    pids.push(first.test_postgres_owner_pid().await.unwrap());
-    for pid in pids {
-        terminate(&admin, pid).await;
-    }
+    let connection = first.test_postgres_checked_out_connection().await.unwrap();
     drop(first);
 
-    let second = tokio::time::timeout(Duration::from_secs(5), async {
+    let error = match SqlxBackend::test_connect_postgres_schema(&url, schema.clone()).await {
+        Ok(_) => panic!("a checked-out old session must block takeover"),
+        Err(error) => error,
+    };
+    assert_owned(error);
+
+    // Pool::close does not revoke checked-out SQLx connections. This test-only
+    // hook exposes that documented behavior; production callers cannot obtain
+    // a pool or checked-out connection from SqlxBackend.
+    let mut connection = connection.detach();
+    let (value,): (i64,) = sqlx::query_as("SELECT 1")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(value, 1);
+    drop(connection);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(owner) = SqlxBackend::test_connect_postgres_schema(&url, schema.clone()).await
             {
@@ -138,16 +148,7 @@ async fn stale_pool_reconnect_is_fenced_after_takeover() {
         }
     })
     .await
-    .expect("takeover must succeed after every old session exits");
-    assert_ne!(old_token, second.test_postgres_token());
-
-    let stale_acquire = tokio::spawn(async move { old_pool.acquire().await });
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        !stale_acquire.is_finished(),
-        "the stale pool must reject every reconnect after the ownership token changes"
-    );
-    stale_acquire.abort();
+    .expect("takeover must succeed after the checked-out session closes");
 }
 
 #[tokio::test]

@@ -103,6 +103,14 @@ pub enum DbKind {
 ///
 /// For PostgreSQL, each backend instance can use its own schema for test isolation.
 /// Use `connect_postgres_isolated()` to create an isolated backend for testing.
+///
+/// ```compile_fail
+/// use eidetica::backend::database::SqlxBackend;
+///
+/// fn cannot_escape_pool(backend: SqlxBackend) {
+///     let _ = backend.pool();
+/// }
+/// ```
 pub struct SqlxBackend {
     pool: Option<AnyPool>,
     kind: DbKind,
@@ -113,12 +121,12 @@ pub struct SqlxBackend {
 
 impl Drop for SqlxBackend {
     fn drop(&mut self) {
-        if self.kind == DbKind::Sqlite {
-            // Mark every clone closed before releasing the ownership lock. Creating this
-            // future performs the close transition; waiting is unnecessary for the fence.
-            if let Some(pool) = self.pool.take() {
-                drop(pool.close());
-            }
+        // Mark every pool handle closed before releasing the ownership lock. Creating this
+        // future performs the close transition; waiting is unnecessary for the fence.
+        // Checked-out SQLx connections remain valid until returned, so PostgreSQL retains
+        // their shared advisory locks until then.
+        if let Some(pool) = self.pool.take() {
+            drop(pool.close());
         }
     }
 }
@@ -554,21 +562,31 @@ fn sqlite_path_url(path: &Path) -> Result<String> {
 }
 
 impl SqlxBackend {
-    /// Get a reference to the underlying pool.
-    pub fn pool(&self) -> &AnyPool {
+    /// Get a reference to the underlying pool for SQL backend modules.
+    pub(crate) fn pool(&self) -> &AnyPool {
         self.pool.as_ref().expect("SQL pool must exist until drop")
-    }
-
-    #[cfg(all(feature = "postgres", feature = "testing"))]
-    #[doc(hidden)]
-    pub fn test_postgres_pool(&self) -> AnyPool {
-        self.pool().clone()
     }
 
     #[cfg(all(feature = "sqlite", feature = "testing"))]
     #[doc(hidden)]
-    pub fn test_sqlite_pool(&self) -> AnyPool {
-        self.pool().clone()
+    pub async fn test_sqlite_checked_out_connection(
+        &self,
+    ) -> Result<sqlx::pool::PoolConnection<sqlx::Any>> {
+        self.pool()
+            .acquire()
+            .await
+            .sql_context("Failed to acquire SQLite test connection")
+    }
+
+    #[cfg(all(feature = "postgres", feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn test_postgres_checked_out_connection(
+        &self,
+    ) -> Result<sqlx::pool::PoolConnection<sqlx::Any>> {
+        self.pool()
+            .acquire()
+            .await
+            .sql_context("Failed to acquire PostgreSQL test connection")
     }
 
     /// Get the database kind.
