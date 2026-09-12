@@ -102,49 +102,30 @@ async fn sqlite_url_preserves_an_encoded_question_mark_in_the_filename() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn sqlite_connects_to_the_claimed_canonical_file_after_alias_replacement() {
+async fn sqlite_rejects_canonical_path_replacement_after_claim() {
     let dir = tempfile::tempdir().unwrap();
     let database_path = dir.path().join("database.db");
     let replacement_path = dir.path().join("replacement.db");
-    let alias_path = dir.path().join("database-alias.db");
+    std::fs::File::create(&database_path).unwrap();
+    std::fs::File::create(&replacement_path).unwrap();
 
-    sqlx::any::install_default_drivers();
-    for (path, value) in [
-        (&database_path, "claimed"),
-        (&replacement_path, "replacement"),
-    ] {
-        let url = format!("sqlite:{}?mode=rwc", path.display());
-        let pool = sqlx::any::AnyPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE identity_marker (value TEXT NOT NULL)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO identity_marker (value) VALUES (?)")
-            .bind(value)
-            .execute(&pool)
-            .await
-            .unwrap();
-        pool.close().await;
-    }
-    std::os::unix::fs::symlink(&database_path, &alias_path).unwrap();
-
-    let alias_for_hook = alias_path.clone();
+    let database_for_hook = database_path.clone();
     SqlxBackend::testing_after_sqlite_claim(database_path.canonicalize().unwrap(), move |_| {
-        std::fs::remove_file(&alias_for_hook).unwrap();
-        std::os::unix::fs::symlink(&replacement_path, &alias_for_hook).unwrap();
+        std::fs::rename(&replacement_path, &database_for_hook).unwrap();
     });
-    let backend = SqlxBackend::connect_sqlite(&format!("sqlite:{}?mode=rw", alias_path.display()))
-        .await
-        .expect("the canonical file claimed before alias replacement must be opened");
-    let value: String = sqlx::query_scalar("SELECT value FROM identity_marker")
-        .fetch_one(backend.pool())
-        .await
-        .unwrap();
-    assert_eq!(value, "claimed");
+    let error =
+        match SqlxBackend::connect_sqlite(&format!("sqlite:{}?mode=rw", database_path.display()))
+            .await
+        {
+            Ok(_) => panic!(
+                "a replaced canonical pathname must not connect under the old ownership lock"
+            ),
+            Err(error) => error,
+        };
+    assert!(
+        error.to_string().contains("no longer matches claimed file"),
+        "expected a claimed-file identity error, got {error:?}"
+    );
 }
 
 #[tokio::test]
